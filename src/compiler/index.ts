@@ -56,6 +56,15 @@ export interface CompileResult {
   csr?: boolean;
   /** innovation #29: the static analysis says this component needs the client bundle */
   needsClient?: boolean;
+  /** innovation #31: WHY it needs the client - the rules that fired, for the build report */
+  clientReasons?: string[];
+  /**
+   * innovation #31: shapes that MIGHT need JavaScript but the syntactic
+   * predicate cannot prove, on a component that otherwise ships none (an
+   * inline on* attribute, a javascript: URL, eval/new Function). Warnings,
+   * never errors: the document still ships, but the build says it out loud.
+   */
+  jsWarnings?: string[];
   /** the component exports `headers = { ... }` (per-route response headers) */
   headers?: Record<string, string>;
 }
@@ -325,11 +334,45 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   // Innovation #29: does anything in this component need the client bundle?
   // (The predicate documented at the csr flag above - it lives here because
   // it includes server actions, known only after the exports are extracted.)
-  const needsClient =
-    /\son:[a-z]+\s*=/.test(source) ||                                                    // event wiring in the template
-    /<form[\s>]/.test(source) ||                                                         // a POST form (its in-place adopt is the enhancement)
-    /\b(?:onMount|onCleanup|refresh|adopt|\$action|\$setState)\s*\(/.test(rawScript) || // lifecycle / client-only APIs
-    actionNames.size > 0;                                                                // a server action (form target or $action)
+  // Innovation #31: every rule that fires records its reason, so the build's
+  // lint report can tell the developer WHY a route carries the runtime.
+  const clientReasons: string[] = [];
+  if (/\son:[a-z]+\s*=/.test(source)) clientReasons.push('event wiring (on:)');                       // event wiring in the template
+  if (/<form[\s>]/.test(source)) clientReasons.push('a <form> (its in-place adopt is the enhancement)'); // a POST form
+  const lifecycle = rawScript.match(/\b(?:onMount|onCleanup|refresh|adopt|\$action|\$setState)\s*\(/);
+  if (lifecycle) clientReasons.push(`${lifecycle[0].replace(/\s*\($/, '')}()`);                        // lifecycle / client-only APIs
+  if (actionNames.size > 0) {                                                                          // a server action (form target or $action)
+    clientReasons.push(`server action${actionNames.size > 1 ? 's' : ''} (${[...actionNames].join(', ')})`);
+  }
+  const needsClient = clientReasons.length > 0;
+
+  // Innovation #31: the predicate is SYNTACTIC, so a component that ships no
+  // runtime is scanned for the shapes that would silently need one - an
+  // inline on* attribute or a javascript: URL cannot fire without the bundle,
+  // and eval/new Function is client code by definition. The route-level
+  // check in buildProject decides whether the warning is real (the document
+  // must actually be JS-free for the handler to be dead code).
+  const jsWarnings: string[] = [];
+  if (!needsClient) {
+    if (/\son[a-z]+\s*=\s*["'][^"']*["']/i.test(source)) {
+      jsWarnings.push('an inline on* attribute (e.g. onclick="...") - it cannot fire without the bundle; use on:click or set csr = true');
+    }
+    if (/javascript:/i.test(source)) {
+      jsWarnings.push('a javascript: URL - it needs the bundle to run; link to a real route');
+    }
+    if (/\b(?:eval|new Function)\s*\(/.test(rawScript)) {
+      jsWarnings.push('eval()/new Function() - client code the predicate cannot see');
+    }
+    // Browser-only globals. The script block is embedded inside render() on
+    // BOTH sides, and a JS-free document never ships it to the browser: most
+    // of these throw on the server (a loud 500), but the dual-existence
+    // names (the timers, navigator) run there and the client effect the
+    // developer wanted silently never happens. The predicate cannot see the
+    // intent either way - say it out loud.
+    if (/\b(?:document|window|localStorage|sessionStorage)\s*\.|\b(?:add|remove)EventListener\s*\(|\brequestAnimationFrame\s*\(|\bMutationObserver\b|\bnavigator\s*\.|\blocation\s*\.\s*(?:href|assign|replace|reload|pathname|search|hash|origin)\b|\b(?:setTimeout|setInterval)\s*\(/.test(rawScript)) {
+      jsWarnings.push('browser-only code (document./window./addEventListener/a timer/...) - a JS-free document never ships this script to the browser, so it throws on the server or runs there and never reaches the client; if the route needs the browser, set csr = true');
+    }
+  }
 
   const templateMatch = sourceNoBlocks.match(TEMPLATE_RE);
   // strip the <head> block so it never leaks into the page template
@@ -413,7 +456,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   const ssr = generateSSR(cleanScript, compiledTemplate, stateDeclsCode, ssrExports, compiledHead);
   const client = generateClient(cleanScript, compiledTemplate, stateDeclsCode, eventBindings, exportStmts, compiledHead);
 
-  return { ssr, client, stateKeys, actionNames: [...actionNames], style: scopedStyle, hasParams, usesContext, revalidate, csr, needsClient, headers };
+  return { ssr, client, stateKeys, actionNames: [...actionNames], style: scopedStyle, hasParams, usesContext, revalidate, csr, needsClient, clientReasons, jsWarnings, headers };
 }
 
 /**
@@ -930,6 +973,52 @@ export async function render(closes, children) {
 `;
 }
 
+/** The layout chain for a component (deepest first): every layout file in an
+ *  ancestor directory. Shared by compose(), the zero-JS decision (#29) and
+ *  the build report (#31). */
+const layoutsOf = (infos: RouteInfo[], idx: number): number[] =>
+  infos
+    .map((li, i) => ({ li, i }))
+    .filter(({ li }) => li.isLayout && isAncestorDir(li.filePath, infos[idx].filePath))
+    .sort((a, b) => b.li.filePath.length - a.li.filePath.length) // deepest first
+    .map(({ i }) => i);
+
+/**
+ * Innovation #29's decision as a pure function: does this route's document
+ * ship without the client bundle? Shared by the route table (csr: false) and
+ * the build report (#31), so the report can never disagree with the build.
+ */
+const routeShipsNoJs = (infos: RouteInfo[], compiled: CompileResult[], i: number): boolean => {
+  if (compiled[i].csr === true) return false;
+  if (compiled[i].needsClient) return false;
+  // a layout needing the client bundles every document under it: its
+  // handlers would be dead code in a runtime-less document
+  return !layoutsOf(infos, i).some((li) => compiled[li].needsClient);
+};
+
+/**
+ * The build's zero-JS lint report (innovation #31): one line per route with
+ * its verdict and the exact reason - which component in the chain needs the
+ * client bundle and why, or that nothing does. Pure: the same inputs the
+ * route table is built from.
+ */
+export function buildReport(infos: RouteInfo[], compiled: CompileResult[]): string[] {
+  return infos
+    .map((info, i) => ({ info, i }))
+    .filter(({ info }) => !info.isLayout && !info.isNotFound && !info.isError && !info.isApi && !info.isMiddleware)
+    .map(({ info, i }) => {
+      if (routeShipsNoJs(infos, compiled, i)) {
+        return `${info.routePath}  zero-JS  nothing in the chain needs the client`;
+      }
+      const why = [i, ...layoutsOf(infos, i)]
+        .filter((ci) => compiled[ci].needsClient)
+        .map((ci) => `${(compiled[ci].clientReasons ?? ['needs the client']).join(' + ')} in ${path.basename(infos[ci].filePath)}`)
+        .join('; ');
+      const forced = compiled[i].csr === true ? ' (csr = true forces the bundle)' : '';
+      return `${info.routePath}  client JS  ${why}${forced}`;
+    });
+}
+
 export async function buildProject(root: string, outDir: string): Promise<RouteInfo[]> {
   await fs.promises.mkdir(outDir, { recursive: true });
 
@@ -1016,19 +1105,10 @@ export async function buildProject(root: string, outDir: string): Promise<RouteI
     .map((info, i) => ({ info, i }))
     .filter(({ info }) => info.isApi);
 
-  // The layout chain for a component (deepest first): every layout file in
-  // an ancestor directory, shared by compose() and the zero-JS decision.
-  const layoutsOf = (idx: number): number[] =>
-    infos
-      .map((li, i) => ({ li, i }))
-      .filter(({ li }) => li.isLayout && isAncestorDir(li.filePath, infos[idx].filePath))
-      .sort((a, b) => b.li.filePath.length - a.li.filePath.length) // deepest first
-      .map(({ i }) => i);
-
   // Compose render chains: page wrapped by its layouts (deepest first)
   const compose = (idx: number): string => {
     let expr = `render_${idx}`;
-    for (const i of layoutsOf(idx)) {
+    for (const i of layoutsOf(infos, idx)) {
       expr = `(async (closes, children) => await render_${i}(closes, await (${expr})(closes, children)))`;
     }
     return expr;
@@ -1044,13 +1124,7 @@ export async function buildProject(root: string, outDir: string): Promise<RouteI
   // The route's render function still rides in the client bundle either
   // way, so client-side navigation and a static deploy's SPA fallback paint
   // it normally; only the document is JS-free.
-  const routeNoJs = (i: number): boolean => {
-    if (compiled[i].csr === true) return false;
-    if (compiled[i].needsClient) return false;
-    // a layout needing the client bundles every document under it: its
-    // handlers would be dead code in a runtime-less document
-    return !layoutsOf(i).some((li) => compiled[li].needsClient);
-  };
+  const routeNoJs = (i: number): boolean => routeShipsNoJs(infos, compiled, i);
 
   const serverImports = compiled
     .map((_, i) => {
@@ -1105,7 +1179,7 @@ export async function buildProject(root: string, outDir: string): Promise<RouteI
       // checked against the chain: a layout needing the bundle under a
       // csr = false page would ship dead handlers, so the build fails.
       if (compiled[i].csr === false) {
-        const needy = layoutsOf(i).find((li) => compiled[li].needsClient);
+        const needy = layoutsOf(infos, i).find((li) => compiled[li].needsClient);
         if (needy !== undefined) {
           throw new Error(
             `${info.filePath}: csr = false cannot ship under ${infos[needy].filePath} - the layout needs the client bundle ` +
@@ -1777,6 +1851,23 @@ setRefreshHook(async () => {
     await Promise.all(
       assets.map((a) => fs.promises.copyFile(path.join(publicDir, a), path.join(outPublic, a)))
     );
+  }
+
+  // Innovation #31: the build's zero-JS lint report - every route, its
+  // verdict, and the reason. Printed on every build (dev rebuilds included)
+  // so the decision is auditable instead of silent. The warnings are
+  // route-level on purpose: a danger pattern only matters when the document
+  // actually ships JS-free (under an interactive route the bundle is there
+  // and the handler works).
+  console.log('Rosefn zero-JS report:');
+  for (const line of buildReport(infos, compiled)) console.log('  ' + line);
+  for (const { info, i } of pages) {
+    if (!routeShipsNoJs(infos, compiled, i)) continue;
+    for (const ci of [i, ...layoutsOf(infos, i)]) {
+      for (const w of compiled[ci].jsWarnings ?? []) {
+        console.warn(`Rosefn warning: ${info.routePath} ships zero JavaScript but ${path.basename(infos[ci].filePath)} contains ${w}`);
+      }
+    }
   }
 
   return pages.map(({ info }) => info);
