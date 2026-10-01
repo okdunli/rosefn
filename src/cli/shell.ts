@@ -16,8 +16,18 @@ const OUT_DIR = path.join(process.cwd(), 'dist');
 
 let clientCache: { mtimeMs: number; source: string } | null = null;
 
+// P0 §1: the bundle mode the last build decided ('inline' | 'split'). In
+// split mode getClientSource() answers null - "nothing to inline" - so
+// every shell caller (documents, headers, the streaming tag) follows the
+// external-bundle path without a parameter threaded through each one.
+let splitMode = false;
+export function setBundleMode(mode: string): void {
+  splitMode = mode === 'split';
+}
+
 /** Read dist/client.js with an mtime-based cache (dev server rebuilds it). */
 export function getClientSource(): string | null {
+  if (splitMode) return null; // mode B: the document references /client.js
   const file = path.join(OUT_DIR, 'client.js');
   try {
     const st = fs.statSync(file);
@@ -143,7 +153,15 @@ if (__state.__route === window.location.pathname) {
 // img/font stay data: (assets are inlined), connect/form stay 'self'
 // (a rosefn app is one origin), and object/base/frame are locked down.
 // A route exporting `headers = { ... }` overrides any of this per route.
+// Mode B (P0 §1) and the edge's no-build case share the external shape:
+// /client.js plus a tiny inline bootstrap. There the hash covers exactly
+// the bootstrap's bytes and 'self' covers the external modules - still no
+// 'unsafe-inline' anywhere.
 let cspCache: { for: string | null; value: string } | null = null;
+// The exact bytes between the external bootstrap's script tags - the single
+// source of truth shared by the tag and the CSP hash, same contract as
+// inlineScript: the policy can never drift from what actually ships.
+const EXTERNAL_BOOTSTRAP = `\nimport { start, prefetch, postForm } from '/client.js';\n${BOOTSTRAP}`;
 // The exact bytes between the module script's tags - the single source of
 // truth shared by the tag and the CSP hash, so the policy can never drift
 // from what actually ships.
@@ -152,11 +170,12 @@ function inlineScript(client: string): string {
 }
 export function securityHeaders(client: string | null): Record<string, string> {
   if (!cspCache || cspCache.for !== client) {
-    // client === null only happens at the edge without a built client.js:
-    // the shell then references /client.js externally, so 'self' covers it
+    // client === null: split mode (or the edge without a built client.js).
+    // 'self' covers the external modules and chunks, the hash covers the
+    // inline bootstrap - the same no-unsafe-inline guarantee as inline mode.
     const scriptSrc = client
       ? `'sha256-${createHash('sha256').update(inlineScript(client), 'utf-8').digest('base64')}'`
-      : "'self'";
+      : `'self' 'sha256-${createHash('sha256').update(EXTERNAL_BOOTSTRAP, 'utf-8').digest('base64')}'`;
     cspCache = {
       for: client,
       value: `script-src ${scriptSrc}; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`,
@@ -222,7 +241,7 @@ function mergeHeadBlocks(blocks: string[]): string {
 export function clientScriptTag(client: string | null): string {
   return client
     ? `<script type="module">${inlineScript(client)}</script>`
-    : `<script type="module" src="/client.js"></script>\n<script type="module">\nimport { start, prefetch } from '/client.js';\n${BOOTSTRAP}</script>`;
+    : `<script type="module" src="/client.js"></script>\n<script type="module">${EXTERNAL_BOOTSTRAP}</script>`;
 }
 
 /**

@@ -14,6 +14,11 @@
 // bodiless 304. Unknown paths fall back to index.html: the boot script
 // detects the route mismatch and client-renders the requested route, so
 // dynamic routes work without a server round-trip.
+//
+// Ops (innovation #34): every request writes one access line to stdout,
+// /metrics answers the Prometheus text format, and UPSTREAM=<url> turns the
+// binary into the static half of a hybrid deploy - POSTs (server actions)
+// and unbaked /api routes are reverse-proxied to the Node/edge backend.
 package main
 
 import (
@@ -25,10 +30,15 @@ import (
 	"hash/fnv"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 //go:embed all:dist
@@ -248,7 +258,163 @@ func headersFor(pathname string) map[string]string {
 	return out
 }
 
+// ---- observability (innovation #34) ---------------------------------------
+//
+// The binary used to answer requests and say nothing: no access log, no
+// metrics, no error trail - fine for a demo, unshippable in production.
+// Everything below is stdlib: one ResponseWriter wrapper, atomic counters,
+// one text endpoint. ponytail: counters + a duration sum/count pair (an
+// average, not a histogram - a scrape endpoint is not where you burn memory
+// on buckets nobody asked for; add a histogram when a real dashboard asks).
+
+// statusWriter captures what the handler wrote: http.ResponseWriter exposes
+// neither the status code nor the byte count, and the access log needs both.
+type statusWriter struct {
+	http.ResponseWriter
+	status  int
+	bytes   int
+	proxied bool
+}
+
+func (s *statusWriter) WriteHeader(code int) { s.status = code; s.ResponseWriter.WriteHeader(code) }
+
+func (s *statusWriter) Write(b []byte) (int, error) {
+	if s.status == 0 {
+		s.status = http.StatusOK
+	}
+	n, err := s.ResponseWriter.Write(b)
+	s.bytes += n
+	return n, err
+}
+
+var (
+	reqTotal  sync.Map // status code -> *atomic.Uint64
+	durSumNS  atomic.Int64
+	reqCount  atomic.Int64
+	inFlight  atomic.Int64
+	bootTime  = time.Now()
+	accessLog = log.New(os.Stdout, "", 0) // one greppable line per request
+)
+
+func countStatus(code int) {
+	v, _ := reqTotal.LoadOrStore(code, &atomic.Uint64{})
+	v.(*atomic.Uint64).Add(1)
+}
+
+// observe wraps the handler: in-flight gauge, status/duration counters, and
+// the access line. /metrics is counted like any other request - scraping is
+// traffic too, and hiding it just loses data.
+func observe(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w}
+		inFlight.Add(1)
+		defer inFlight.Add(-1)
+		start := time.Now()
+		next(sw, r)
+		code := sw.status
+		if code == 0 {
+			code = http.StatusOK
+		}
+		countStatus(code)
+		reqCount.Add(1)
+		durSumNS.Add(time.Since(start).Nanoseconds())
+		via := ""
+		if sw.proxied {
+			via = " via=upstream"
+		}
+		accessLog.Printf("%s %s %s %d %dB %s%s",
+			start.UTC().Format(time.RFC3339), r.Method, r.URL.Path, code, sw.bytes,
+			time.Since(start).Round(time.Microsecond), via)
+	}
+}
+
+// metricsHandler answers the Prometheus text exposition format (v0.0.4):
+// requests per status code, a duration sum/count pair (average = sum/count),
+// the in-flight gauge and uptime - everything a scrape needs to alert on.
+func metricsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	var b strings.Builder
+	b.WriteString("# HELP rosefn_http_requests_total Total HTTP requests by status code.\n")
+	b.WriteString("# TYPE rosefn_http_requests_total counter\n")
+	codes := make([]int, 0, 8)
+	reqTotal.Range(func(k, _ any) bool { codes = append(codes, k.(int)); return true })
+	sort.Ints(codes) // sync.Map iterates in random order; a scrape must be stable
+	for _, c := range codes {
+		v, _ := reqTotal.Load(c)
+		fmt.Fprintf(&b, "rosefn_http_requests_total{code=\"%d\"} %d\n", c, v.(*atomic.Uint64).Load())
+	}
+	b.WriteString("# HELP rosefn_http_request_duration_seconds Request duration sum and count.\n")
+	b.WriteString("# TYPE rosefn_http_request_duration_seconds summary\n")
+	fmt.Fprintf(&b, "rosefn_http_request_duration_seconds_sum %.6f\n", float64(durSumNS.Load())/1e9)
+	fmt.Fprintf(&b, "rosefn_http_request_duration_seconds_count %d\n", reqCount.Load())
+	b.WriteString("# HELP rosefn_http_requests_in_flight Requests currently being served.\n")
+	b.WriteString("# TYPE rosefn_http_requests_in_flight gauge\n")
+	fmt.Fprintf(&b, "rosefn_http_requests_in_flight %d\n", inFlight.Load())
+	b.WriteString("# HELP rosefn_uptime_seconds Process uptime.\n")
+	b.WriteString("# TYPE rosefn_uptime_seconds gauge\n")
+	fmt.Fprintf(&b, "rosefn_uptime_seconds %.3f\n", time.Since(bootTime).Seconds())
+	_, _ = w.Write([]byte(b.String()))
+}
+
+// ---- the hybrid deploy (innovation #34, consultant P0 §3, 方案B) ----------
+//
+// The binary is immutable by design: it serves exactly what the build baked.
+// A real app also has live routes - POST server actions, /api handlers that
+// read a database, middleware that reads cookies. Those need a JS runtime,
+// and the honest answer is NOT to bolt one on (goja would double the binary
+// and re-implement a language): point the binary at the Node server and let
+// each half do what it is good at.
+//
+//	UPSTREAM=http://dynamic:3000 ./rosefn-server
+//
+// With UPSTREAM set, everything the static half cannot answer itself is
+// reverse-proxied there: any non-GET/HEAD method (server actions, form
+// POSTs) and any /api path without a baked body. Without UPSTREAM the
+// behavior is exactly what it always was - 405 for POSTs, the JSON 404 for
+// unbaked APIs - so the pure-static deploy keeps its contract byte for byte.
+
+var upstreamProxy *httputil.ReverseProxy
+
+func setupUpstream() {
+	u := os.Getenv("UPSTREAM")
+	if u == "" {
+		return
+	}
+	target, err := url.Parse(u)
+	if err != nil {
+		log.Fatalf("Rosefn: UPSTREAM %q is not a URL: %v", u, err)
+	}
+	upstreamProxy = httputil.NewSingleHostReverseProxy(target)
+	upstreamProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		// The error trail: a dead backend must be visible in the logs, not
+		// silently turned into a 502 nobody can explain.
+		log.Printf("Rosefn error: upstream %s failed for %s %s: %v", u, r.Method, r.URL.Path, err)
+		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+	}
+	log.Printf("Rosefn: hybrid mode - non-GET requests and unbaked /api routes proxy to %s", u)
+}
+
+func proxyUpstream(w http.ResponseWriter, r *http.Request) {
+	if sw, ok := w.(*statusWriter); ok {
+		sw.proxied = true // the access line says where the answer came from
+	}
+	upstreamProxy.ServeHTTP(w, r)
+}
+
 func handler(w http.ResponseWriter, r *http.Request) {
+	// /metrics is this binary's own endpoint (innovation #34): it must be
+	// answered before the file candidates, or the SPA fallback would hand
+	// the HTML shell to every scraper.
+	if r.URL.Path == "/metrics" {
+		metricsHandler(w, r)
+		return
+	}
+	// Hybrid mode (innovation #34): the static half cannot run a POST, so a
+	// server action or a form submit goes to the Node/edge backend.
+	if upstreamProxy != nil && r.Method != http.MethodGet && r.Method != http.MethodHead {
+		proxyUpstream(w, r)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -267,8 +433,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 	// The /api namespace answers JSON, never the SPA shell: an API client that
 	// hits an unbaked route must not receive HTML. Live handlers run on the
-	// Node/edge server; this binary only carries GET bodies baked at build.
+	// Node/edge server; this binary only carries GET bodies baked at build -
+	// unless UPSTREAM points at that server, in which case the live handler
+	// answers (innovation #34).
 	if p == "/api" || strings.HasPrefix(p, "/api/") {
+		if upstreamProxy != nil {
+			proxyUpstream(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":"api route is not baked into this binary; run it on the Node or edge server"}`))
@@ -283,11 +455,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	loadRouteHeaders()
+	setupUpstream()
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	http.HandleFunc("/", handler)
+	http.HandleFunc("/", observe(handler))
 	log.Printf("Rosefn single-binary server listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }

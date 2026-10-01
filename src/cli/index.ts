@@ -7,7 +7,7 @@ import * as path from 'path';
 import * as zlib from 'zlib';
 import { pathToFileURL } from 'url';
 import { buildProject, type RouteInfo } from '../compiler/index.js';
-import { getHtmlShell, getClientSource, shellOpen, clientScriptTag, securityHeaders } from './shell.js';
+import { getHtmlShell, getClientSource, shellOpen, clientScriptTag, securityHeaders, setBundleMode } from './shell.js';
 
 // --- wire performance: compression + conditional caching (stdlib only) ---
 // The Go binary already compresses; the Node server must match it or the
@@ -114,7 +114,10 @@ async function loadServer(): Promise<any> {
 }
 
 async function build(): Promise<void> {
-  const routes = await buildProject(EXAMPLE_DIR, OUT_DIR);
+  // P0 §1: the build reports the bundle mode ('inline' | 'split') so the
+  // shell follows it for every document, header and streaming tag it emits
+  const { routes, bundle } = await buildProject(EXAMPLE_DIR, OUT_DIR);
+  setBundleMode(bundle);
   const skipped = await prerender(routes);
   // The broken-route manifest: the server reads it to pick the buffered path
   // for these routes, so their real 500 status survives (a flushed response

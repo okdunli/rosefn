@@ -7,7 +7,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { pathToFileURL } from 'url';
+import { pathToFileURL, fileURLToPath } from 'url';
 import * as esbuild from 'esbuild';
 
 const COMPONENT_RE = /<script>([\s\S]*?)<\/script>/;
@@ -56,6 +56,8 @@ export interface CompileResult {
   csr?: boolean;
   /** the component exports `prefetch = 'off' | 'hover' | 'viewport' | 'all'` (app-global link-prefetch strategy) */
   prefetch?: string;
+  /** the component exports `bundle = 'inline' | 'split'` (app-global client bundle mode, P0 §1) */
+  bundle?: string;
   /** innovation #29: the static analysis says this component needs the client bundle */
   needsClient?: boolean;
   /** innovation #31: WHY it needs the client - the rules that fired, for the build report */
@@ -282,6 +284,19 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   if (prefetch && !['off', 'hover', 'viewport', 'all'].includes(prefetch)) {
     throw new Error(`${filePath}: export const prefetch must be 'off', 'hover', 'viewport' or 'all'`);
   }
+  // P0 §1 (consultant report): the bundle mode - the fix for the large-app
+  // architecture gap. 'inline' (the default) is the single-document mode:
+  // the whole client bundle rides inside the HTML, one request, zero
+  // hydration. 'split' is mode B: every route module becomes its own chunk,
+  // loaded on demand, and the document references /client.js externally -
+  // the document stops growing with the app. Declared once (the root
+  // layout), validated like headers because a typo would silently keep the
+  // wrong mode.
+  const bundleMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+bundle\s*=\s*['"`](\w+)['"`]\s*;?/);
+  const bundle = bundleMatch ? bundleMatch[1] : undefined;
+  if (bundle && !['inline', 'split'].includes(bundle)) {
+    throw new Error(`${filePath}: export const bundle must be 'inline' or 'split'`);
+  }
   // Innovation #29: the compiler decides zero-JS, not the developer. This is
   // the same "does anything here need the client bundle" predicate that
   // innovation #25 used to REFUSE `csr = false`: event wiring in the
@@ -467,7 +482,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   const ssr = generateSSR(cleanScript, compiledTemplate, stateDeclsCode, ssrExports, compiledHead);
   const client = generateClient(cleanScript, compiledTemplate, stateDeclsCode, eventBindings, exportStmts, compiledHead);
 
-  return { ssr, client, stateKeys, actionNames: [...actionNames], style: scopedStyle, hasParams, usesContext, revalidate, csr, prefetch, needsClient, clientReasons, jsWarnings, headers };
+  return { ssr, client, stateKeys, actionNames: [...actionNames], style: scopedStyle, hasParams, usesContext, revalidate, csr, prefetch, bundle, needsClient, clientReasons, jsWarnings, headers };
 }
 
 /**
@@ -1030,7 +1045,7 @@ export function buildReport(infos: RouteInfo[], compiled: CompileResult[]): stri
     });
 }
 
-export async function buildProject(root: string, outDir: string): Promise<RouteInfo[]> {
+export async function buildProject(root: string, outDir: string): Promise<{ routes: RouteInfo[]; bundle: string }> {
   await fs.promises.mkdir(outDir, { recursive: true });
 
   // stale intermediates from an older build layout must not survive into the
@@ -1084,8 +1099,11 @@ export async function buildProject(root: string, outDir: string): Promise<RouteI
   await fs.promises.rm(buildDir, { recursive: true, force: true });
   await fs.promises.mkdir(buildDir, { recursive: true });
 
-  // Shared runtime module, bundled once into client and server output
-  const runtimeEntry = path.join(root, '..', 'src', 'runtime', 'index.ts');
+  // Shared runtime module, bundled once into client and server output.
+  // The runtime ships WITH THE COMPILER, not with the app: resolve it from
+  // this file's own location so any project root builds (the in-repo
+  // example used to be the only layout that worked).
+  const runtimeEntry = fileURLToPath(new URL('../runtime/index.ts', import.meta.url));
   await esbuild.build({
     entryPoints: [runtimeEntry],
     bundle: true,
@@ -1124,6 +1142,25 @@ export async function buildProject(root: string, outDir: string): Promise<RouteI
     }
     return expr;
   };
+
+  // P0 §1 (consultant report): mode B. `export const bundle = 'split'`
+  // (declared once, the root layout) turns every route's client module into
+  // its own chunk: the document references /client.js externally instead of
+  // inlining the whole app, so it stops growing with the route count.
+  // 'inline' (the default) is the untouched single-document mode. First
+  // declaration wins, like the prefetch strategy.
+  const bundleMode = compiled.find((c) => c.bundle)?.bundle ?? 'inline';
+  const split = bundleMode === 'split';
+  // The chain a route's chunk graph must load: the page first, then its
+  // layouts deepest-first - exactly compose()'s nesting order, so the
+  // runtime composition is semantically identical to mode A's.
+  const chainOf = (idx: number): number[] => [idx, ...layoutsOf(infos, idx)];
+  // Mode B's loader expression: literal dynamic imports (esbuild needs the
+  // paths statically analyzable to emit one chunk per module), composed at
+  // runtime by loadChain() in the client entry.
+  const loaderInner = (idx: number): string =>
+    `load: () => loadChain([${chainOf(idx).map((i) => `() => import('./comp-${i}.client.js')`).join(', ')}])`;
+  const loaderOf = (idx: number): string => `{ ${loaderInner(idx)} }`;
 
   // Innovation #29: the compiler decides zero-JS, not the developer. A route
   // ships no client bundle - no runtime, no state script, zero JavaScript -
@@ -1167,13 +1204,13 @@ export async function buildProject(root: string, outDir: string): Promise<RouteI
   // pages/404.rose renders for unmatched routes (SSR + client), wrapped in
   // its layouts like any other page; absent -> the built-in plain 404.
   const nfIdx = infos.findIndex((info) => info.isNotFound);
-  const notFoundRender = nfIdx >= 0 ? compose(nfIdx) : 'null';
+  const notFoundRender = nfIdx >= 0 ? (split ? loaderOf(nfIdx) : compose(nfIdx)) : 'null';
 
   // pages/500.rose renders for routes whose render throws (a dead $data
   // source, a bad expression): the page degrades instead of crashing the
   // response; absent -> the built-in plain 500.
   const errIdx = infos.findIndex((info) => info.isError);
-  const errorRender = errIdx >= 0 ? compose(errIdx) : 'null';
+  const errorRender = errIdx >= 0 ? (split ? loaderOf(errIdx) : compose(errIdx)) : 'null';
 
   // pages/_middleware.rose: the request interceptor (absent -> null).
   const middlewareIdx = infos.findIndex((info) => info.isMiddleware);
@@ -1564,15 +1601,18 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
   });
 
   // api routes and the middleware have no client module: they are
-  // server-only handlers / interceptors
-  const clientImports = compiled
+  // server-only handlers / interceptors. Mode B has no static client
+  // imports at all - every route module arrives in its own chunk.
+  const clientImports = split ? '' : compiled
     .map((_, i) => ({ i }))
     .filter(({ i }) => !infos[i].isApi && !infos[i].isMiddleware)
     .map(({ i }) => `import { render as render_${i} } from './comp-${i}.client.js';`)
     .join('\n');
 
   const clientRoutes = pages
-    .map(({ info, i }) => `{ pattern: '${info.pattern}', render: ${compose(i)} }`)
+    .map(({ info, i }) => (split
+      ? `{ pattern: '${info.pattern}', ${loaderInner(i)} }`
+      : `{ pattern: '${info.pattern}', render: ${compose(i)} }`))
     .join(',\n  ');
 
   // P1 (consultant report): the app-global prefetch strategy, declared once
@@ -1594,6 +1634,29 @@ const routes = [
   ${clientRoutes}
 ];
 
+// === Mode B (P0 §1): lazy route chunks ===
+// Split mode's registry entries arrive without a render function: loadChain
+// loads the route's module graph (the page plus its layouts, one chunk per
+// module, the shared runtime in its own vendor chunk) in parallel and
+// composes it at runtime - the exact nesting compose() built at compile
+// time for inline mode. getRender memoizes the composed function on the
+// entry, so a chunk loads once per session; inline mode's entries are the
+// render functions themselves, so the helper is a pass-through there.
+const loadChain = async (loaders) => {
+  const mods = await Promise.all(loaders.map((load) => load()));
+  let expr = (closes, children) => mods[0].render(closes, children);
+  for (let k = 1; k < mods.length; k++) {
+    const inner = expr;
+    const outer = mods[k].render;
+    expr = async (closes, children) => await outer(closes, await inner(closes, children));
+  }
+  return { render: expr };
+};
+const getRender = async (route) => {
+  if (typeof route === 'function') return route; // inline mode: the render itself
+  return (route.render ??= (await route.load()).render);
+};
+
 // pages/404.rose (with its layouts) or null -> built-in plain 404
 const notFound = ${notFoundRender};
 
@@ -1603,10 +1666,12 @@ const notFound = ${notFoundRender};
 const errorPage = ${errorRender};
 
 // Paint a fallback page (404/500) into the container, wired like any render.
-async function paintFallback(container, render, builtin) {
+async function paintFallback(container, page, builtin) {
   resetEffects();
   clearRequestState();
   clearMounts(); // a failed render leaves stale mounts behind
+  // inline mode passes the render itself; split mode passes a loader
+  const render = page ? await getRender(page) : null;
   if (render) {
     const closes = [];
     const html = await render(closes, '');
@@ -1686,7 +1751,8 @@ export function prefetch(pathname, source = 'hover') {
       const { result, state, mounts, cleanups } = await isolateStateAsync(async () => {
         applyParams(route, pathname);
         const closes = [];
-        const html = await route.render(closes, '');
+        const render = await getRender(route); // split mode: loads the route's chunk here
+        const html = await render(closes, '');
         return { html, closes };
       });
       const entry = { ...result, state, mounts, cleanups };
@@ -1810,7 +1876,8 @@ export async function start(container, pathname, initial) {
       const closes = [];
       let html;
       try {
-        html = await route.render(closes, '');
+        const render = await getRender(route); // split mode: loads the route's chunk here
+        html = await render(closes, '');
       } catch {
         // the route itself is broken: degrade to pages/500.rose (or the
         // built-in plain 500) instead of leaving the container empty
@@ -1849,7 +1916,8 @@ export async function adopt(container, html, stateJson) {
       applyParams(route, location.pathname);
       const closes = [];
       try {
-        await route.render(closes, '');
+        const render = await getRender(route); // split mode: loads the route's chunk here
+        await render(closes, '');
       } catch {
         // the adopted response's route is broken (e.g. the action's page
         // throws): keep the swapped DOM but skip wiring it
@@ -1877,15 +1945,39 @@ setRefreshHook(async () => {
 });
 `;
   await fs.promises.writeFile(path.join(buildDir, 'client-entry.js'), clientEntry);
-  await esbuild.build({
-    entryPoints: [path.join(buildDir, 'client-entry.js')],
-    bundle: true,
-    outfile: path.join(outDir, 'client.js'),
-    format: 'esm',
-    platform: 'browser',
-    minify: true,
-    write: true,
-  });
+  if (split) {
+    // Mode B (P0 §1): esbuild code splitting. One chunk per route module,
+    // the shared runtime in its own vendor chunk (both content-hashed, so a
+    // deploy that does not touch a route leaves its chunk byte-identical and
+    // the browser's cached copy stays valid), and the entry at a STABLE
+    // /client.js - the document's only script reference, revalidated with a
+    // weak ETag instead of being inlined. Stale chunks from an older build
+    // are removed first: a dead hash is dead weight in dist and in the Go
+    // binary's embed.
+    await fs.promises.rm(path.join(outDir, 'chunks'), { recursive: true, force: true });
+    await esbuild.build({
+      entryPoints: [path.join(buildDir, 'client-entry.js')],
+      bundle: true,
+      format: 'esm',
+      platform: 'browser',
+      minify: true,
+      splitting: true,
+      outdir: outDir,
+      entryNames: 'client',
+      chunkNames: 'chunks/[name]-[hash]',
+      write: true,
+    });
+  } else {
+    await esbuild.build({
+      entryPoints: [path.join(buildDir, 'client-entry.js')],
+      bundle: true,
+      outfile: path.join(outDir, 'client.js'),
+      format: 'esm',
+      platform: 'browser',
+      minify: true,
+      write: true,
+    });
+  }
 
   // the deploy dir now holds only real artifacts
   await fs.promises.rm(buildDir, { recursive: true, force: true });
@@ -1917,7 +2009,7 @@ setRefreshHook(async () => {
     }
   }
 
-  return pages.map(({ info }) => info);
+  return { routes: pages.map(({ info }) => info), bundle: bundleMode };
 }
 
 async function scanRoseFiles(root: string): Promise<string[]> {
