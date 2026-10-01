@@ -1,0 +1,26 @@
+{
+  "name": "rosefn",
+  "version": "0.0.1",
+  "description": "The next-century web framework: zero-hydration, compile-time reactivity, single binary deploy",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/cli/index.ts dev",
+    "build": "tsx src/cli/index.ts build",
+    "preview": "tsx src/cli/index.ts preview",
+    "benchmark": "tsx benchmark.ts",
+    "test": "tsx src/cli/index.ts build && tsx test-client.ts",
+    "test:e2e": "tsx test-e2e.ts",
+    "test:edge": "tsx test-edge.ts",
+    "test:go": "tsx src/cli/index.ts build && node test-go.mjs",
+    "build:go": "go build -o rosefn-server ."
+  },
+  "dependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "jsdom": "^29.1.1",
+    "tsx": "^4.7.0",
+    "typescript": "^5.6.0"
+  }
+}

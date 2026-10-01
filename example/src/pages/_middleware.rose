@@ -1,0 +1,35 @@
+<script>
+  // The request interceptor: runs before every render on the server -
+  // pages, POSTs and api calls alike. Returning a Response short-circuits
+  // the whole request (a redirect, an auth wall, a rewrite); returning
+  // nothing continues, and getContext() hands this request's bag to $data,
+  // server actions and api handlers. This is the Next.js middleware /
+  // SvelteKit hooks.handle / Django middleware job, in one file, with the
+  // same Web-standard Request the edge adapter passes.
+  export async function handle(request) {
+    const { pathname } = new URL(request.url);
+    const session = request.headers.get('cookie')?.match(/(?:^|;\s*)session=([^;]+)/)?.[1];
+    // a thorn: /admin and /vault are walled off without a session cookie.
+    // /admin is the deep wall: its page reads getContext(), so the gated
+    // content is $data - even a static deploy (the Go binary) shows only
+    // the public shell. /vault is the plain wall: its content is public,
+    // the gate lives entirely here - which is why the build must never
+    // bake it (a cookie-less request is walled, so the route is not static)
+    if ((pathname === '/admin' || pathname === '/vault') && !session) {
+      return new Response(null, { status: 302, headers: { location: '/sign' } });
+    }
+    // i18n negotiation (innovation #27): /about with a REAL Accept-Language
+    // preference redirects to the visitor's language version - the Next.js
+    // localeDetection / Qwik City i18n job, in the middleware the framework
+    // already runs. No preference (absent, or the * wildcard Node's own
+    // fetch sends) -> the plain page renders; a preference that matches no
+    // dictionary serves the default locale in place. Vary keeps caches
+    // honest: one language's redirect must never be served to another.
+    const best = bestLocale(request.headers.get('accept-language'));
+    if (pathname === '/about' && best) {
+      return new Response(null, { status: 302, headers: { location: '/' + best + '/about', vary: 'Accept-Language' } });
+    }
+    // the rest of the request sees who is asking
+    getContext().user = session ? { name: session } : null;
+  }
+</script>

@@ -1,0 +1,33 @@
+<script>
+  let links = $state([
+    { href: '/', label: 'Home' },
+    { href: '/about', label: 'About' },
+    { href: '/en/about', label: 'About (i18n)' },
+    { href: '/blog/1', label: 'Blog 1' },
+    { href: '/blog/2', label: 'Blog 2' },
+    { href: '/thorn', label: 'Thorn' },
+    { href: '/sign', label: 'Sign' }
+  ]);
+</script>
+
+<head>
+  <title>Rosefn</title>
+  <meta name="generator" content="Rosefn">
+</head>
+
+<div>
+  <header class="rh">
+    <strong class="rb">🌹 Rosefn</strong>
+    <nav class="rn">
+      {#each links() as link}
+        <a href={link.href}>{link.label}</a>
+      {/each}
+    </nav>
+  </header>
+  <main>
+    <slot />
+  </main>
+  <footer class="rf">
+    Rosefn — zero-hydration, compile-time reactivity
+  </footer>
+</div>
