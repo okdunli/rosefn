@@ -1,0 +1,8 @@
+{
+  "about.title": "About, localized",
+  "about.heading": "This page speaks your language",
+  "about.body": "Every string on this page came from src/locales/en.json. The route picked the dictionary from the URL's language segment, and the switcher below repaints from the inlined bundle - zero requests, no navigation.",
+  "about.greeting": "Hello, {name} - this sentence was translated with a variable.",
+  "about.current": "Current language",
+  "about.switch": "Switch language"
+}

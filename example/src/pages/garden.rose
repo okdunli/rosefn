@@ -1,0 +1,27 @@
+<script>
+  // Pure content: no $state, no events, no lifecycle - and the document
+  // proves it. `csr = false` (innovation #25) keeps the client bundle OUT
+  // of this document entirely: no runtime, no state script, zero
+  // JavaScript for whoever lands here. The route's render function still
+  // rides in the bundle, so a client-side navigation from an interactive
+  // page paints it instantly and a static deploy's SPA fallback can
+  // render it too - only the DOCUMENT is JS-free.
+  export const csr = false;
+
+  // $data is server-side: it resolves during the render, on the baked and
+  // the on-demand path alike, with no client code involved.
+  let bloomed = $data(async () => 'in full bloom');
+  // The `@thorn` token is rewritten by the demo plugin (example/rosefn.config.js)
+  // before compilation - the source on disk keeps the token.
+  let mark = $data(async () => '@thorn');
+</script>
+
+<head>
+  <title>The Garden - Rosefn</title>
+  <meta name="description" content="A pure content page that ships zero JavaScript.">
+</head>
+
+<h1>The Garden</h1>
+<p>This page is {bloomed()} {mark()} - and it shipped without a single byte of JavaScript.</p>
+<p>No bundle, no state script, no hydration: the document is the whole cost, the way a static site would be - with the framework's data, layouts and head blocks still behind it.</p>
+<p><a href="/">Back to the gate</a></p>

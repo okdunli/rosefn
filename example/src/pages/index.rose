@@ -1,0 +1,84 @@
+<script>
+  // Server-side store, hoisted to module scope: shared across requests, the
+  // action, and the page state below. (A real app would use a database.)
+  export const store = { likes: 41 };
+
+  let count = $state(0);
+  let name = $state('Rosefn');
+  let items = $state(['Performance', 'Simplicity', 'Zero-hydration']);
+  let showFeatures = $state(true);
+  let guests = $state(['🌹 the founder']);
+  let likes = $state(store.likes);
+
+  function increment() { $setState('count', count() + 1); }
+  function addItem() { $setState('items', [...items(), 'Item ' + items().length + 1]); }
+  function toggleFeatures() { $setState('showFeatures', !showFeatures()); }
+  // Zero-request form: no POST, no fetch - the action runs client-side and
+  // fine-grained reactivity repaints only what changed. (htmx-style stacks
+  // pay one server round-trip per submit.)
+  function signGuestbook(e) {
+    e.preventDefault();
+    const guest = String(new FormData(e.target).get('name') || '').trim();
+    if (guest) $setState('guests', [guest, ...guests()]);
+    e.target.reset();
+  }
+  // A widget whose data source is offline. Inside {#boundary} its throw is
+  // contained: only this section degrades, the rest of the page renders.
+  function weather() {
+    throw new Error('weather service unreachable');
+  }
+
+  // A named server action, reachable from any event handler:
+  // on:click={like} below compiles to $action('like') - one POST, one
+  // request, in-place adopt, fine-grained patch. Server-only: this body
+  // never ships to the client bundle (only forms work without JS).
+  export async function like() {
+    store.likes += 1;
+    return { likes: store.likes };
+  }
+</script>
+
+<style>
+  .rcard { background: #fff0f5; border-left: 4px solid #e91e63; padding: 0.75rem 1rem; border-radius: 0 6px 6px 0; }
+</style>
+
+<div>
+  <h1>Welcome to {name()} 🌹</h1>
+  <p>Count: <strong>{count()}</strong></p>
+  <button on:click={increment}>Increment</button>
+  <button on:click={toggleFeatures}>{showFeatures() ? 'Hide' : 'Show'} Features</button>
+
+  {#if showFeatures()}
+  <h2>Features</h2>
+  <ul>
+    {#each items() as item}
+      <li>{item}</li>
+    {/each}
+  </ul>
+  <button on:click={addItem}>Add Item</button>
+  {/if}
+
+  <h2>Guestbook</h2>
+  <form on:submit={signGuestbook}>
+    <input name="name" placeholder="Your name" aria-label="Guestbook name">
+    <button type="submit">Sign</button>
+  </form>
+  <ul>
+    {#each guests() as guest}
+      <li>{guest}</li>
+    {/each}
+  </ul>
+
+  <h2>Likes</h2>
+  <div class="rcard">
+    <p>🌹 <strong>{likes()}</strong> likes</p>
+    <button on:click={like}>Like</button>
+  </div>
+
+  {#boundary}
+  <section>
+    <h2>Weather</h2>
+    <p>{weather()}</p>
+  </section>
+  {/boundary}
+</div>

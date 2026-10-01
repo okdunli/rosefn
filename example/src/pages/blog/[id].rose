@@ -1,0 +1,21 @@
+<script>
+  export const params = { id: ['1', '2'] };
+
+  let id = $state('1');
+  let posts = $state({
+    '1': { title: 'Hello Rosefn', body: 'This is the first post on our revolutionary framework.' },
+    '2': { title: 'Zero-hydration magic', body: 'Rosefn resumes state without replaying events or re-rendering the DOM.' }
+  });
+  let post = $data(async () => posts()[id()] || { title: 'Not found', body: 'This post does not exist.' });
+</script>
+
+<head>
+  <title>{post().title} - Rosefn blog</title>
+  <meta name="description" content={post().body}>
+</head>
+
+<div>
+  <h1>Blog Post #{id()}</h1>
+  <h2>{post().title}</h2>
+  <p>{post().body}</p>
+</div>

@@ -1,0 +1,23 @@
+<script>
+  // The thorn: a page that ships zero JavaScript can also ship a
+  // zero-script policy. `csr = false` (innovation #25) keeps the bundle
+  // and the bootstrap out of this document, and `headers` (innovation #26)
+  // replaces the framework defaults with a CSP that says exactly that -
+  // stricter than any other page in the framework, and it still renders
+  // perfectly, because there is nothing left to allow.
+  export const csr = false;
+  export const headers = {
+    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+    'x-robots-tag': 'noindex',
+  };
+</script>
+
+<head>
+  <title>The Thorn - Rosefn</title>
+  <meta name="description" content="A no-JS page with a no-script policy.">
+</head>
+
+<h1>The Thorn</h1>
+<p>Every other page in this framework carries a strict CSP hashed over its exact inlined bytes. This one carries <code>default-src 'none'</code> - no scripts, no connections, no frames - and nothing breaks, because <code>csr = false</code> already kept every script out of the document.</p>
+<p>The policy is per route: an app tightens or relaxes the defaults exactly where it needs to, and the servers (Node, edge, and the Go single binary, which reads the same rules from <code>dist/headers.json</code>) all send it.</p>
+<p><a href="/">Back to the gate</a></p>

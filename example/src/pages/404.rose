@@ -1,0 +1,11 @@
+<head>
+  <title>404 - Rosefn</title>
+  <meta name="description" content="This route does not exist.">
+  <meta name="robots" content="noindex">
+</head>
+
+<div>
+  <h1>🌹 404</h1>
+  <p>This rose has no petals here - the route does not exist.</p>
+  <p><a href="/">Back to the garden</a></p>
+</div>

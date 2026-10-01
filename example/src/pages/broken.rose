@@ -1,0 +1,16 @@
+<script>
+  // A deliberately broken page: its $data source throws, so the whole route
+  // render fails. The route-level error boundary (pages/500.rose) renders
+  // instead - HTTP 500 on the server, the same page on the client router -
+  // and every other route keeps working.
+  let post = $data(async () => {
+    throw new Error('data source is down');
+  });
+</script>
+
+<template>
+  <div>
+    <h1>Broken page</h1>
+    <p>{post().title}</p>
+  </div>
+</template>

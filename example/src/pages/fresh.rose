@@ -1,0 +1,22 @@
+<script>
+  // ISR (innovation #24): the build bakes this page once, and the preview
+  // server keeps it fresh - serving the baked file for up to `revalidate`
+  // seconds, then answering the next request STALE (instant, from disk)
+  // while a background pass re-renders and swaps the file. Next.js calls
+  // this ISR; here it is one exported constant and zero configuration.
+  export const revalidate = 2;   // seconds
+
+  // module-level: one per render pass, so the stamp proves which render
+  // produced the document you are reading
+  export const renders = { n: 0 };
+
+  let stamp = $data(async () => {
+    renders.n += 1;
+    return 'render #' + renders.n;
+  });
+</script>
+
+<h1>Fresh</h1>
+<p>this document is {stamp()} - the baked file is at most 2 seconds old</p>
+<p>the stamp advances without a rebuild: stale-while-revalidate</p>
+<p><a href="/">Back to the garden</a></p>

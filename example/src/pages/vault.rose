@@ -1,0 +1,14 @@
+<script>
+  // The plain wall: the gate lives entirely in pages/_middleware.rose -
+  // this page never touches the request context, so the build sees a
+  // cookie-less request as walled and never bakes it (no gated content in
+  // the static deploy). Contrast /admin, the deep wall: its content IS the
+  // secret, so it reads the context and renders per request even on the
+  // Go binary.
+  let thorn = $state('sharp');
+</script>
+
+<h1>The Vault</h1>
+<p>The gate is the middleware - the page itself carries no auth code.</p>
+<p>Every rose has its thorn: {thorn()}</p>
+<p><a href="/">Back to the garden</a></p>

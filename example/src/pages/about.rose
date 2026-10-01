@@ -1,0 +1,67 @@
+﻿<script>
+  // module-level (exported consts live outside render, like the likes store):
+  // the cumulative count of $data executions, server-side and client-side
+  // alike - the observable proof that a render really re-fetched
+  export const stats = { fetches: 0 };
+
+  let title = $state('About Rosefn');
+  let facts = $data(async () => {
+    stats.fetches += 1;
+    return [
+      'Compile-time reactivity: no virtual DOM, no diffing',
+      'Zero-hydration resume: state serialized into HTML, restored client-side',
+      'File-system routing with nested layouts',
+      'Single minified client bundle under 1 KB gzipped'
+    ];
+  });
+
+  // refresh() re-runs this route's render in place: $data re-fetches, the
+  // fresh render's state re-seeds, and wire() patches only what changed -
+  // zero requests, no navigation. (Next.js router.refresh() round-trips the
+  // server; rosefn renders in the page because the bundle already has the
+  // route - and a real app's $data can hit its API from either side.)
+  async function reload() {
+    await refresh();
+  }
+
+  // Lifecycle: onMount runs after this route's DOM is wired (client-only -
+  // the server render no-ops, there is no DOM to mount into), onCleanup
+  // disposes with the route. The heartbeat proves both: it starts on mount
+  // and stops the moment you navigate away, so a page never leaks a timer
+  // into the next route.
+  let ticks = $state(0);
+  let heartbeat = null;
+  onMount(() => {
+    heartbeat = setInterval(() => setTicks(ticks() + 1), 100);
+  });
+  onCleanup(() => {
+    if (heartbeat) clearInterval(heartbeat);
+  });
+</script>
+
+<head>
+  <title>{title()} - Rosefn</title>
+  <meta name="description" content="What Rosefn is and the ideas it is built on.">
+</head>
+
+<style>
+  /* same class name as index.rose's card, different rules: scoped styles
+     keep the two pages' cards apart without any naming convention */
+  .rcard { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.75rem 1rem; border-radius: 0 6px 6px 0; }
+</style>
+
+<div>
+  <img src="/logo.svg" alt="Rosefn" width="72" height="72">
+  <h1>{title()}</h1>
+  <div class="rcard">
+    <p>Rosefn is a revolutionary web framework designed to be the fastest, simplest, and most performant framework ever created.</p>
+    <p>data fetches: {stats.fetches}</p>
+    <button on:click={reload}>Refresh data</button>
+  </div>
+  <p>mount ticks (onMount heartbeat, onCleanup stops it): {ticks()}</p>
+  <ul>
+    {#each facts() as fact}
+      <li>{fact}</li>
+    {/each}
+  </ul>
+</div>

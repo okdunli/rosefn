@@ -1,0 +1,40 @@
+<script>
+  // Server-side store. A real app would read/write a database here; module
+  // scope is what makes it shared across requests (and across the action
+  // below and the page state, which both live in the same module).
+  export const store = { guests: ['Ada Lovelace', 'Grace Hopper'] };
+
+  // Server action for the form below. Progressive enhancement:
+  //   no JS  -> the browser POSTs natively, this runs on the server and the
+  //             response re-renders the page (Server Actions elsewhere need JS)
+  //   with JS-> the bootstrap intercepts the submit, POSTs via fetch, and
+  //             adopts the response in place: one request, no reload.
+  // The returned patch seeds this render's state.
+  export async function action(form) {
+    const name = String(form.get('name') ?? '').trim();
+    if (name) store.guests.unshift(name);
+    return { guests: [...store.guests] };
+  }
+
+  // The page renders from state; the action's patch replaces it per request.
+  let guests = $state(store.guests);
+</script>
+
+<template>
+  <div>
+    <h1>Guestbook 🌹</h1>
+    <p>Sign the book. This form works with JavaScript disabled - and with
+       JavaScript it submits without a page reload.</p>
+    <form method="POST">
+      <input name="name" placeholder="Your name" aria-label="Guestbook name" required>
+      <button type="submit">Sign</button>
+    </form>
+    <h2>Signatures</h2>
+    <ul>
+      {#each guests() as guest}
+        <li>{guest}</li>
+      {/each}
+    </ul>
+    <p><a href="/">Back to the garden</a></p>
+  </div>
+</template>

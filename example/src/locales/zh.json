@@ -1,0 +1,8 @@
+{
+  "about.title": "关于,已本地化",
+  "about.heading": "这一页说你的语言",
+  "about.body": "这一页上的每一句都来自 src/locales/zh.json。路由从 URL 的语言段选中了这本字典,下面的语言切换器由内联包重绘 - 零请求,不导航。",
+  "about.greeting": "你好,{name} - 这句话带变量翻译。",
+  "about.current": "当前语言",
+  "about.switch": "切换语言"
+}

@@ -1,0 +1,36 @@
+<script>
+  // The [lang] segment IS the locale: it arrives as state before the render
+  // (the same param seeding as blog/[id]), and $t reads it reactively - a
+  // locale switch re-runs the markers, so only the translated text repaints.
+  let lang = $state('en');
+
+  // Both dictionaries bake at build time, so the Go single binary serves
+  // /en/about and /zh/about as plain static files; Node and edge render any
+  // LISTED locale live, and a segment naming no dictionary answers 404 (the
+  // URL is the contract - no duplicate content under a bogus language).
+  export const params = { lang: ['en', 'zh'] };
+
+  // {name} interpolation (the template parser has no nested braces, so the
+  // call lives in a function: the marker closure runs it per repaint)
+  function greeting() {
+    return $t('about.greeting', { name: 'Rosefn' });
+  }
+</script>
+
+<head>
+  <title>{$t('about.title')} - Rosefn</title>
+  <meta name="description" content={$t('about.heading')}>
+</head>
+
+<div>
+  <h1>{$t('about.heading')}</h1>
+  <p>{$t('about.body')}</p>
+  <p>{greeting()}</p>
+  <p>{$t('about.current')}: {lang()}</p>
+  <p>
+    {$t('about.switch')}:
+    <a href="/en/about">English</a>
+    <a href="/zh/about">中文</a>
+  </p>
+  <p><a href="/about">Back to the plain About page</a></p>
+</div>

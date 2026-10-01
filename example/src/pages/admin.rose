@@ -1,0 +1,27 @@
+<script>
+  // $data runs per request on the server (never on the client), so it reads
+  // the middleware's context: this page greets the viewer the server saw.
+  // A static deploy never runs the middleware - the client render then sees
+  // no user and shows the public shell, so the wall holds either way.
+  let user = $data(async () => getContext().user ?? null);
+
+  // refresh() re-renders this route in place: $data re-reads the context,
+  // zero requests, no navigation. It is also what keeps this route on the
+  // streaming path - the demo's dynamic INTERACTIVE page, so the streamed
+  // document (shell first, state script + bundle after) has a home now
+  // that content routes like /blog/:id compile to zero-JS by themselves
+  // (innovation #29).
+  async function reload() {
+    await refresh();
+  }
+</script>
+
+<head>
+  <title>Admin - Rosefn</title>
+  <meta name="description" content="The deep wall: content gated by the request context.">
+</head>
+
+<h1>Admin</h1>
+<p>{user() ? 'Hello, ' + user().name + ' - the thorn garden.' : 'Please sign in.'}</p>
+<button on:click={reload}>Refresh</button>
+<p><a href="/sign">Go to the sign page</a></p>

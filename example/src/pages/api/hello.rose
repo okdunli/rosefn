@@ -1,0 +1,19 @@
+<script>
+  // Bake the GET body into dist/api/hello.json at build time: the Go single
+  // binary serves this read-only API with zero Node. Drop the flag (or return
+  // something request-dependent) and the route stays live on Node/edge only.
+  export const prerender = true;
+
+  // Handlers receive a Web-standard Request and return a plain object
+  // (serialized as JSON), a Response (passed through), or nothing (204).
+  // Same code on the Node server, the edge adapter, and the build's bake.
+  export function GET() {
+    return { hello: 'Rosefn', framework: 'one request, zero hydration' };
+  }
+
+  export async function POST(req) {
+    const form = await req.formData();
+    const name = String(form.get('name') || 'world').trim();
+    return { hello: name };
+  }
+</script>
