@@ -80,7 +80,7 @@ document.addEventListener('click', (e) => {
 // because the inlined bundle already contains every route.
 function __prefetchHandler(e) {
   const a = e.target.closest && e.target.closest('a[href^="/"]');
-  if (a && prefetch) prefetch(a.getAttribute('href'));
+  if (a && prefetch) prefetch(a.getAttribute('href'), 'hover');
 }
 document.addEventListener('mouseover', __prefetchHandler);
 document.addEventListener('focusin', __prefetchHandler);
@@ -94,7 +94,7 @@ if (prefetch && 'IntersectionObserver' in window && 'requestIdleCallback' in win
     for (const e of entries) {
       if (!e.isIntersecting) continue;
       io.unobserve(e.target); // one-shot per element; fresh links re-observe after nav
-      requestIdleCallback(() => prefetch(e.target.getAttribute('href')));
+      requestIdleCallback(() => prefetch(e.target.getAttribute('href'), 'viewport'));
     }
   });
   // observing an already-observed element is a no-op, so re-sweeping is cheap

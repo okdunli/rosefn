@@ -54,6 +54,8 @@ export interface CompileResult {
   revalidate?: number;
   /** the component exports `csr = false` (document ships without the client bundle) */
   csr?: boolean;
+  /** the component exports `prefetch = 'off' | 'hover' | 'viewport' | 'all'` (app-global link-prefetch strategy) */
+  prefetch?: string;
   /** innovation #29: the static analysis says this component needs the client bundle */
   needsClient?: boolean;
   /** innovation #31: WHY it needs the client - the rules that fired, for the build report */
@@ -271,6 +273,15 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   // answers stale and rebuilds in the background (ISR, innovation #24)
   const revalidateMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+revalidate\s*=\s*(\d+)\s*;?/);
   const revalidate = revalidateMatch ? Number(revalidateMatch[1]) : undefined;
+  // P1 (consultant report): an exported `prefetch = '...'` sets the app-global
+  // link-prefetch strategy - 'off', 'hover', 'viewport' or 'all' (the original
+  // behavior: hover/focus/touch + viewport/idle). Validated here like headers:
+  // a typo would silently disable prefetching with no other signal.
+  const prefetchMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+prefetch\s*=\s*['"`](\w+)['"`]\s*;?/);
+  const prefetch = prefetchMatch ? prefetchMatch[1] : undefined;
+  if (prefetch && !['off', 'hover', 'viewport', 'all'].includes(prefetch)) {
+    throw new Error(`${filePath}: export const prefetch must be 'off', 'hover', 'viewport' or 'all'`);
+  }
   // Innovation #29: the compiler decides zero-JS, not the developer. This is
   // the same "does anything here need the client bundle" predicate that
   // innovation #25 used to REFUSE `csr = false`: event wiring in the
@@ -456,7 +467,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   const ssr = generateSSR(cleanScript, compiledTemplate, stateDeclsCode, ssrExports, compiledHead);
   const client = generateClient(cleanScript, compiledTemplate, stateDeclsCode, eventBindings, exportStmts, compiledHead);
 
-  return { ssr, client, stateKeys, actionNames: [...actionNames], style: scopedStyle, hasParams, usesContext, revalidate, csr, needsClient, clientReasons, jsWarnings, headers };
+  return { ssr, client, stateKeys, actionNames: [...actionNames], style: scopedStyle, hasParams, usesContext, revalidate, csr, prefetch, needsClient, clientReasons, jsWarnings, headers };
 }
 
 /**
@@ -1564,6 +1575,12 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
     .map(({ info, i }) => `{ pattern: '${info.pattern}', render: ${compose(i)} }`)
     .join(',\n  ');
 
+  // P1 (consultant report): the app-global prefetch strategy, declared once
+  // (the root layout) as `export const prefetch = 'off' | 'hover' | 'viewport'
+  // | 'all'`. First declaration wins; absent -> 'all' = the original behavior
+  // (hover/focus/touch + viewport/idle). ponytail: app-global, not per-route.
+  const prefetchMode = compiled.find((c) => c.prefetch)?.prefetch ?? 'all';
+
   const clientEntry = `
 ${clientImports}
 import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, setLocales, isLocale } from './runtime.js';
@@ -1623,8 +1640,24 @@ export function matchRoute(pattern, pathname) {
 // hover storms); one isolated render runs at a time so signal-map swapping
 // stays correct without any merging logic. Entries are single-use: a consumed
 // entry disappears from the cache, which is also how tests observe a hit.
+// P1 (consultant report), three guards for link-heavy pages:
+//   1. strategy - the app declares "export const prefetch = 'off' | 'hover' |
+//      'viewport' | 'all'" (root layout); 'all' is the original behavior.
+//      ponytail: app-global, not per-route - per-route would carry the mode
+//      in each document's shell.
+//   2. budget - renders are serialized by the queue, so "concurrency" is 1;
+//      the budget caps the QUEUE: a hover storm past it drops the excess
+//      instead of rendering fifty routes nobody clicks.
+//   3. LRU cap - unconsumed entries would otherwise live forever; the oldest
+//      is evicted first (Map iteration order; entries are single-use, so
+//      insertion order IS the recency order).
+let prefetchMode = ${JSON.stringify(prefetchMode)};
+export function setPrefetchMode(mode) { prefetchMode = mode; }
+const PREFETCH_BUDGET = 8;
+const PREFETCH_MAX_CACHED = 4;
 const prefetchCache = new Map(); // pathname -> { html, closes, state } | Promise
 let prefetchQueue = Promise.resolve();
+let prefetchPending = 0;
 
 function applyParams(route, pathname) {
   const patternParts = route.pattern.split('/');
@@ -1634,11 +1667,15 @@ function applyParams(route, pathname) {
   }
 }
 
-export function prefetch(pathname) {
+export function prefetch(pathname, source = 'hover') {
+  if (prefetchMode === 'off') return;
+  if (prefetchMode === 'hover' && source !== 'hover') return;
+  if (prefetchMode === 'viewport' && source !== 'viewport') return;
   if (prefetchCache.has(pathname)) return;
   if (pathname === location.pathname) return; // already here: nothing to prefetch
   const route = routes.find((r) => matchRoute(r.pattern, pathname));
   if (!route) return;
+  if (prefetchPending >= PREFETCH_BUDGET) return; // budget spent: drop it, a later hover retries
   const p = prefetchQueue.then(async () => {
     try {
       // the isolated render also captures the onMount callbacks the route
@@ -1654,18 +1691,28 @@ export function prefetch(pathname) {
       });
       const entry = { ...result, state, mounts, cleanups };
       prefetchCache.set(pathname, entry); // promise -> result
+      // evict oldest-first; in-flight promises are never evicted (evicting
+      // one would only force a duplicate render)
+      while (prefetchCache.size > PREFETCH_MAX_CACHED) {
+        const oldest = prefetchCache.keys().next().value;
+        if (prefetchCache.get(oldest) instanceof Promise) break;
+        prefetchCache.delete(oldest);
+      }
       return entry;
     } catch {
       prefetchCache.delete(pathname); // failed: the next hover retries
       return null;
+    } finally {
+      prefetchPending--;
     }
   });
+  prefetchPending++;
   prefetchCache.set(pathname, p);
   prefetchQueue = p;
 }
 
 export function prefetchStats() {
-  return { cached: prefetchCache.size };
+  return { cached: prefetchCache.size, pending: prefetchPending, mode: prefetchMode };
 }
 
 // One delegated listener per event type on the app container: survives DOM
