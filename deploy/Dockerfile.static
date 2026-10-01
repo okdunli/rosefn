@@ -1,0 +1,34 @@
+# The static half of the hybrid deploy (innovation #34, consultant P0 §3 方案B).
+#
+# Build the site with Node, embed it into ONE Go binary, ship an image with
+# no runtime to install and nothing to configure:
+#
+#   docker build -f deploy/Dockerfile.static -t rosefn-static .
+#   docker run -p 8080:8080 -e UPSTREAM=http://dynamic:3000 rosefn-static
+#
+# UPSTREAM is optional. Without it the binary is the pure-static deploy (it
+# answers 405 for POSTs and a JSON 404 for unbaked /api routes - the
+# documented boundary). With it, POST server actions and live /api handlers
+# are reverse-proxied to the Node/edge backend.
+FROM node:22-alpine AS site
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+# golang:alpine (not a pinned patch) tracks go.mod: the module declares the
+# minimum toolchain, and a stale pin is a build failure nobody needs.
+FROM golang:alpine AS bin
+WORKDIR /app
+COPY main.go go.mod ./
+COPY --from=site /app/dist ./dist
+RUN go build -trimpath -o rosefn-server .
+
+FROM alpine:3.20
+COPY --from=bin /app/rosefn-server /usr/local/bin/rosefn-server
+ENV PORT=8080
+EXPOSE 8080
+# The access log goes to stdout and errors to stderr, so `docker logs`
+# and any collector see them without mounting a file.
+ENTRYPOINT ["rosefn-server"]
