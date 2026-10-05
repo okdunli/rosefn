@@ -1,6 +1,6 @@
 {
   "name": "rosefn",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "The next-century web framework: zero-hydration, compile-time reactivity, single binary deploy",
   "type": "module",
   "scripts": {
@@ -18,7 +18,8 @@
   "exports": {
     "./edge": "./dist-cli/edge.mjs",
     "./runtime": "./dist-cli/runtime.mjs",
-    "./compiler": "./dist-cli/compiler.mjs"
+    "./compiler": "./dist-cli/compiler.mjs",
+    "./test": "./dist-cli/test.mjs"
   },
   "files": [
     "dist-cli",
