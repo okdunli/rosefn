@@ -556,3 +556,116 @@ export function $t(key: string, vars?: Record<string, string>): string {
   if (vars) for (const k in vars) s = s.split(`{${k}}`).join(vars[k]);
   return s;
 }
+
+// --- Phase 2: the shared server store ----------------------------------------
+//
+// Module scope (`export const store = {...}`) is per-PROCESS: under the
+// cluster every worker holds its own copy, so a guestbook signed on worker
+// A is invisible to worker B - the classic "it works in dev, loses data in
+// production" bug. `$store` keeps the ergonomics of a plain object you read
+// synchronously, while every write is broadcast to the other workers through
+// a transport hook. Reads never wait on anything: each process holds the
+// full state locally and a patch arrives asynchronously (milliseconds on one
+// machine, and the transport seam is where a redis bus would plug in).
+//
+// ponytail: one driver (memory + cluster IPC) covers every single-machine
+// deploy, which is exactly what `rosefn serve` gives you. A cross-machine
+// driver is the documented next step - it needs a client library, and
+// setStoreTransport() below is the seam it plugs into.
+
+const STORES = new Map<string, { value: unknown }>();
+let storeTransport: ((name: string, value: unknown) => void) | null = null;
+
+/**
+ * Install the cross-process transport. The generated server entry wires the
+ * cluster channel; a standalone process (dev, preview) installs none - one
+ * process is one copy, which is already correct. Pass null to detach.
+ */
+export function setStoreTransport(fn: ((name: string, value: unknown) => void) | null): void {
+  storeTransport = fn;
+}
+
+/** Apply a patch that arrived from another process (the transport's receiver
+ * calls this; a store nobody opened yet is ignored - it has no reader). */
+export function applyStorePatch(name: string, value: unknown): void {
+  const entry = STORES.get(name);
+  if (entry) entry.value = value;
+}
+
+/**
+ * A named store shared by every request in this process - and, through the
+ * transport, by every worker. Read it inside `$data` or a server action:
+ * those are the server-only paths. A bare read in a render body is a local
+ * snapshot, and on the client (where the store map is per page load and no
+ * patch ever arrives) that snapshot is the initial value.
+ *
+ * Values must be JSON-serializable: the transport serializes them, exactly
+ * like the state patch that already rides in every document.
+ */
+export function $store<T>(name: string, initial: T): { get(): T; set(v: T): void; update(fn: (v: T) => T): void } {
+  let entry = STORES.get(name);
+  if (!entry) {
+    entry = { value: initial };
+    STORES.set(name, entry);
+  }
+  const box = entry;
+  return {
+    get: () => box.value as T,
+    set: (v: T) => {
+      box.value = v;
+      storeTransport?.(name, v);
+    },
+    update: (fn: (v: T) => T) => {
+      box.value = fn(box.value as T);
+      storeTransport?.(name, box.value);
+    },
+  };
+}
+
+// --- Phase 1: cookie helpers -------------------------------------------------
+//
+// Sessions are the first thing every real app needs and the easiest thing to
+// get subtly wrong (a missing HttpOnly is an XSS-readable session; a missing
+// SameSite is a CSRF-readable one). These two are the whole cookie job with
+// the safe defaults baked in, so nobody hand-rolls the header string.
+
+/**
+ * Parse the cookies of a request (server) or of this document (client, where
+ * HttpOnly cookies are invisible by design - that is the point of HttpOnly).
+ */
+export function $cookies(request?: Request): Record<string, string> {
+  const raw = request
+    ? request.headers.get('cookie')
+    : (typeof document !== 'undefined' ? document.cookie : '');
+  const out: Record<string, string> = {};
+  for (const part of (raw || '').split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const k = part.slice(0, eq).trim();
+    if (k) out[k] = decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return out;
+}
+
+/**
+ * Build a Set-Cookie header VALUE for a session cookie with the safe
+ * defaults: HttpOnly, SameSite=Lax, Path=/, a 7-day Max-Age. `secure` is the
+ * one attribute a helper cannot infer (it depends on the deployment's TLS),
+ * so pass it when serving over https - and SameSite=None forces Secure,
+ * because every modern browser rejects that pairing otherwise.
+ */
+export function $sessionCookie(
+  name: string,
+  value: string,
+  opts: { path?: string; maxAge?: number; sameSite?: 'Strict' | 'Lax' | 'None'; secure?: boolean; httpOnly?: boolean } = {}
+): string {
+  const { path = '/', maxAge = 60 * 60 * 24 * 7, sameSite = 'Lax', secure = false, httpOnly = true } = opts;
+  return [
+    `${name}=${encodeURIComponent(value)}`,
+    `Path=${path}`,
+    `Max-Age=${maxAge}`,
+    `SameSite=${sameSite}`,
+    httpOnly ? 'HttpOnly' : '',
+    secure || sameSite === 'None' ? 'Secure' : '',
+  ].filter(Boolean).join('; ');
+}

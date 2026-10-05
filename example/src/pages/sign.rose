@@ -1,8 +1,13 @@
 <script>
-  // Server-side store. A real app would read/write a database here; module
-  // scope is what makes it shared across requests (and across the action
-  // below and the page state, which both live in the same module).
-  export const store = { guests: ['Ada Lovelace', 'Grace Hopper'] };
+  // Server-side store. A real app would read/write a database here; $store
+  // is what makes it shared across requests AND across cluster workers
+  // (Phase 2): the write broadcasts to every worker, reads stay local, and
+  // the action below and the page state see the same box. A plain
+  // module-scope object would live in exactly one worker - signatures
+  // would appear and vanish depending on which core answered.
+  // (exported: the action is hoisted to module scope, so the store must
+  // live there too - both sides of the component share this one box.)
+  export const store = $store('guests', ['Ada Lovelace', 'Grace Hopper']);
 
   // Server action for the form below. Progressive enhancement:
   //   no JS  -> the browser POSTs natively, this runs on the server and the
@@ -12,12 +17,12 @@
   // The returned patch seeds this render's state.
   export async function action(form) {
     const name = String(form.get('name') ?? '').trim();
-    if (name) store.guests.unshift(name);
-    return { guests: [...store.guests] };
+    if (name) store.update((g) => [name, ...g]);
+    return { guests: [...store.get()] };
   }
 
   // The page renders from state; the action's patch replaces it per request.
-  let guests = $state(store.guests);
+  let guests = $state(store.get());
 </script>
 
 <template>

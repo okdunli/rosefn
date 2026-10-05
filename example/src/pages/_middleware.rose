@@ -8,7 +8,9 @@
   // same Web-standard Request the edge adapter passes.
   export async function handle(request) {
     const { pathname } = new URL(request.url);
-    const session = request.headers.get('cookie')?.match(/(?:^|;\s*)session=([^;]+)/)?.[1];
+    // $cookies(request) parses the Cookie header (Phase 1); to SET one, use
+    // $sessionCookie(name, value) - HttpOnly + SameSite=Lax by default.
+    const session = $cookies(request).session;
     // a thorn: /admin and /vault are walled off without a session cookie.
     // /admin is the deep wall: its page reads getContext(), so the gated
     // content is $data - even a static deploy (the Go binary) shows only

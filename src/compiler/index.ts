@@ -266,8 +266,10 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const rawScript = scriptMatch?.[1] ?? '';
   // getContext() in the script makes the route dynamic: the request bag is
   // per-request, so the build must not bake it and the servers must not
-  // answer it from a prerendered file
-  const usesContext = /getContext\s*\(/.test(rawScript);
+  // answer it from a prerendered file. $store() (Phase 2) earns the same
+  // treatment for the same reason: the store is per-process mutable state, so
+  // a baked document would freeze one worker's snapshot of it.
+  const usesContext = /getContext\s*\(/.test(rawScript) || /\$store\s*\(/.test(rawScript);
   // an exported `params` marks a dynamic route for prerender enumeration
   const hasParams = /(?:^|\n)\s*export\s+(?:(?:const|let|var)\s+|(?:async\s+)?function\s+)params\b/.test(rawScript);
   // an exported `revalidate = N` opts the route into stale-while-revalidate:
@@ -946,7 +948,7 @@ closes.push(__head);
 __html += "<!--\u27e6h:" + __hi + "\u27e7-->" + __head() + "<!--\u27e6/h:" + __hi + "\u27e7-->";`
     : '';
   return `
-import { state, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $t, bestLocale } from './runtime.js';
+import { state, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $t, bestLocale, $cookies, $sessionCookie, $store } from './runtime.js';
 
 ${exports}
 
@@ -982,7 +984,7 @@ __html += "<!--\u27e6h:" + __hi + "\u27e7-->" + __head() + "<!--\u27e6/h:" + __h
     : '';
 
   return `
-import { state, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $t, bestLocale } from './runtime.js';
+import { state, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $t, bestLocale, $cookies, $sessionCookie, $store } from './runtime.js';
 
 ${exports}
 
@@ -1055,6 +1057,12 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
   await Promise.all(stale.map((f) => fs.promises.rm(path.join(outDir, f), { force: true })));
 
   const files = await scanRoseFiles(root);
+  // Phase 0: a build that silently produces nothing is the worst possible
+  // failure mode (an empty dist/ deploys as a blank site). Say it plainly:
+  // this is not a project root, or the pages live somewhere else.
+  if (files.length === 0) {
+    throw new Error(`no .rose pages found under ${path.join(root, 'src', 'pages')} - run rosefn from a project root, or pass one: rosefn build <dir>`);
+  }
   const infos = files.map((f) => ({ ...getRouteInfo(f, root) }));
   // Plugins (innovation #30): rosefn.config.js at the project root, loaded
   // fresh per build so the dev server's hot rebuild picks up config edits.
@@ -1242,12 +1250,25 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
 
   const serverEntry = `
 ${serverImports}
-import { setState, clearRequestState, serializeState, resetRequestContext, isLocale, setLocales, localeList } from './runtime.js';
+import { setState, clearRequestState, serializeState, resetRequestContext, isLocale, setLocales, localeList, setStoreTransport, applyStorePatch } from './runtime.js';
 
 // i18n (innovation #27): the dictionaries baked at build time from
 // src/locales/*.json. A route segment named [lang] is the locale: the value
 // must name one of these dictionaries, and $t resolves keys against it.
 setLocales(${localesJson}, '${defaultLocale}');
+
+// Phase 2: the store transport. Under "rosefn serve" every worker is its
+// own process with its own dist/server.js module, so a $store write must
+// travel: this worker -> primary -> every other worker. process.send exists
+// only inside cluster workers, so a single-process runner (dev, preview,
+// the edge adapter) keeps the transport null and $store stays plain
+// per-process state - the documented boundary, not a bug.
+if (typeof process !== 'undefined' && typeof process.send === 'function') {
+  setStoreTransport((name, value) => process.send({ type: 'rosefn:store', name, value }));
+  process.on('message', (msg) => {
+    if (msg && msg.type === 'rosefn:store') applyStorePatch(msg.name, msg.value);
+  });
+}
 
 export { localeList };
 export const defaultLocale = '${defaultLocale}';
