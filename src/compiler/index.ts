@@ -1127,8 +1127,14 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
   // Shared runtime module, bundled once into client and server output.
   // The runtime ships WITH THE COMPILER, not with the app: resolve it from
   // this file's own location so any project root builds (the in-repo
-  // example used to be the only layout that worked).
-  const runtimeEntry = fileURLToPath(new URL('../runtime/index.ts', import.meta.url));
+  // example used to be the only layout that worked). Two layouts answer: in
+  // the repo this module sits at src/compiler/, in the published package the
+  // compiler is bundled to dist-cli/compiler/index.mjs with the sources
+  // beside it - so the source is either a sibling or two levels down.
+  const runtimeEntry = ['../runtime/index.ts', '../src/runtime/index.ts']
+    .map((rel) => fileURLToPath(new URL(rel, import.meta.url)))
+    .find((p) => fs.existsSync(p));
+  if (!runtimeEntry) throw new Error('Rosefn: the runtime source (src/runtime/index.ts) was not found next to the compiler');
   await esbuild.build({
     entryPoints: [runtimeEntry],
     bundle: true,

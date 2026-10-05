@@ -767,14 +767,18 @@ function pathnameOf(url: string | undefined): string {
 /**
  * The version from package.json - one source of truth, no constant to drift.
  * Resolved from THIS module (not the cwd): the banner names the framework's
- * version even when it builds somebody else's project.
+ * version even when it builds somebody else's project. Two layouts answer:
+ * in the repo this module sits at src/cli/, in the published package the CLI
+ * is bundled to dist-cli/ with the sources beside it - so try both.
  */
 function version(): string {
-  try {
-    return JSON.parse(fs.readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf-8')).version ?? '0.0.0';
-  } catch {
-    return '0.0.0';
+  for (const rel of ['../../package.json', '../package.json']) {
+    try {
+      const v = JSON.parse(fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf-8')).version;
+      if (v) return v;
+    } catch { /* not this layout */ }
   }
+  return '0.0.0';
 }
 
 async function dev(): Promise<void> {
@@ -901,9 +905,101 @@ async function serve(): Promise<void> {
   process.on('SIGINT', stop);
 }
 
+/**
+ * `rosefn new <name>` - a starting project. The smallest thing that builds
+ * and runs and shows the syntax: one page (state, {#if}, {#each}, a scoped
+ * style), one README naming the three commands. Not a second demo app - the
+ * point is that a new developer's first `rosefn build` works in seconds.
+ *
+ * Trade-off: three files, written from strings. No template engine, no
+ * dependency, no `npm install` run on the developer's behalf (they may use
+ * pnpm/yarn/bun, and a surprise install is worse than a printed command).
+ */
+async function scaffold(): Promise<void> {
+  const name = process.argv[3];
+  if (!name || name.startsWith('-')) {
+    console.log('Usage: rosefn new <name>   (creates <name>/ with a page that builds)');
+    return;
+  }
+  const dir = path.resolve(name);
+  if (fs.existsSync(dir)) {
+    console.error(`Rosefn: ${dir} already exists - pick another name`);
+    process.exit(1);
+  }
+  const pages = path.join(dir, 'src', 'pages');
+  fs.mkdirSync(pages, { recursive: true });
+
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+    name: path.basename(dir),
+    private: true,
+    type: 'module',
+    scripts: {
+      dev: 'rosefn dev',
+      build: 'rosefn build',
+      preview: 'rosefn preview',
+      serve: 'rosefn serve',
+    },
+    dependencies: { rosefn: `^${version()}` },
+  }, null, 2) + '\n');
+
+  fs.writeFileSync(path.join(pages, 'index.rose'), `<script>
+  // One file per route: markup, script and styles together.
+  let count = $state(0);
+  let items = $state(['zero hydration', 'one request', 'no build config']);
+  let showList = $state(true);
+
+  function increment() { $setState('count', count() + 1); }
+  function toggleList() { $setState('showList', !showList()); }
+</script>
+
+<h1>🌹 Rosefn</h1>
+<p>Count: <strong>{count()}</strong></p>
+<button on:click={increment}>Increment</button>
+<button on:click={toggleList}>{showList() ? 'Hide' : 'Show'} the list</button>
+
+{#if showList()}
+<ul>
+  {#each items() as item}
+    <li>{item}</li>
+  {/each}
+</ul>
+{/if}
+
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; }
+  button { padding: 0.5rem 1rem; margin-right: 0.5rem; }
+</style>
+`);
+
+  fs.writeFileSync(path.join(dir, 'README.md'), `# ${path.basename(dir)}
+
+A Rosefn project. One file per route in \`src/pages/\`.
+
+\`\`\`bash
+npm install     # pulls the rosefn package
+npm run dev     # dev server with hot rebuild: http://localhost:3000
+npm run build   # compiles to dist/
+npm run serve   # production runner (cluster, access log, graceful shutdown)
+\`\`\`
+
+Add a route by adding a file: \`src/pages/about.rose\` serves \`/about\`.
+\`src/pages/_layout.rose\` wraps every route, \`src/pages/_middleware.rose\`
+runs before every request, \`src/pages/api/*.rose\` answers JSON.
+Full syntax: the README of the rosefn package.
+`);
+
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/\ndist/\n');
+
+  console.log(`🌹 Created ${dir}`);
+  console.log(`   src/pages/index.rose  - a page that builds and runs`);
+  console.log(`\n   cd ${name}`);
+  console.log(`   npm install && npm run dev`);
+}
+
 const cmd = process.argv[2];
 if (cmd === 'dev') dev();
 else if (cmd === 'build') build();
 else if (cmd === 'preview') preview();
 else if (cmd === 'serve') serve();
-else console.log('Usage: rosefn dev|build|preview|serve [dir]   (dir defaults to the current directory; dist/ is written there)');
+else if (cmd === 'new') scaffold();
+else console.log('Usage: rosefn dev|build|preview|serve|new [dir]   (dir defaults to the current directory; dist/ is written there)');

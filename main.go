@@ -356,7 +356,6 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(b.String()))
 }
 
-// ---- the hybrid deploy (innovation #34, consultant P0 §3, 方案B) ----------
 //
 // The binary is immutable by design: it serves exactly what the build baked.
 // A real app also has live routes - POST server actions, /api handlers that

@@ -8,13 +8,30 @@
     "build": "tsx src/cli/index.ts build example",
     "preview": "tsx src/cli/index.ts preview example",
     "serve": "tsx src/cli/index.ts serve example",
-    "benchmark": "tsx benchmark.ts",
-    "test": "tsx src/cli/index.ts build example && tsx test-client.ts",
-    "test:cli": "node test-cli.mjs",
-    "test:e2e": "tsx test-e2e.ts",
-    "test:edge": "tsx test-edge.ts",
-    "test:go": "tsx src/cli/index.ts build example && node test-go.mjs",
+    "pack": "node pack.mjs",
+    "prepublishOnly": "npm run pack",
     "build:go": "go build -o rosefn-server ."
+  },
+  "bin": {
+    "rosefn": "dist-cli/rosefn.mjs"
+  },
+  "exports": {
+    "./edge": "./dist-cli/edge.mjs",
+    "./runtime": "./dist-cli/runtime.mjs",
+    "./compiler": "./dist-cli/compiler.mjs"
+  },
+  "files": [
+    "dist-cli",
+    "src",
+    "deploy",
+    "pack.mjs",
+    "README.md",
+    "VERSIONING.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
   },
   "dependencies": {
     "esbuild": "^0.24.0"
