@@ -26,6 +26,7 @@ const entries = [
   // [source, output, is-the-bin]
   ['src/cli/index.ts', `${OUT}/rosefn.mjs`, true],
   ['src/cli/edge.ts', `${OUT}/edge.mjs`, false],
+  ['src/cli/test.ts', `${OUT}/test.mjs`, false],
   ['src/runtime/index.ts', `${OUT}/runtime.mjs`, false],
   ['src/compiler/index.ts', `${OUT}/compiler.mjs`, false],
 ];
