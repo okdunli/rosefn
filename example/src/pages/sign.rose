@@ -9,19 +9,42 @@
   // live there too - both sides of the component share this one box.)
   export const store = $store('guests', ['Ada Lovelace', 'Grace Hopper']);
 
+ // The action GUARD - `beforeAction(name, form)` runs before every
+  // action of this page, with the selected action's name and the submitted
+  // FormData. Vetoing is an ActionError: the response carries its status
+  // (403 here) and the page renders with the failure visible, instead of a
+  // 500 or a silent no-op. A redirect stays the middleware's job - it
+  // already runs for POSTs too. A real app checks the session here
+  // (getContext().user, filled by pages/_middleware.rose); the demo's rule
+  // is a capacity limit, so the failure is one click away in the browser.
+  export async function beforeAction(name: string, form: FormData) {
+    if (store.get().length >= 5) {
+      throw new ActionError('The guestbook is full - five signatures is the demo limit.', 403);
+    }
+  }
+
   // Server action for the form below. Progressive enhancement:
   //   no JS  -> the browser POSTs natively, this runs on the server and the
   //             response re-renders the page (Server Actions elsewhere need JS)
   //   with JS-> the bootstrap intercepts the submit, POSTs via fetch, and
   //             adopts the response in place: one request, no reload.
-  // The returned patch seeds this render's state.
   export async function action(form: FormData) {
     const name = String(form.get('name') ?? '').trim();
-    if (name) store.update((g) => [name, ...g]);
-    return { guests: [...store.get()] };
+    // A BUSINESS failure, not a bug: 422 (unprocessable) with the offending
+    // field named, so a form UI can highlight it. The page renders with the
+    // message below; the response status is the 422.
+    if (!name) throw new ActionError('A signature needs a name.', 422, 'name');
+    store.update((g) => [name, ...g]);
+    // No `guests` patch. The store is the truth and the declaration below
+    // re-seeds from it on every render, so returning the list again would
+    // only build a second copy of it to say what the render already knows -
+    // that is the whole "the patch stays small" story: what an action
+    // returns is what the render CANNOT derive. (When it must shape a value
+    // the render DOES establish, the patch can be incremental - $merge,
+    // $append, $prepend - one row in, one row of work.)
   }
 
-  // The page renders from state; the action's patch replaces it per request.
+  // The page renders from state; the store's snapshot seeds it per request.
   let guests = $state(store.get());
 </script>
 
@@ -30,6 +53,9 @@
     <h1>Guestbook 🌹</h1>
     <p>Sign the book. This form works with JavaScript disabled - and with
        JavaScript it submits without a page reload.</p>
+    {#if $actionError()}
+    <p><strong>{$actionError().message}</strong></p>
+    {/if}
     <form method="POST">
       <input name="name" placeholder="Your name" aria-label="Guestbook name" required>
       <button type="submit">Sign</button>

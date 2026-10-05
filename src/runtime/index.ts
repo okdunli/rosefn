@@ -87,6 +87,67 @@ export function esc(v: unknown): string {
   return String(v).replace(/[&<>"']/g, (c) => ESC_MAP[c]);
 }
 
+// === Generated-code marker helpers ===
+// Every reactive marker in every generated module is emitted through these
+// five functions, so a site costs a call instead of the marker protocol
+// spelled out inline (the demo bundle alone had 46 sites, each repeating the
+// same 60-170 bytes). The protocol is unchanged: each helper pushes its
+// closure and returns the markers around the value, so push order still
+// equals marker order and wire() reads the same indices. The closures take
+// the block scope as their argument exactly as before - wire() invokes them
+// with it.
+
+type Close = (s?: unknown) => unknown;
+
+export function textMark(closes: Close[], fn: Close, pair?: boolean, arg?: unknown): string {
+  const i = closes.push(fn) - 1;
+  return `<!--\u27e6m:${i}\u27e7-->` + esc(closes[i](arg)) + (pair ? `<!--\u27e6/m:${i}\u27e7-->` : '');
+}
+
+export function attrMark(closes: Close[], fn: Close, name: string, arg?: unknown): string {
+  const i = closes.push(fn) - 1;
+  return `${name}="${esc(closes[i](arg))}" data-b="${i}:${name}"`;
+}
+
+export function ifMark(
+  closes: Close[],
+  cond: Close,
+  fn: (s: unknown, c: Close[]) => unknown,
+  scope?: unknown
+): string {
+  const i = closes.length;
+  // The content renders the FIRST time the block shows, never before, and is
+  // then memoized for this render: a block that never shows costs nothing and
+  // a block that shows renders exactly once.
+  let snap: { html: string; closes: Close[] } | null = null;
+  closes.push(() => {
+    if (!cond()) return null;
+    if (!snap) {
+      const c: Close[] = [];
+      snap = { html: String(fn(scope, c)), closes: c };
+    }
+    return snap;
+  });
+  const r = closes[i]() as { html: string } | null;
+  return `<!--\u27e6i:${i}\u27e7-->` + (r ? r.html : '') + `<!--\u27e6/i:${i}\u27e7-->`;
+}
+
+export function eachMark(closes: Close[], items: Close, fn: (s: unknown, c: Close[]) => unknown): string {
+  const i = closes.length;
+  closes.push(() => (items() as unknown[]).map((v) => {
+    const c: Close[] = [];
+    return { html: String(fn(v, c)), closes: c, scope: v };
+  }));
+  let h = `<!--\u27e6l:${i}\u27e7-->`;
+  for (const r of closes[i]() as Array<{ html: string }>) h += r.html;
+  return h + `<!--\u27e6/l:${i}\u27e7-->`;
+}
+
+export function headMark(closes: Close[], fn: Close): string {
+  const i = closes.push(fn) - 1;
+  return `<!--\u27e6h:${i}\u27e7-->` + fn() + `<!--\u27e6/h:${i}\u27e7-->`;
+}
+
 // === Reactive DOM wiring (client) ===
 
 const MARK_RE = /^\u27e6([milh]):(\d+)\u27e7$/;
@@ -394,10 +455,13 @@ export function $data<T>(fn: () => T | Promise<T>): Promise<T> {
 // The request context bag is NOT reset here: it is owned by the middleware
 // pass (runMiddleware), which resets it once per request before the
 // middleware runs - clearing it here would wipe what the middleware just
-// set for this very render.
+// set for this very render. Pending action deltas ARE cleared: they belong
+// to the request that recorded them, and a delta that outlived its render
+// would silently mutate the next request's page.
 export function clearRequestState(): void {
   signalMap.clear();
   dataCache.clear();
+  pendingDeltas.clear();
 }
 
 // === Request context ===
@@ -438,6 +502,8 @@ export async function isolateStateAsync<T>(
 ): Promise<{ result: T; state: Map<string, SignalEntry>; mounts: Array<() => void>; cleanups: Set<Cleanup> }> {
   const savedSignals = signalMap;
   const savedData = dataCache;
+  const savedDeltas = new Map(pendingDeltas); // a prefetch render must not consume a delta
+  pendingDeltas.clear();
   const savedMounts = mountQueue.splice(0, mountQueue.length);
   const savedCleanups = new Set(cleanups);
   cleanups.clear();
@@ -454,6 +520,8 @@ export async function isolateStateAsync<T>(
   } finally {
     signalMap = savedSignals;
     dataCache = savedData;
+    pendingDeltas.clear();
+    savedDeltas.forEach((d, k) => pendingDeltas.set(k, d)); // restore what was pending
     mountQueue.splice(0, 0, ...savedMounts); // prepend what was queued before
     cleanups.clear();
     savedCleanups.forEach((fn: Cleanup) => cleanups.add(fn));
@@ -657,6 +725,132 @@ export function $store<T>(name: string, initial: T): { get(): T; set(v: T): void
       storeTransport?.(name, box.value);
     },
   };
+}
+
+// --- server action errors, guards and incremental patches -----------
+//
+// The action model's three gaps, closed with one request-scoped mechanism.
+//
+//  1. A standardized failure object. An action that cannot do its job (bad
+//     input, not signed in, a duplicate) throws ActionError; the dispatch
+//     catches it, seeds the page's state with it and re-renders, so the page
+//     answers with the failure VISIBLE (status = the error's code) instead of
+//     a 500 or a silent no-op. A bug still propagates to the 500 page.
+//  2. A guard. `export async function beforeAction(name, form)` runs before
+//     every action of its page and vetoes with an ActionError - the
+//     action-level permission check (a redirect stays the middleware's job).
+//  3. Incremental patches. A patch value may be an OPERATION ($append and
+//     friends) instead of a whole replacement, so growing a large list costs
+//     one row instead of a second copy of the list.
+
+export class ActionError extends Error {
+  /** the HTTP status the response carries (400/401/403/409/422/...) */
+  code: number;
+  /** the form field the failure belongs to, when it belongs to one */
+  field?: string;
+  constructor(message: string, code = 400, field?: string) {
+    super(message);
+    this.name = 'ActionError';
+    this.code = code;
+    this.field = field;
+  }
+}
+
+/** The JSON-safe shape the dispatch seeds into state (what `$actionError()` returns). */
+export type ActionErrorInfo = { action: string; message: string; code: number; field?: string };
+
+/**
+ * The failure of the action that produced the response being rendered, or
+ * null. It is ordinary state under the key `actionError`, so the client's
+ * resumeState() restores it and the post-adopt re-render sees exactly what
+ * the server saw - one read, both sides, no hydration payload.
+ *
+ * Read it as data (`{#if $actionError()}<p>{$actionError().message}</p>{/if}`)
+ * or let a {#boundary} contain it ($actionErrorOrThrow below).
+ */
+export function $actionError(): ActionErrorInfo | null {
+  const e = signalMap.get('actionError');
+  if (!e) return null;
+  if (currentEffect) e.subs.add(currentEffect); // subscribe like a state read
+  return (e.value as ActionErrorInfo | null) ?? null;
+}
+
+/**
+ * What a {#boundary} whose content depends on an action calls first: when the
+ * action that produced this response failed, throw - the boundary's own catch
+ * turns it into the fallback, so the section degrades to the error message
+ * instead of rendering a widget built on work that never happened.
+ */
+export function $actionErrorOrThrow(): void {
+  const info = $actionError();
+  if (info) throw new ActionError(info.message, info.code, info.field);
+}
+
+/** The {#boundary} fallback: the action's own message when the failure is a business one. */
+export function $boundaryFallback(err: unknown): string {
+  if (err instanceof ActionError) return `<p class="rosefn-action-error">${esc(err.message)}</p>`;
+  return '<p>This section failed to render.</p>';
+}
+
+// An incremental patch: an action's return value may map a key to an
+// OPERATION instead of a whole replacement value, so appending one row to a
+// thousand-row list costs one row instead of a second copy of the list.
+//
+// The dispatch RECORDS a delta and the page's own state declarations APPLY
+// it - and that split is the whole design. The dispatch runs before the
+// render, when this request's state does not exist yet, so there is nothing
+// for a delta to be relative to; the declarations are what establish the
+// value the page was going to render anyway (the $store snapshot, the $data
+// result, the declared default). Applying the delta there makes it relative
+// to exactly that, and the document still carries the merged result once -
+// what disappears is the second full copy the action had to build.
+export type StateDeltaOp = 'append' | 'prepend' | 'merge';
+
+export class StateDelta {
+  constructor(public op: StateDeltaOp, public value: unknown) {}
+}
+
+/** Append (or prepend) items to a list-valued state key. */
+export const $append = (value: unknown): StateDelta => new StateDelta('append', value);
+export const $prepend = (value: unknown): StateDelta => new StateDelta('prepend', value);
+/** Shallow-merge an object into an object-valued state key. */
+export const $merge = (value: Record<string, unknown>): StateDelta => new StateDelta('merge', value);
+
+const pendingDeltas = new Map<string, StateDelta>();
+
+/** Record the deltas of the action that just ran (the dispatch calls this). */
+export function setStateDelta(key: string, delta: StateDelta): void {
+  pendingDeltas.set(key, delta);
+}
+
+/**
+ * Apply every pending delta to the live state and clear them. The generated
+ * render calls this once, right after its state declarations - and only the
+ * SSR side ever emits the call: a delta is recorded by a server dispatch, so
+ * on the client (post-adopt re-render, client-side navigation, refresh) the
+ * map is empty and this is a no-op. That is also why a delta can never apply
+ * twice: the value it produced is what the state script carried, and the
+ * client resumes THAT instead of recomputing it.
+ */
+export function applyStateDeltas(): void {
+  if (pendingDeltas.size === 0) return;
+  for (const [key, delta] of [...pendingDeltas]) {
+    pendingDeltas.delete(key);
+    applyStateDelta(key, delta);
+  }
+}
+
+/** Apply one delta to the live state. */
+export function applyStateDelta(key: string, delta: StateDelta): void {
+  const cur = signalMap.get(key)?.value;
+  if (delta.op === 'merge') {
+    setState(key, { ...(cur as Record<string, unknown> | undefined), ...(delta.value as Record<string, unknown>) });
+    return;
+  }
+  const list = (v: unknown): unknown[] => (v == null ? [] : Array.isArray(v) ? v : [v]);
+  const merged =
+    delta.op === 'append' ? [...list(cur), ...list(delta.value)] : [...list(delta.value), ...list(cur)];
+  setState(key, merged);
 }
 
 // --- cookie helpers -------------------------------------------------

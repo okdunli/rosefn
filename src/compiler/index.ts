@@ -51,9 +51,13 @@ function encodeSlotCall(attrs: string): string {
   return `${JSON.stringify(name)}, [${pairs.join(', ')}]`;
 }
 // {#boundary}...{/boundary}: an error boundary - its content renders into
-// its own string; a throw anywhere inside swaps in this fallback instead of
+// its own string; a throw anywhere inside swaps in a fallback instead of
 // failing the whole page. trade-off: one generic message, no per-boundary
 // custom fallback yet - add {:fallback}...{/fallback} when an app needs it.
+// Since a boundary whose content drives a server action also contains
+// that action's failure, and the honest fallback for a business error is its
+// message - which lives in the runtime ($boundaryFallback), so a boundary
+// that catches no action keeps shipping the plain string and pays nothing.
 const BOUNDARY_FALLBACK = '<p>This section failed to render.</p>';
 // API route handlers are exported functions named by HTTP method
 // (pages/api/*.rose). trade-off: function declarations only - an arrow-exported
@@ -75,6 +79,8 @@ export interface CompileResult {
   client: string;
   stateKeys: string[];
   actionNames: string[];
+ /** The page exports `beforeAction` (the action guard), or null */
+  guardName: string | null;
   /** scoped CSS from the component's <style> block ('' when it has none) */
   style: string;
   /** the component exports `params` (dynamic-route prerender enumeration) */
@@ -498,6 +504,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
       client: '',
       stateKeys: [],
       actionNames: [],
+      guardName: null,
       style: '',
       hasParams: false,
       api: `import { getContext } from './runtime.js';\n${rewriteRoseImports(`${hoisted.imports}\n${hoisted.rest}`, 'ssr').trim()}`,
@@ -631,7 +638,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   // itself is embedded inside render(), where export is a syntax error.
   // Every exported async function is a server-only action: it reaches the
   // SSR module but never the client bundle.
-  const { clean: scriptNoExports, exports: exportStmts, actions, props } = extractExports(scriptNoImports);
+  const { clean: scriptNoExports, exports: exportStmts, actions, props, guard } = extractExports(scriptNoImports);
   const script = scriptNoExports;
   const actionNames = new Set(actions.map((a) => a.name));
 
@@ -786,6 +793,11 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   // Actions ship in the SSR module only; the client bundle gets every other
   // export (params, sync helpers) but never an action body.
   const ssrExports = actions.length > 0 ? `${exportStmts}\n${actions.map((a) => a.stmt).join('\n')}` : exportStmts;
+ // The guard is emitted at the SSR module's scope, beside the actions
+  // it fronts - the server entry imports it as `beforeAction_<i>` and the
+  // dispatch awaits it before the selected action. Never in the client
+  // bundle: a permission check that ships to the browser is not one.
+  const ssrGuard = guard ? `\n${guard}` : '';
   // pages/_middleware.rose is a hook module, not a route: no template, no
   // state, no head. Its script therefore belongs at MODULE scope, because
   // `handle` is hoisted there and the things a middleware actually needs -
@@ -797,8 +809,8 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   // compiler keeps server-side.)
   const isMiddleware = path.basename(filePath) === '_middleware.rose';
   const ssr = isMiddleware
-    ? `${RUNTIME_IMPORTS}\n\n${importStmts}\n\n${ssrExports}\n\n${cleanScript}\n`
-    : generateSSR(cleanScript, compiledTemplate, stateDeclsCode, ssrExports, compiledHead, props, hasNamedSlots, importStmts, isComponent);
+    ? `${RUNTIME_IMPORTS}\n\n${importStmts}\n\n${ssrExports}\n${ssrGuard}\n\n${cleanScript}\n`
+    : generateSSR(cleanScript, compiledTemplate, stateDeclsCode, ssrExports, compiledHead, props, hasNamedSlots, importStmts, isComponent, ssrGuard);
   const client = generateClient(cleanScript, compiledTemplate, stateDeclsCode, eventBindings, exportStmts, compiledHead, props, hasNamedSlots, importStmts, isComponent);
 
   // One rewrite for both bundles and every branch above: the `__rose_N__`
@@ -809,6 +821,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
     client: rewriteRoseImports(client, 'client'),
     stateKeys,
     actionNames: [...actionNames],
+    guardName: guard ? 'beforeAction' : null,
     style: scopedStyle,
     hasParams,
     usesContext,
@@ -959,13 +972,21 @@ function extractObjectLiteral(script: string, name: string): string | null {
   return script.slice(start, i);
 }
 
-function extractExports(script: string): { clean: string; exports: string; actions: Array<{ name: string; stmt: string }>; props: Array<{ name: string; def: string | null }> } {
+// Exported for `rosefn check`: it synthesizes a module declaration for every
+// imported .rose component from the SAME prop parse the compiler uses, so the
+// two can never disagree about what a component's props are.
+export function extractExports(script: string): { clean: string; exports: string; actions: Array<{ name: string; stmt: string }>; props: Array<{ name: string; def: string | null }>; guard: string } {
   const stmts: string[] = [];
   const actions: Array<{ name: string; stmt: string }> = [];
  // `export let` is a PROP, not a module-scope value - it is read from
   // the caller's props object per invocation. `export const/var` keeps its
   // old meaning (a build-time consumer's value: params, headers, csr, ...).
   const props: Array<{ name: string; def: string | null }> = [];
+ // `export async function beforeAction(name, form)` is the page's
+  // action GUARD - it runs before every action and vetoes with an
+  // ActionError. Server-only and never callable as an action itself, so it is
+  // kept out of both lists and emitted at module scope of the SSR module only.
+  const guards: string[] = [];
   let out = '';
   let pos = 0;
   let m: RegExpExecArray | null;
@@ -1020,7 +1041,10 @@ function extractExports(script: string): { clean: string; exports: string; actio
     out += script.slice(pos, start);
     const stmt = script.slice(start, i).trim();
     const asyncFn = stmt.match(/^export\s+async\s+function\s+(\w+)/);
-    if (asyncFn) {
+    const anyFn = stmt.match(/^export\s+(?:async\s+)?function\s+(\w+)/);
+    if (anyFn?.[1] === 'beforeAction') {
+      guards.push(stmt); // the guard: server-only, never an action target
+    } else if (asyncFn) {
       actions.push({ name: asyncFn[1], stmt }); // server-only: kept out of the client bundle
     } else if (kind === 'let') {
  // A prop. The declaration never reaches module scope - the
@@ -1035,7 +1059,7 @@ function extractExports(script: string): { clean: string; exports: string; actio
     pos = i;
   }
   out += script.slice(pos);
-  return { clean: out, exports: stmts.join('\n'), actions, props };
+  return { clean: out, exports: stmts.join('\n'), actions, props, guard: guards.join('\n') };
 }
 
 function extractDecls(script: string): Decl[] {
@@ -1120,6 +1144,20 @@ function removeRanges(text: string, ranges: Array<[number, number]>): string {
  * the parent is using, so one wire() pass covers the whole tree (the same
  * trick the layout chain already uses with children html).
  */
+
+/**
+ * Auto-call a BARE state read and nothing else. The callify pass has already
+ * rewritten a bare name to `name()`, so what reaches here is that - or an
+ * expression the developer wrote (a comparison, a member read, a call with
+ * arguments). Appending () to THOSE is a crash the developer reads as a
+ * framework bug: `{#if flash().name}` must not become `flash().name()`, and
+ * `{#each rows.filter(ok) as row}` must not become `rows.filter(ok)()`.
+ */
+function autoCall(expr: string): string {
+  const e = expr.trim();
+  return /^[A-Za-z_$][\w$]*$/.test(e) ? `${e}()` : e;
+}
+
 function compileTemplate(
   template: string,
   acc: string,
@@ -1161,7 +1199,7 @@ function compileTemplate(
       const [, cond, content] = earliest.match;
       const before = remaining.substring(0, earliest.index);
       if (before) result += emitChunk(before, acc, closes, scope);
-      const call = cond.trim().endsWith('()') ? cond.trim() : `${cond.trim()}()`;
+      const call = autoCall(cond);
       const id = nextId();
       const innerScope = scope ?? '__s';
       // Inner markers live in the block's OWN closes array, so wiring an
@@ -1169,13 +1207,12 @@ function compileTemplate(
       const inner = compileTemplate(content.trim(), 'h', '__c', innerScope, depth + 1, markers, comps);
       result += `const __b${id} = (__s, __c) => { let h = ''; ${inner} return h; };\n`;
       if (markers) {
-        result += `const __c${id} = [];\n`;
-        result += `const __bh${id} = __b${id}(${scope ?? 'undefined'}, __c${id});\n`;
-        result += `const __i${id} = ${closes}.length;\n`;
-        result += `${closes}.push(() => (${call}) ? { html: __bh${id}, closes: __c${id} } : null);\n`;
-        result += `${acc} += "<!--\u27e6i:" + __i${id} + "\u27e7-->";\n`;
-        result += `{ const __r = ${closes}[__i${id}](); if (__r) ${acc} += __r.html; }\n`;
-        result += `${acc} += "<!--\u27e6/i:" + __i${id} + "\u27e7-->";\n`;
+        // The content renders the FIRST time the block shows, never before -
+        // see the runtime's ifMark for why the eager version crashed
+        // `{#if user()}{user().name}{/if}`. The snapshot is memoized per
+        // render (wire() clones it when the block re-appears), so a block
+        // that never shows costs nothing and one that shows renders once.
+        result += `${acc} += ifMark(${closes}, () => (${call}), __b${id}${scope ? `, ${scope}` : ''});\n`;
       } else {
         result += `${acc} += (${call}) ? __b${id}(${scope ?? 'undefined'}, []) : '';\n`;
       }
@@ -1184,7 +1221,7 @@ function compileTemplate(
       const [, items, item, content] = earliest.match;
       const before = remaining.substring(0, earliest.index);
       if (before) result += emitChunk(before, acc, closes, scope);
-      const call = items.trim().endsWith('()') ? items.trim() : `${items.trim()}()`;
+      const call = autoCall(items);
       const id = nextId();
       // Rename the item variable to the block's scope parameter - INSIDE
       // EXPRESSIONS ONLY. A plain text replace would also rewrite the word in
@@ -1197,11 +1234,7 @@ function compileTemplate(
       const inner = compileTemplate(scoped, 'h', '__c', '__s', depth + 1, markers, comps);
       result += `const __b${id} = (__s, __c) => { let h = ''; ${inner} return h; };\n`;
       if (markers) {
-        result += `const __i${id} = ${closes}.length;\n`;
-        result += `${closes}.push(() => (${call}).map((${item}) => { const __c = []; return { html: __b${id}(${item}, __c), closes: __c, scope: ${item} }; }));\n`;
-        result += `${acc} += "<!--\u27e6l:" + __i${id} + "\u27e7-->";\n`;
-        result += `${closes}[__i${id}]().forEach((__r) => { ${acc} += __r.html; });\n`;
-        result += `${acc} += "<!--\u27e6/l:" + __i${id} + "\u27e7-->";\n`;
+        result += `${acc} += eachMark(${closes}, () => (${call}), __b${id});\n`;
       } else {
         result += `${acc} += (${call}).map((${item}) => __b${id}(${item}, [])).join('');\n`;
       }
@@ -1218,10 +1251,21 @@ function compileTemplate(
       // array and wire exactly like unwrapped content. Sync by design: the
       // template phase is sync ($data awaits happen before it), and the same
       // code runs on server and client.
+ // A boundary whose content drives a server action (an $action
+      // binding or a POST form inside it) asks the runtime first whether the
+      // action that produced THIS response failed, and contains it - the
+      // section degrades to the error message instead of rendering a widget
+      // built on work that never happened. Syntactic, like every other
+      // compiler rule here: a nested component's action binding is not seen.
+      // A boundary that drives no action keeps the plain string fallback and
+      // ships no runtime for this at all.
+      const catchesAction = /\$action:|<form[\s>]/.test(content);
       const inner = compileTemplate(content.trim(), 'h', closes, scope, depth + 1, markers, comps);
       result += `const __b${id} = (__c) => { let h = ''; ${inner} return h; };\n`;
       result += `let __bd${id} = '';\n`;
-      result += `try { __bd${id} = __b${id}(${closes}); } catch { __bd${id} = ${JSON.stringify(BOUNDARY_FALLBACK)}; }\n`;
+      result += catchesAction
+        ? `try { $actionErrorOrThrow(); __bd${id} = __b${id}(${closes}); } catch (e) { __bd${id} = $boundaryFallback(e); }\n`
+        : `try { __bd${id} = __b${id}(${closes}); } catch { __bd${id} = ${JSON.stringify(BOUNDARY_FALLBACK)}; }\n`;
       result += `${acc} += __bd${id};\n`;
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
     } else if (earliest.type === 'comp') {
@@ -1587,28 +1631,30 @@ function inlineImages(template: string, publicDir: string): string {
 }
 
 /**
- * Emit a reactive text marker: <!--⟦m:K⟧-->escaped value, closed by
- * <!--⟦/m:K⟧--> when the value is followed by literal text (pair = true).
- * The pair is what lets the wire patch exactly the value and leave the
- * prose around it alone.
+ * Emit a reactive text marker through the runtime's textMark(): the helper
+ * pushes the closure and returns the marker pair around the escaped value.
+ * A marker whose value is followed by literal text passes pair, so the wire
+ * can bound exactly the value and leave the prose alone.
  */
 function emitText(expr: string, acc: string, closes: string, scope: string | null, markers = true, pair = false): string {
-  const arg = scope ? `${scope}` : '';
   if (!markers) {
     // head block: inline escaped value, no marker comment (clean SSR html)
     return `${acc} += esc(${expr});\n`;
   }
-  const end = pair ? ` + "<!--\u27e6/m:" + (${closes}.length - 1) + "\u27e7-->"` : '';
-  return `${acc} += "<!--\u27e6m:" + (${closes}.push(${scope ? `(${scope})` : '()'} => (${expr})) - 1) + "\u27e7-->" + esc(${closes}[${closes}.length - 1](${arg}))${end};\n`;
+  const fn = scope ? `(${scope}) => (${expr})` : `() => (${expr})`;
+  let extra = pair ? ', 1' : scope ? ', 0' : '';
+  if (scope) extra += `, ${scope}`;
+  return `${acc} += textMark(${closes}, ${fn}${extra});\n`;
 }
 
-/** Emit a reactive attribute: name="value" data-b="K:name". */
+/** Emit a reactive attribute through the runtime's attrMark(). */
 function emitAttr(attr: string, expr: string, acc: string, closes: string, scope: string | null, markers = true): string {
   if (!markers) {
     return `${acc} += '${attr}="' + esc(${expr}) + '"';\n`;
   }
-  const arg = scope ? `${scope}` : '';
-  return `${acc} += '${attr}="' + esc(${closes}[${closes}.push(${scope ? `(${scope})` : '()'} => (${expr})) - 1](${arg})) + '" data-b="' + (${closes}.length - 1) + ':${attr}"';\n`;
+  const fn = scope ? `(${scope}) => (${expr})` : `() => (${expr})`;
+  const arg = scope ? `, ${scope}` : '';
+  return `${acc} += attrMark(${closes}, ${fn}, '${attr}'${arg});\n`;
 }
 
 /**
@@ -1621,8 +1667,10 @@ function compileSlot(acc: string): string {
 
 // The runtime's public surface, as one import line. Three generators emit it
 // (page SSR, page client, the middleware module) - one constant so the list
-// can never drift between them.
-const RUNTIME_IMPORTS = `import { state, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $t, bestLocale, $cookies, $sessionCookie, $store } from './runtime.js';`;
+// can never drift between them. esbuild tree-shakes what a module never
+// references, so a page that uses none of the action helpers ships none
+// of them.
+const RUNTIME_IMPORTS = `import { state, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $t, bestLocale, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, ifMark, eachMark, headMark } from './runtime.js';`;
 
 /**
  * `export let title = 'x'` -> a per-invocation const read from the
@@ -1664,16 +1712,14 @@ const __slotBlock = (closes, sl, name, pairs) => {
   return "<!--\\u27e6i:" + idx + "\\u27e7-->" + (hit ? String(hit.fn(hit.o, [])) : "") + "<!--\\u27e6/i:" + idx + "\\u27e7-->";
 };`;
 
-function generateSSR(script: string, templateFn: string, stateDeclsCode: string, exports = '', headFn = '', props: Array<{ name: string; def: string | null }> = [], namedSlots = false, imports = '', isComponent = false): string {
+function generateSSR(script: string, templateFn: string, stateDeclsCode: string, exports = '', headFn = '', props: Array<{ name: string; def: string | null }> = [], namedSlots = false, imports = '', isComponent = false, guard = ''): string {
   // The head block renders to a clean html string (no markers) and is wrapped
   // in an h marker pair: renderPage extracts it for <head> injection, the
   // client's wire() applies it to the document on navigation.
   const headCode = headFn
     ? `
 const __head = () => { let __hd = ''; ${headFn} return __hd; };
-const __hi = closes.length;
-closes.push(__head);
-__html += "<!--\u27e6h:" + __hi + "\u27e7-->" + __head() + "<!--\u27e6/h:" + __hi + "\u27e7-->";`
+__html += headMark(closes, __head);`
     : '';
   // A page's render is async ($data awaits); a component's is not - its
   // parent calls it inside a string concatenation (`h += Card(...)`), and a
@@ -1686,6 +1732,7 @@ ${RUNTIME_IMPORTS}
 ${imports}
 
 ${exports}
+${guard}
 
 ${namedSlots ? SLOT_HELPER : ''}
 
@@ -1694,6 +1741,10 @@ export ${isComponent ? 'function' : 'async function'} render(closes, children, _
   ${namedSlots ? 'const __sl = __slots || {};' : ''}
   ${propsCode(props)}
   ${stateDeclsCode}
+ // The incremental patches of the action that produced THIS response,
+  // applied to the state the declarations above just established (a no-op on
+  // every path that is not a server action's re-render - see the runtime).
+  ${isComponent ? '' : 'applyStateDeltas();'}
   ${script}
   const __root = (__c, children) => { let h = ''; ${templateFn} return h; };
   let __html = ${isComponent ? '' : 'await '}__root(closes, children);${headCode}
@@ -1722,9 +1773,7 @@ function generateClient(
   const headCode = headFn
     ? `
 const __head = () => { let __hd = ''; ${headFn} return __hd; };
-const __hi = closes.length;
-closes.push(__head);
-__html += "<!--\u27e6h:" + __hi + "\u27e7-->" + __head() + "<!--\u27e6/h:" + __hi + "\u27e7-->";`
+__html += headMark(closes, __head);`
     : '';
 
   return `
@@ -2058,8 +2107,12 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
       const isPage = !infos[i].isLayout && !infos[i].isNotFound;
       const names = isPage ? compiled[i].actionNames : [];
       const actionImports = names.map((n) => `${n} as ${n}_${i}`).join(', ');
-      return names.length > 0
-        ? `import { render as render_${i}, ${actionImports} } from './comp-${i}.ssr.js';`
+ // The action guard rides the same import, server-only like the
+      // actions it fronts
+      const guardImport = isPage && compiled[i].guardName ? `beforeAction as beforeAction_${i}` : '';
+      const named = [actionImports, guardImport].filter(Boolean).join(', ');
+      return named
+        ? `import { render as render_${i}, ${named} } from './comp-${i}.ssr.js';`
         : `import { render as render_${i} } from './comp-${i}.ssr.js';`;
     })
     .join('\n');
@@ -2105,13 +2158,16 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
         }
       }
       const csrFlag = routeNoJs(i) ? ', csr: false' : '';
-      return `{ pattern: '${info.pattern}', path: '${info.routePath}', render: ${compose(i)}, actions: ${actionMap ? `{ ${actionMap} }` : 'null'}${csrFlag} }`;
+ // Guard - runs before every action of this route (null when the
+      // page exports no beforeAction)
+      const guardFlag = compiled[i].guardName ? `, guard: beforeAction_${i}` : '';
+      return `{ pattern: '${info.pattern}', path: '${info.routePath}', render: ${compose(i)}, actions: ${actionMap ? `{ ${actionMap} }` : 'null'}${guardFlag}${csrFlag} }`;
     })
     .join(',\n  ');
 
   const serverEntry = `
 ${serverImports}
-import { setState, clearRequestState, serializeState, resetRequestContext, isLocale, setLocales, localeList, setStoreTransport, applyStorePatch } from './runtime.js';
+import { setState, clearRequestState, serializeState, resetRequestContext, isLocale, setLocales, localeList, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta } from './runtime.js';
 ${runtimePlugins.length > 0
     ? `import { hooks as __pluginHooks, hasRequestHooks as __hasRequestHooks, hasResponseHooks as __hasResponseHooks } from './plugins.js';`
 : `// no plugin declares a runtime hook, so there is no plugins
@@ -2376,12 +2432,41 @@ export async function renderPage(pathname, form) {
         if (notFound) return { ...(await renderFallback(pathname, notFound)), status: 404 };
         return { html: '<h1>404</h1><p>Page not found</p>', state: '{}', head: [], status: 404 };
       }
+ // The action dispatch. The page's guard (exported
+      // beforeAction) runs FIRST and vetoes with an ActionError - the
+      // action-level permission check. Then the selected action runs and its
+      // return value seeds this render's state, per key, so an incremental
+      // patch ($append and friends) grows a large list by one row instead of
+      // re-sending the whole thing. An ActionError from either half is a
+      // BUSINESS failure: it is seeded as the 'actionError' state, the
+      // response carries its status, and the page renders with the failure
+      // visible (a {#boundary} around the action's widget contains it).
+      // Anything else is a bug and keeps going to the 500 page.
+      let actionStatus = 0;
       if (form && route.actions) {
-        const fn = route.actions[form.get('__action') || 'action'];
+        const actionName = form.get('__action') || 'action';
+        const fn = route.actions[actionName];
         if (fn) {
-          const patch = await fn(form);
-          if (patch && typeof patch === 'object') {
-            for (const key of Object.keys(patch)) setState(key, patch[key]);
+          try {
+            if (route.guard) await route.guard(actionName, form);
+            const patch = await fn(form);
+            if (patch && typeof patch === 'object') {
+              for (const key of Object.keys(patch)) {
+                const v = patch[key];
+                // An incremental patch is RECORDED, not applied: the render's
+                // own state declarations apply it, so the delta is relative to
+                // the value the page was going to render anyway.
+                if (v instanceof StateDelta) setStateDelta(key, v);
+                else setState(key, v);
+              }
+            }
+          } catch (err) {
+            if (err instanceof ActionError) {
+              setState('actionError', { action: actionName, message: err.message, code: err.code, field: err.field });
+              actionStatus = err.code;
+            } else {
+              throw err;
+            }
           }
         }
       }
@@ -2402,7 +2487,11 @@ export async function renderPage(pathname, form) {
       // asserted csr = false) - the document ships no runtime, no state
       // script, zero JavaScript. Every other route keeps the bundle. The
       // caller passes this straight to the shell as js.
-      return { html: rendered.html, state, head: rendered.head, status: 200, csr: route.csr !== false };
+ // Status is the failed action's code when one failed - the page
+      // rendered fine, so the body is the page with the failure visible, and
+      // the status says what happened (a 403 from the guard, a 422 from a
+      // validation action). 200 otherwise.
+      return { html: rendered.html, state, head: rendered.head, status: actionStatus || 200, csr: route.csr !== false };
     }
   }
   if (notFound) {

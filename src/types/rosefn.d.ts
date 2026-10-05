@@ -78,6 +78,42 @@ declare function esc(v: unknown): string;
 /** Call a server action by name; the response is adopted in place. */
 declare function $action(name: string, e?: Event): Promise<void>;
 
+/**
+ * The standardized failure a server action throws for a BUSINESS error (bad
+ * input, not signed in, a duplicate) - as opposed to a bug, which still goes
+ * to the 500 page. `code` becomes the response status; `field` names the
+ * offending form input.
+ */
+declare class ActionError extends Error {
+  code: number;
+  field?: string;
+  constructor(message: string, code?: number, field?: string);
+}
+
+/** What the dispatch seeds into state when an action fails (what `$actionError()` returns). */
+interface ActionErrorInfo {
+  action: string;
+  message: string;
+  code: number;
+  field?: string;
+}
+
+/**
+ * The failure of the action that produced the response being rendered, or
+ * null. Render it (`{#if $actionError()}<p>{$actionError().message}</p>{/if}`)
+ * or contain it with a `{#boundary}` around the action's widget.
+ */
+declare function $actionError(): ActionErrorInfo | null;
+
+/**
+ * An incremental patch: an action's return value may map a state key to an
+ * OPERATION instead of a whole replacement, so growing a large list costs one
+ * row rather than a second copy of the list.
+ */
+declare function $append(value: unknown): unknown;
+declare function $prepend(value: unknown): unknown;
+declare function $merge(value: Record<string, unknown>): unknown;
+
 /** Whether a state key already holds a value (what `$data` checks before fetching). */
 declare function hasState(key: string): boolean;
 

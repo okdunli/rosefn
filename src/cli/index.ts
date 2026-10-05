@@ -7,7 +7,7 @@ import * as path from 'path';
 import * as zlib from 'zlib';
 import { createRequire } from 'module';
 import { pathToFileURL, fileURLToPath } from 'url';
-import { buildProject, scanRoseFiles, scriptOf, loadPlugins, type RouteInfo } from '../compiler/index.js';
+import { buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadPlugins, type RouteInfo } from '../compiler/index.js';
 import { getHtmlShell, getClientSource, shellOpen, clientScriptTag, securityHeaders, setBundleMode } from './shell.js';
 // Type-only: erased by esbuild/tsx, so the published CLI stays a ~100 KB
 // bundle with no TypeScript dependency. `rosefn check` loads the PROJECT's
@@ -1200,7 +1200,7 @@ Full syntax: the README of the rosefn package.
  * in-memory compiler host and fixed strict options, documented.
  */
 async function check(): Promise<void> {
-  const files = await scanRoseFiles(SRC_DIR);
+  const files = [...(await scanRoseFiles(SRC_DIR)), ...(await scanComponentFiles(SRC_DIR))];
   if (files.length === 0) {
     console.error(`Rosefn: no .rose pages found under ${path.join(SRC_DIR, 'src', 'pages')} - run rosefn check from a project root, or pass one: rosefn check <dir>`);
     process.exit(1);
@@ -1262,6 +1262,43 @@ async function check(): Promise<void> {
   if (checked === 0) {
     console.log('Rosefn: no .rose scripts to check');
     return;
+  }
+
+ // An imported component's binding IS its render function (the
+  // compiler rewrites `import Card from '...Card.rose'` to
+  // `import { render as Card }`), and TypeScript cannot resolve a `.rose`
+  // specifier on its own: its resolver only tries `<name>.rose.d.ts`-style
+  // paths for an unknown extension (measured in typescript.js), so every
+  // `.rose` import target gets a synthesized declaration module registered at
+  // exactly that path. The props come from the SAME extractExports parse the
+  // compiler uses, so a wrong prop type at the call site is a type error and
+  // the two can never drift. The component's own script keeps its virtual
+  // entry untouched - line numbers stay exact.
+  const propType = (def: string | null): string => {
+    if (!def) return 'unknown';                       // `export let x;`
+    if (/^['"`]/.test(def)) return 'string';
+    if (/^-?\d+(\.\d+)?$/.test(def)) return 'number';
+    if (/^(true|false)$/.test(def)) return 'boolean';
+    return 'unknown';                                 // null, a call, an object: the honest answer
+  };
+  const ROSE_IMPORT_RE = /['"](\.[^'"]+\.rose)['"]/g;
+  const declared = new Set<string>();
+  for (const file of [...virtual.keys()]) {
+    const script = scriptOf(await fs.promises.readFile(file, 'utf-8').catch(() => ''));
+    if (!script) continue;
+    for (const spec of script.matchAll(ROSE_IMPORT_RE)) {
+      const target = norm(path.resolve(path.dirname(file), spec[1]));
+      if (target === file || declared.has(target)) continue;
+      const targetSource = await fs.promises.readFile(target, 'utf-8').catch(() => null);
+      if (targetSource === null) continue; // the build reports a missing import loudly; the checker stays out of its way
+      const props = extractExports(scriptOf(targetSource) ?? '').props;
+      virtual.set(`${target}.d.ts`, [
+        `declare function render(closes: unknown[], children: string, __props: { ${props.map((p) => `${p.name}?: ${propType(p.def)}`).join('; ')} }, __slots?: Record<string, unknown>): string;`,
+        'export default render;',
+        '',
+      ].join('\n'));
+      declared.add(target);
+    }
   }
 
   const options: ts.CompilerOptions = {
