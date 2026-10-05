@@ -116,12 +116,23 @@ export function ifMark(
   scope?: unknown
 ): string {
   const i = closes.length;
-  // The content renders the FIRST time the block shows, never before, and is
-  // then memoized for this render: a block that never shows costs nothing and
-  // a block that shows renders exactly once.
+  // The content renders the FIRST time the block shows, never before: the
+  // eager version crashed `{#if user()}{user().name}{/if}`, because it
+  // rendered the body while the condition was still false. A block that
+  // never shows costs nothing.
+  //
+  // The memo is per SHOWING, not per render: this close outlives the render
+  // that created it (the client's {#if} effect calls it on every toggle),
+  // so memoizing across a hide would replay the content as it was when the
+  // block was last open - losing everything that changed meanwhile (an
+  // item added to a list inside the block, a flag the user flipped while
+  // it was hidden). Hiding forgets the render; the next showing re-renders.
   let snap: { html: string; closes: Close[] } | null = null;
   closes.push(() => {
-    if (!cond()) return null;
+    if (!cond()) {
+      snap = null;
+      return null;
+    }
     if (!snap) {
       const c: Close[] = [];
       snap = { html: String(fn(scope, c)), closes: c };
@@ -261,17 +272,35 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
   // collected here because the walker sees the whole subtree, but only the
   // block's recursive wire() may interpret them - so they are skipped below
   // and their end markers never enter this pass's `ends` map.
+  //
+  // Pairing is STRUCTURAL, not first-match: block markers are indexed per
+  // closes array, and every block renders into its own array, so an inner
+  // block routinely shares its parent's index - the first {#if} in a page
+  // and the first {#if} inside it are both ⟦i:0⟧. Matching an open against
+  // the first end marker in document order therefore paired the OUTER
+  // start with the INNER end, and left the second row's markers (after
+  // that end) for the outer pass to interpret with the wrong array. A
+  // stack of open starts closes on the innermost block of the same kind
+  // and index, which is what the document structure actually says.
   const nested = new Set<Comment>();
+  const open: number[] = []; // positions of the open {#if}/{#each} starts
   for (let i = 0; i < comments.length; i++) {
     const m = (comments[i].nodeValue ?? '').match(MARK_RE);
-    if (!m || (m[1] !== 'i' && m[1] !== 'l')) continue;
-    for (let j = i + 1; j < comments.length; j++) {
-      const em = (comments[j].nodeValue ?? '').match(END_RE);
-      if (em && em[1] === m[1] && +em[2] === +m[2]) {
-        for (let k = i + 1; k < j; k++) nested.add(comments[k]);
-        break;
-      }
+    if (m && (m[1] === 'i' || m[1] === 'l')) {
+      open.push(i);
+      continue;
     }
+    const em = (comments[i].nodeValue ?? '').match(END_RE);
+    if (!em) continue;
+    const key = em[1] + em[2];
+    let at = -1;
+    for (let k = open.length - 1; k >= 0; k--) {
+      const om = (comments[open[k]].nodeValue ?? '').match(MARK_RE)!;
+      if (om[1] + om[2] === key) { at = k; break; }
+    }
+    if (at < 0) continue; // an end with no open block: nothing to pair with
+    for (let k = open[at] + 1; k < i; k++) nested.add(comments[k]);
+    open.length = at; // pop this block and any inner block left unclosed
   }
 
   const ends = new Map<number, Comment>();
@@ -348,7 +377,15 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
           st.__st = undefined;
         }
         const r = (closes[idx] as (s?: unknown) => unknown)(scope) as { html: string; closes: unknown[] } | null;
-        if (!r) return;
+        if (!r) {
+          // Hidden. The client has now evaluated this block once, so from
+          // here on whatever sits between the anchors is client-rendered:
+          // a block the server left hidden has NOTHING to adopt, and its
+          // first visible run must clone from the fresh render instead of
+          // moving an empty range out and back.
+          st.__ever = true;
+          return;
+        }
         // First run adopts the server-rendered content (move out, wire, move
         // back - identity preserved); later runs clone the block template.
         // In both cases the nodes land just before the end anchor.

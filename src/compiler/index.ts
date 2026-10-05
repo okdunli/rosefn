@@ -1239,6 +1239,61 @@ function autoCall(expr: string): string {
   return /^[A-Za-z_$][\w$]*$/.test(e) ? `${e}()` : e;
 }
 
+/**
+ * Find a `{#if ...}...{/if}`, `{#each ... as x}...{/each}` or
+ * `{#boundary}...{/boundary}` block, NESTING-AWARE: the close tag that
+ * ends the block is the one that BALANCES the opens inside it.
+ *
+ * A non-greedy regex cannot tell the two apart - it stops at the first
+ * close tag, which is the INNER block's. The outer block then ends early,
+ * its own close tag is left in the stream as prose, and the inner open
+ * (now unclosed inside the truncated content) falls through to the
+ * expression matcher and compiles to `(#if ...)` - the cryptic
+ * "Unexpected #if" esbuild error. The scan below counts same-kind opens
+ * as it walks, so an `{#if}` inside an `{#if}` (or an `{#each}` inside
+ * an `{#each}`) is content, not a terminator.
+ *
+ * Returns a RegExpExecArray-shaped value (index + capture groups in the
+ * same order the old regexes produced) so the call sites are unchanged.
+ */
+function findBlock(src: string, kind: 'if' | 'each' | 'boundary'): RegExpExecArray | null {
+  const head = kind === 'boundary'
+    ? /\{#boundary\}/g
+    : kind === 'if'
+      ? /\{#if\s+([^}]+)\}/g
+      : /\{#each\s+([^}]+?)\s+as\s+(\w+)\}/g;
+  const closeRe = new RegExp(`\\{/${kind}\\}`, 'g');
+  let open: RegExpExecArray | null;
+  while ((open = head.exec(src))) {
+    const start = open.index;
+    const afterOpen = start + open[0].length;
+    let depth = 1;
+    let i = afterOpen;
+    for (;;) {
+      head.lastIndex = i;
+      closeRe.lastIndex = i;
+      const nextOpen = head.exec(src);
+      const nextClose = closeRe.exec(src);
+      if (!nextClose) break; // this open never closes: not a block, look past it
+      if (nextOpen && nextOpen.index < nextClose.index) {
+        depth++;
+        i = nextOpen.index + nextOpen[0].length;
+        continue;
+      }
+      i = nextClose.index + nextClose[0].length;
+      if (--depth === 0) {
+        const content = src.slice(afterOpen, nextClose.index);
+        const groups = kind === 'boundary' ? [content] : kind === 'if' ? [open[1], content] : [open[1], open[2], content];
+        const arr = [src.slice(start, i), ...groups] as unknown as RegExpExecArray;
+        (arr as any).index = start;
+        return arr;
+      }
+    }
+    head.lastIndex = afterOpen;
+  }
+  return null;
+}
+
 function compileTemplate(
   template: string,
   acc: string,
@@ -1255,9 +1310,10 @@ function compileTemplate(
   const nextId = () => `${depth}_${blockId++}`;
 
   while (remaining.length > 0) {
-    const ifMatch = remaining.match(/\{#if\s+([^}]+)\}([\s\S]*?)\{\/if\}/) as RegExpExecArray | null;
-    const eachMatch = remaining.match(/\{#each\s+([\w.]+(?:\(\))?)\s+as\s+(\w+)\}([\s\S]*?)\{\/each\}/) as RegExpExecArray | null;
-    const boundaryMatch = remaining.match(/\{#boundary\}([\s\S]*?)\{\/boundary\}/) as RegExpExecArray | null;
+    // nesting-aware: an inner block's close tag must not end its parent
+    const ifMatch = findBlock(remaining, 'if');
+    const eachMatch = findBlock(remaining, 'each');
+    const boundaryMatch = findBlock(remaining, 'boundary');
     const exprMatch = remaining.match(/\{([^{}]+)\}/) as RegExpExecArray | null;
     const compTag = comps.size > 0 ? findCompTag(remaining, comps) : null;
 
