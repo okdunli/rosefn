@@ -1,0 +1,36 @@
+<script>
+  // A single post. The server render gets the row from the middleware's
+  // context; a client-side navigation fetches it from the api by the
+  // same id the router put in the URL. `id` is the route's param state -
+  // the router fills it from the pathname before this $data runs.
+  //
+  // The api fallback is CLIENT-only: Node's fetch rejects a relative URL,
+  // and on the server the context (or null -> the not-found branch) is
+  // already the answer.
+  //
+  // Because the row is per-request data (it changes the moment someone
+  // writes a post), the compiler keeps this route dynamic: never baked,
+  // always rendered live.
+  interface Post { id: number; title: string; body: string; author: string }
+
+  let id = $state('1');
+  let post = $data(async (): Promise<Post | null> =>
+    getContext().post ?? (typeof location === 'undefined' ? null : (await (await fetch('/api/posts/' + id())).json()).post ?? null));
+</script>
+
+<head>
+  <title>{post() ? post()!.title : 'Not found'} - Rosevine</title>
+</head>
+
+{#if post()}
+  <article>
+    <h1>{post()!.title}</h1>
+    <p>{post()!.body}</p>
+    <p><small>by {post()!.author}</small></p>
+  </article>
+{/if}
+{#if !post()}
+  <h1>Not found</h1>
+  <p>No post with that id.</p>
+{/if}
+<p><a href="/">Back to all posts</a></p>

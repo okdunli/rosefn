@@ -1,0 +1,37 @@
+<script>
+  import type { DatabaseSync } from 'node:sqlite';
+
+  // One post as JSON: GET /api/posts/2. The post page reads this on a
+  // client-side navigation (its server render gets the row from the
+  // middleware's context instead). Public: reading a post needs no
+  // session. The id is the last path segment.
+  let conn: DatabaseSync | undefined;
+  const getDb = async () => {
+    if (!conn) {
+      const { DatabaseSync } = await import('node:sqlite');
+      conn = new DatabaseSync('blog.db');
+      conn.exec(`
+        CREATE TABLE IF NOT EXISTS posts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          author TEXT NOT NULL DEFAULT 'anonymous'
+        );
+      `);
+    }
+    return conn;
+  };
+
+  interface PostRow { id: number; title: string; body: string; author: string }
+
+  const json = (obj: unknown, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
+
+  export async function GET(req: Request) {
+    const id = Number(new URL(req.url).pathname.split('/').pop());
+    const db = await getDb();
+    const post = db.prepare('SELECT id, title, body, author FROM posts WHERE id = ?').get(id) as PostRow | undefined;
+    if (!post) return json({ error: 'not found' }, 404);
+    return { post };
+  }
+</script>

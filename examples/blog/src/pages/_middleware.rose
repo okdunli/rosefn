@@ -1,0 +1,74 @@
+<script>
+  import { $cookies } from './runtime.js';
+  import type { DatabaseSync } from 'node:sqlite';
+
+  // The middleware runs before every request - pages, POSTs and api calls
+  // alike. In this blog it does three jobs:
+  //
+  //   1. open the database once per process (lazily - never at module
+  //      load, and never as a build side effect),
+  //   2. load the rows each route needs into the request context,
+  //   3. decide who is signed in.
+  //
+  // Why the data loads HERE and not in the page: a page's $data body ships
+  // to the browser (it re-runs on client-side navigation), so a database
+  // import inside a page would land in the client bundle and break the
+  // build. The middleware module is the one the compiler never ships.
+
+  // The connection. node:sqlite is inside Node 22+ - zero dependencies,
+  // zero native modules. A Postgres deploy swaps this block for a pg.Pool
+  // (same shape: prepare/run/all) and nothing else in the app moves.
+  // The file path is relative to the directory you started the server
+  // from - never inside dist/, which is a build artifact.
+  let conn: DatabaseSync | undefined;
+  const getDb = async () => {
+    if (!conn) {
+      const { DatabaseSync } = await import('node:sqlite');
+      conn = new DatabaseSync('blog.db');
+      conn.exec(`
+        CREATE TABLE IF NOT EXISTS posts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          author TEXT NOT NULL DEFAULT 'anonymous'
+        );
+        INSERT OR IGNORE INTO posts (id, title, body, author) VALUES
+          (1, 'One request, zero hydration', 'The whole page - data included - arrives in the first response. No runtime boots to show it.', 'ada'),
+          (2, 'The database is not the hard part', 'node:sqlite ships inside Node. The hard part is keeping the single-request contract while the data changes per request.', 'grace');
+      `);
+    }
+    return conn;
+  };
+
+  interface PostRow { id: number; title: string; body: string; author: string }
+
+  export async function handle(request: Request) {
+    const { pathname } = new URL(request.url);
+    const session = $cookies(request).session;
+
+    // The write page is walled by ABSENCE of data, not by a redirect: with
+    // no session the middleware loads no posts, so the page renders its
+    // login form and the manager never exists in the response. A static
+    // deploy (the Go binary) shows exactly the same login form.
+    if (pathname === '/admin' && session) {
+      const db = await getDb();
+      getContext().posts = db.prepare('SELECT id, title, body, author FROM posts ORDER BY id DESC').all() as unknown as PostRow[];
+    }
+
+    // The list page reads the same rows.
+    if (pathname === '/') {
+      const db = await getDb();
+      getContext().posts = db.prepare('SELECT id, title, body, author FROM posts ORDER BY id DESC').all() as unknown as PostRow[];
+    }
+
+    // A single post: /post/<id>. The id is the last path segment.
+    const postMatch = pathname.match(/^\/post\/(\d+)$/);
+    if (postMatch) {
+      const db = await getDb();
+      getContext().post = db.prepare('SELECT id, title, body, author FROM posts WHERE id = ?').get(Number(postMatch[1])) as PostRow | undefined;
+    }
+
+    // Everything downstream can ask who is calling.
+    getContext().user = session ? { id: Number(session) } : null;
+  }
+</script>

@@ -1,0 +1,72 @@
+<script>
+  import { $cookies } from './runtime.js';
+  import type { DatabaseSync } from 'node:sqlite';
+
+  // The blog's JSON api. GET is public; POST and DELETE need the session
+  // cookie the login route sets. The api namespace answers JSON only -
+  // never an HTML page - so a browser and a script get the same contract.
+  //
+  // node:sqlite is imported LAZILY, inside the accessor: a static import
+  // would put it in the server bundle's static graph, and the edge
+  // adapter loads that same bundle, so a node: built-in would boot-crash
+  // the whole app on an edge runtime instead of failing this one route.
+  // It also keeps `rosefn build` side-effect free (no database file is
+  // created at build time). One connection per worker process - that IS
+  // the pool; a Postgres deploy swaps this block for a pg.Pool.
+  let conn: DatabaseSync | undefined;
+  const getDb = async () => {
+    if (!conn) {
+      const { DatabaseSync } = await import('node:sqlite');
+      conn = new DatabaseSync('blog.db');
+      conn.exec(`
+        CREATE TABLE IF NOT EXISTS posts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          author TEXT NOT NULL DEFAULT 'anonymous'
+        );
+      `);
+    }
+    return conn;
+  };
+
+  interface PostRow { id: number; title: string; body: string; author: string }
+
+  const json = (obj: unknown, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
+
+  const signedIn = (req: Request) => $cookies(req).session === '1';
+
+  // The list, newest first. The pages read the same rows through the
+  // middleware on a server render, and through this endpoint on a
+  // client-side navigation.
+  export async function GET() {
+    const db = await getDb();
+    const posts = db.prepare('SELECT id, title, body, author FROM posts ORDER BY id DESC').all() as unknown as PostRow[];
+    return { posts };
+  }
+
+  // Create. 401 without a session, 400 without both fields, 201 with the
+  // new id. The CSRF guard on `rosefn serve` has already refused
+  // cross-site writes before this handler runs.
+  export async function POST(req: Request) {
+    if (!signedIn(req)) return json({ error: 'sign in first' }, 401);
+    const form = await req.formData();
+    const title = String(form.get('title') ?? '').trim();
+    const body = String(form.get('body') ?? '').trim();
+    if (!title || !body) return json({ error: 'title and body are required' }, 400);
+    const db = await getDb();
+    const info = db.prepare('INSERT INTO posts (title, body, author) VALUES (?, ?, ?)').run(title, body, 'ada');
+    return json({ id: Number(info.lastInsertRowid) }, 201);
+  }
+
+  // Delete by ?id=. Same wall as POST.
+  export async function DELETE(req: Request) {
+    if (!signedIn(req)) return json({ error: 'sign in first' }, 401);
+    const id = Number(new URL(req.url).searchParams.get('id'));
+    if (!id) return json({ error: 'id is required' }, 400);
+    const db = await getDb();
+    db.prepare('DELETE FROM posts WHERE id = ?').run(id);
+    return json({ deleted: id });
+  }
+</script>

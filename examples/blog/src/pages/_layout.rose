@@ -1,0 +1,42 @@
+<script>
+  // The layout wraps every page of the blog. `links` is ordinary state:
+  // the nav is one {#each} over it, so adding a page means adding a line
+  // here and a file under src/pages/.
+  let links = $state([
+    { href: '/', label: 'Posts' },
+    { href: '/admin', label: 'Write' }
+  ]);
+</script>
+
+<style>
+  /* Scoped to this file: the build rewrites every selector with this
+     component's scope key, so `.shell` below cannot leak into a page's
+     own `.shell`. Zero stylesheet requests - the CSS is inlined into
+     the document. */
+  .shell { max-width: 42rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; font-family: system-ui, sans-serif; }
+  .rb { font-size: 1.25rem; }
+  .rn a { margin-right: 1rem; }
+  .rf { margin-top: 3rem; color: #888; font-size: 0.85rem; }
+</style>
+
+<head>
+  <title>Rosevine</title>
+  <meta name="description" content="A blog built with rosefn: one request, zero hydration, a real database.">
+</head>
+
+<div class="shell">
+  <header>
+    <strong class="rb">🌹 Rosevine</strong>
+    <nav class="rn">
+      {#each links() as link}
+        <a href={link.href}>{link.label}</a>
+      {/each}
+    </nav>
+  </header>
+  <main>
+    <slot />
+  </main>
+  <footer class="rf">
+    Built with rosefn — the list page ships zero JavaScript.
+  </footer>
+</div>

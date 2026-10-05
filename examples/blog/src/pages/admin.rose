@@ -1,0 +1,85 @@
+<script>
+  // The write page. Two forms, both progressive-enhancement honest:
+  //
+  //   with JS    - the submit handler fetch-POSTs to the api route and
+  //                refresh()es the page in place: one request, no reload
+  //   without JS - the form posts natively to the same api route; the
+  //                cookie is set / the row is written, and the next visit
+  //                shows the result
+  //
+  // The wall itself is NOT here: without a session the middleware loads
+  // no posts and the api refuses writes, so this page renders its login
+  // form and nothing else. `signedIn` below is UX only - it remembers in
+  // this tab that the login fetch succeeded, because an HttpOnly cookie
+  // is deliberately unreadable from JavaScript.
+  interface Post { id: number; title: string; body: string; author: string }
+
+  let signedIn = $state(false);
+  let error = $state('');
+
+  // Server render: the middleware's context. Client-side navigation: the
+  // same rows from the api (the honest cost of fresh server data after a
+  // SPA navigation - one request, exactly like the demo's /feed). The
+  // fetch is client-only: Node's fetch rejects a relative URL, and on the
+  // server the context is the answer.
+  let user = $data(async () => getContext().user ?? null);
+  let posts = $data(async (): Promise<Post[] | null> =>
+    getContext().posts ?? (signedIn() && typeof location !== 'undefined' ? (await (await fetch('/api/posts')).json()).posts : null));
+
+  async function login(e: SubmitEvent) {
+    e.preventDefault();
+    const form = e.target as HTMLFormElement;
+    const res = await fetch('/api/login', { method: 'POST', body: new FormData(form) });
+    if (res.ok) {
+      signedIn(true);
+      error('');
+    } else {
+      error('wrong user or password');
+    }
+  }
+
+  async function publish(e: SubmitEvent) {
+    e.preventDefault();
+    const form = e.target as HTMLFormElement;
+    const res = await fetch('/api/posts', { method: 'POST', body: new FormData(form) });
+    if (res.ok) {
+      error('');
+      form.reset();
+      await refresh();
+    } else {
+      error(await res.text());
+    }
+  }
+</script>
+
+<h1>Write</h1>
+
+{#if signedIn() || user()}
+  <p>Signed in. A new post is live the moment it is written - no rebuild.</p>
+  {#if error()}
+    <p><strong>{error()}</strong></p>
+  {/if}
+  <form on:submit={publish}>
+    <input name="title" placeholder="Title" aria-label="Title" required>
+    <textarea name="body" placeholder="Body" aria-label="Body" rows="4" required></textarea>
+    <button type="submit">Publish</button>
+  </form>
+  <h2>Published</h2>
+  <ul>
+    {#each posts() ?? [] as post}
+      <li><a href={'/post/' + post.id}>{post.title}</a></li>
+    {/each}
+  </ul>
+{/if}
+
+{#if !signedIn() && !user()}
+  <p>Sign in to write. The demo account is <code>ada</code> / <code>lovelace</code>.</p>
+  {#if error()}
+    <p><strong>{error()}</strong></p>
+  {/if}
+  <form method="POST" action="/api/login" on:submit={login}>
+    <input name="user" placeholder="User" aria-label="User" required>
+    <input name="pass" type="password" placeholder="Password" aria-label="Password" required>
+    <button type="submit">Sign in</button>
+  </form>
+{/if}
