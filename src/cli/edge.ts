@@ -22,12 +22,14 @@ import { join } from 'path';
 import { buildShell, shellOpen, clientScriptTag, securityHeaders } from './shell.js';
 
 type ServerModule = {
-  renderPage(pathname: string, form?: FormData): Promise<{ html: string; state: string; head: string[]; status?: number; csr?: boolean }>;
+  renderPage(pathname: string, form?: FormData): Promise<{ html: string; state: string; head: string[]; status?: number; csr?: boolean; lang?: string; dir?: string }>;
   renderPageStream(pathname: string, write: (chunk: string) => void, shellOpen: string, clientTag: string): Promise<number>;
   canStream(pathname: string): boolean;
   isNoJs(pathname: string): boolean;
   isApi(pathname: string): boolean;
   handleApi(method: string, pathname: string, request: Request): Promise<Response>;
+ /** The document's <html lang>/<dir> for a pathname (streaming needs them before the render) */
+  docAttrs(pathname: string): { lang: string; dir: string };
   /** pages/_middleware.rose's handler, or null when the project has none */
   middleware: ((request: Request) => Promise<Response | void | null>) | null;
   /** run the middleware once per request; returns its short-circuit Response or null */
@@ -139,10 +141,13 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
       const encoder = new TextEncoder();
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
+ // The shell opens before the render, so its <html lang>/<dir>
+          // come from the pathname (the server bundle's docAttrs)
+          const doc = mod.docAttrs(pathname);
           await mod.renderPageStream(
             pathname,
             (chunk) => controller.enqueue(encoder.encode(chunk)),
-            shellOpen(styles),
+            shellOpen(styles, doc.lang, doc.dir),
             clientScriptTag(client)
           );
           controller.close();
@@ -155,8 +160,9 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
     // below sees its context.
     const page = await mod.renderPage(pathname, form);
     // js = page.csr !== false: a csr = false route ships no bundle, no state
- // script - the document is HTML + CSS only
-    const html = buildShell(page.html, page.state, client, page.head, styles, page.csr !== false);
+ // script - the document is HTML + CSS only . page.lang /
+ // page.dir are the locale the render used and its direction .
+    const html = buildShell(page.html, page.state, client, page.head, styles, page.csr !== false, page.lang, page.dir);
     const buffered = new Response(html, {
       status: page.status ?? 200,
       headers: { 'content-type': 'text/html; charset=utf-8', ...pageHeaders(pathname) }

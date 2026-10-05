@@ -204,6 +204,14 @@ const STYLES = `
     ::view-transition-old(root), ::view-transition-new(root) { animation-duration: .18s; }
   `;
 
+// The stylesheet ships inside every document, so its source formatting is a
+// tax on every route: collapse whitespace outside strings once, here. The
+// alternation leaves quoted content alone; selectors survive because no
+// space is written around their combinators or pseudo colons above.
+const STYLES_MIN = STYLES.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"']+/g, (m) =>
+  m[0] === '"' || m[0] === "'" ? m : m.replace(/\s+/g, ' ').replace(/\s*([:;{},])\s*/g, '$1').trim()
+).trim();
+
 /**
  * Merge the route chain's <head> blocks (document order: page first, then its
  * layouts) into one clean <head> fragment. First occurrence wins per key, so a
@@ -248,16 +256,21 @@ export function clientScriptTag(client: string | null): string {
  * The static half of the document for streaming SSR: everything up to (and
  * including) the open `<div id="app">`. No route tags - the route's <head>
  * content is applied by the client at boot from the body's head markers.
+ *
+ * `lang`/`dir` are the document's locale and reading direction ( the
+ * servers compute them from the [lang] segment with the server bundle's
+ * docAttrs). The streaming path flushes this string BEFORE the render, so
+ * the browser gets the language metadata in the first byte.
  */
-export function shellOpen(styles: string = getStyles()): string {
+export function shellOpen(styles: string = getStyles(), lang = 'en', dir = ''): string {
   const styleTag = styles ? `\n  <style>${styles}</style>` : '';
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${lang}"${dir ? ` dir="${dir}"` : ''}>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Rosefn</title>
-  <style>${STYLES}</style>${styleTag}
+  <style>${STYLES_MIN}</style>${styleTag}
   ${FAVICON}
 </head>
 <body>
@@ -265,7 +278,7 @@ export function shellOpen(styles: string = getStyles()): string {
 }
 
 /** Build the document from an explicit client source (edge runtimes have no fs). */
-export function buildShell(ssrHtml: string, stateJson: string, client: string | null, head: string[] = [], styles: string = getStyles(), js = true): string {
+export function buildShell(ssrHtml: string, stateJson: string, client: string | null, head: string[] = [], styles: string = getStyles(), js = true, lang = 'en', dir = ''): string {
   const clientTag = clientScriptTag(client);
 
   const mergedHead = mergeHeadBlocks(head);
@@ -285,12 +298,12 @@ export function buildShell(ssrHtml: string, stateJson: string, client: string | 
     : '';
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${lang}"${dir ? ` dir="${dir}"` : ''}>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">${headTags}${iconTag}
   ${titleTag}
-  <style>${STYLES}</style>${styleTag}
+  <style>${STYLES_MIN}</style>${styleTag}
 </head>
 <body>
   <div id="app">${ssrHtml}</div>${jsTail}
@@ -299,6 +312,6 @@ export function buildShell(ssrHtml: string, stateJson: string, client: string | 
 }
 
 /** Node entry: reads dist/client.js from disk (mtime-cached). */
-export function getHtmlShell(ssrHtml: string, stateJson: string, head: string[] = [], js = true): string {
-  return buildShell(ssrHtml, stateJson, getClientSource(), head, getStyles(), js);
+export function getHtmlShell(ssrHtml: string, stateJson: string, head: string[] = [], js = true, lang = 'en', dir = ''): string {
+  return buildShell(ssrHtml, stateJson, getClientSource(), head, getStyles(), js, lang, dir);
 }
