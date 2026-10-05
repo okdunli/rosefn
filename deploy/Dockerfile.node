@@ -1,0 +1,25 @@
+# The Node service: the dynamic half as a container. Builds the app, then
+# runs `rosefn serve` - the cluster runner (one worker per core, bounded
+# request bodies, request/header/keep-alive timeouts, graceful SIGTERM
+# drain, one access line per request on stdout). Pair it with
+# Dockerfile.static (the Go binary in front) using docker-compose.yml.
+FROM node:22-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:22-alpine
+WORKDIR /app
+ENV NODE_ENV=production PORT=3000
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/src ./src
+COPY --from=build /app/package.json ./
+EXPOSE 3000
+# ROSEFN_WORKERS defaults to the container's CPU count.
+# The demo api's SQLite file lands in the working directory: mount a volume
+# at /app to keep it across deploys (a real deployment points the api at
+# Postgres instead - the connection block is the only thing that changes).
+CMD ["node", "node_modules/tsx/dist/cli.mjs", "src/cli/index.ts", "serve"]
