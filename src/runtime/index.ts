@@ -90,7 +90,9 @@ export function esc(v: unknown): string {
 // === Reactive DOM wiring (client) ===
 
 const MARK_RE = /^\u27e6([milh]):(\d+)\u27e7$/;
-const END_RE = /^\u27e6\/([ilh]):(\d+)\u27e7$/;
+// `m` ends a text marker whose value is followed by literal text:
+// the pair bounds exactly the value, so patching it cannot eat the prose.
+const END_RE = /^\u27e6\/([milh]):(\d+)\u27e7$/;
 
 // Comments already handled by a nested wire() pass (e.g. inside an adopted
 // {#if} block) must not be re-processed by the outer pass with the wrong
@@ -186,8 +188,28 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
   const walker = document.createTreeWalker(holder, NodeFilter.SHOW_COMMENT);
   while (walker.nextNode()) comments.push(walker.currentNode as Comment);
 
+  // Comments that live INSIDE an {#if}/{#each}/slot block belong to that
+  // block's OWN wire pass (its render pushed them onto its own closes
+  // array, where the same index means something else entirely). They are
+  // collected here because the walker sees the whole subtree, but only the
+  // block's recursive wire() may interpret them - so they are skipped below
+  // and their end markers never enter this pass's `ends` map.
+  const nested = new Set<Comment>();
+  for (let i = 0; i < comments.length; i++) {
+    const m = (comments[i].nodeValue ?? '').match(MARK_RE);
+    if (!m || (m[1] !== 'i' && m[1] !== 'l')) continue;
+    for (let j = i + 1; j < comments.length; j++) {
+      const em = (comments[j].nodeValue ?? '').match(END_RE);
+      if (em && em[1] === m[1] && +em[2] === +m[2]) {
+        for (let k = i + 1; k < j; k++) nested.add(comments[k]);
+        break;
+      }
+    }
+  }
+
   const ends = new Map<number, Comment>();
   for (const c of comments) {
+    if (nested.has(c)) continue;
     const m = (c.nodeValue ?? '').match(END_RE);
     if (m) ends.set(+m[2], c);
   }
@@ -201,7 +223,7 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
   const headProvided = new Set<string>();
 
   for (const c of comments) {
-    if (wired.has(c) || !c.parentNode) continue;
+    if (nested.has(c) || wired.has(c) || !c.parentNode) continue;
     wired.add(c);
     const m = (c.nodeValue ?? '').match(MARK_RE);
     if (!m) continue;
@@ -222,13 +244,25 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
       }
       headBlocks.push({ idx, start: c, end, nodes });
     } else if (kind === 'm') {
-      // Text: update the text node that follows the marker comment
+      // Text: update the text node that follows the marker comment. When the
+      // marker is a PAIR (value followed by literal text), the end comment
+      // bounds the value: anything a render left between the two is dropped,
+      // so the prose around the value survives every patch.
       let target = c.nextSibling;
       if (!target || target.nodeType !== 3) {
         target = document.createTextNode('');
         c.parentNode!.insertBefore(target, c.nextSibling);
       }
       const tn = target as Text;
+      const end = ends.get(idx);
+      if (end) {
+        let n: ChildNode | null = tn.nextSibling;
+        while (n && n !== end) {
+          const nx = n.nextSibling;
+          n.remove();
+          n = nx;
+        }
+      }
       weff(() => {
         tn.nodeValue = String((closes[idx] as (s?: unknown) => unknown)(scope));
       });
@@ -263,7 +297,10 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
             n = nx;
           }
         }
-        const disp = wire(frag, r.closes, scope);
+ // r.scope is set by a named slot's block: its content is
+        // scoped to the object the child passed in, exactly like a list
+        // item. An {#if} block returns no scope and keeps the enclosing one.
+        const disp = wire(frag, r.closes, (r as { scope?: unknown }).scope ?? scope);
         const nodes = Array.from(frag.childNodes);
         const parent = anchor.parentNode!;
         for (const nd of nodes) parent.insertBefore(nd, anchor.nextSibling);

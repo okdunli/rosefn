@@ -33,6 +33,23 @@ const DECL_CAST_RE = /^\s+as\s+[^;\n]+/;
 const SETSTATE_RE = /\$setState\(([^,]+),\s*([^)]+)\)/g;
 const EVENT_RE = /on:(\w+)=\{([^}]+)\}/g;
 const SLOT_RE = /<slot\s*\/?>/g;
+/** A named slot: `<slot name="row" item={post} />` . The lookahead
+ *  keeps the plain `<slot />` out of it - that one is the default slot. */
+const SLOT_NAMED_RE = /<slot\s+((?=[^>]*\bname\s*=)[^>]*?)\/?>/g;
+
+/**
+ * Encode a named slot tag as the template expression
+ * `__slot('row', [['item', (post)]])` - array pairs, because the template
+ * scanner matches `{...}` without nested braces.
+ */
+function encodeSlotCall(attrs: string): string {
+  const name = /\bname\s*=\s*["'](\w+)["']/.exec(attrs)?.[1];
+  if (!name) throw new Error('<slot> with attributes must declare a name: <slot name="row" ... />');
+  const pairs = [...attrs.matchAll(/\b(\w+)\s*=\s*\{([^}]*)\}/g)]
+    .filter((m) => m[1] !== 'name')
+    .map((m) => `['${m[1]}', (${m[2].trim()})]`);
+  return `${JSON.stringify(name)}, [${pairs.join(', ')}]`;
+}
 // {#boundary}...{/boundary}: an error boundary - its content renders into
 // its own string; a throw anywhere inside swaps in this fallback instead of
 // failing the whole page. trade-off: one generic message, no per-boundary
@@ -91,6 +108,21 @@ export interface CompileResult {
   jsWarnings?: string[];
   /** the component exports `headers = { ... }` (per-route response headers) */
   headers?: Record<string, string>;
+  /**
+ * The component's props - `export let title = 'x'` in its script.
+   * A prop is a plain value the caller passes per invocation (never a
+   * signal: the parent re-renders the child when a prop changes), so it is
+   * read straight from the props object with its default as the fallback.
+   */
+  props?: Array<{ name: string; def: string | null }>;
+  /**
+ * `.rose` imports this component makes, resolved to module indices.
+   * The specifiers are rewritten per bundle (ssr/client) by the generators,
+   * so one source resolves against both module sets.
+   */
+  roseImports?: Array<{ name: string; specifier: string; index: number }>;
+ /** This file lives in src/components/ (a reusable component, not a route) */
+  isComponent?: boolean;
 }
 
 export interface RouteInfo {
@@ -107,6 +139,8 @@ export interface RouteInfo {
   isApi: boolean;
   /** pages/_middleware.rose: the request interceptor, not a route */
   isMiddleware: boolean;
+ /** src/components/*.rose: a reusable component, never a route */
+  isComponent?: boolean;
 }
 
 interface Decl {
@@ -212,6 +246,20 @@ function callifyStateReads(script: string, names: string[]): string {
 }
 
 /**
+ * The template-side twin of callifyStateReads: every `{...}` expression gets
+ * the same bare-read rewrite, and nothing else does. A whole-template scan
+ * would also rewrite the word in prose - `<p>likes {likes()}</p>` would print
+ * "likes()" - so the pass walks expressions only. Block syntax ({#if …},
+ * {#each …}) rides along: callifying `rows` in `{#each rows as row}` is
+ * exactly what the each branch already expects (`rows()`).
+ */
+function callifyTemplateExprs(template: string, names: string[]): string {
+  if (names.length === 0) return template;
+  return template.replace(/\{([^{}]*)\}/g, (whole, expr) =>
+    `{${callifyStateReads(expr, names)}}`);
+}
+
+/**
  * The <script> block of a .rose source, verbatim. `rosefn check` must
  * type-check exactly what the compiler will embed, so the extraction lives
  * here and both consumers share it - one regex, one truth.
@@ -220,21 +268,58 @@ export function scriptOf(source: string): string | null {
   return source.match(COMPONENT_RE)?.[1] ?? null;
 }
 
-/** A plugin transforms a component's raw source before compilation sees it. */
+/**
+ * The per-request bag the runtime hooks receive. Web-standard on purpose:
+ * the same object reaches a hook on the Node server, the preview server and
+ * the edge adapter, so hook code is written once and runs everywhere.
+ * `state` is scratch space - one hook writes, a later hook (or the page,
+ * through getContext()) reads.
+ */
+export interface RequestHookContext {
+  request: Request;
+  url: URL;
+  method: string;
+  pathname: string;
+  state: Record<string, unknown>;
+}
+
+/**
+ * A plugin, in two halves. `transform` runs at BUILD time over each
+ * component's raw source. The rest run at RUNTIME: `onRequest`/`onResponse`
+ * once per request (Node server, dev/preview and edge adapter alike),
+ * `onServe`/`onShutdown` once per worker process under `rosefn serve`
+ * (Node only - an edge runtime owns the lifecycle, there is no worker start
+ * to hook).
+ *
+ * A runtime hook is bundled into dist/server.js together with the config
+ * module that declares it, so its imports must load in the target runtime
+ * (Node and edge both): keep node-only code out of rosefn.config.js.
+ */
 export interface Plugin {
   name: string;
-  transform(code: string, filePath: string): string | Promise<string>;
+  transform?(code: string, filePath: string): string | Promise<string>;
+  /** Before routing and middleware. Return a Response to short-circuit (auth wall, rate limit, maintenance page). */
+  onRequest?(ctx: RequestHookContext): Response | void | Promise<Response | void>;
+  /** After the response exists, before it is sent. Return a Response to replace it. */
+  onResponse?(ctx: RequestHookContext, res: Response): Response | void | Promise<Response | void>;
+  /** Worker start: open a connection pool, warm a cache. */
+  onServe?(meta: { port: number; workers: number }): void | Promise<void>;
+  /** Worker drain, before exit: close the pool. */
+  onShutdown?(): void | Promise<void>;
 }
 
 /**
  * Plugins live in `<root>/rosefn.config.js` as the default export: an array
- * of `{ name, transform }`, run over each component's raw source (template +
- * script + style, before any parsing). trade-off: ONE hook - it covers macros,
- * custom syntax, includes and auto-imports; add bundler/build hooks when a
- * real plugin needs one. The import is cache-busted per build so a config
- * edit takes effect on the dev server's next rebuild, and a missing file is
- * simply "no plugins" (existence is checked first, so a config with a syntax
- * error still fails loudly).
+ * of `{ name, transform, onRequest, onResponse, onServe, onShutdown }`.
+ * `transform` runs over each component's raw source (template + script +
+ * style, before any parsing) at build time; the runtime hooks are bundled
+ * into dist/server.js by build() below. trade-off: transform alone covers
+ * macros, custom syntax, includes and auto-imports - a transform can rewrite
+ * anything, including the script block; the request/serve hooks cover auth,
+ * logging and lifecycle, which no source rewrite can express. The import is
+ * cache-busted per build so a config edit takes effect on the dev server's
+ * next rebuild, and a missing file is simply "no plugins" (existence is
+ * checked first, so a config with a syntax error still fails loudly).
  */
 export async function loadPlugins(root: string): Promise<Plugin[]> {
   const file = path.join(root, 'rosefn.config.js');
@@ -243,12 +328,148 @@ export async function loadPlugins(root: string): Promise<Plugin[]> {
   return (mod.default as Plugin[] | undefined) ?? [];
 }
 
-export async function compileComponent(filePath: string, publicDir: string, scopeKey: string, isApi = false, plugins: Plugin[] = []): Promise<CompileResult> {
+/**
+ * The module registry the build hands every compileComponent call.
+ * Maps a resolved .rose file to its module index and scope key, so an
+ * `import Card from '../components/Card.rose'` can be rewritten to the
+ * compiled module in BOTH bundles (the specifier differs per bundle, the
+ * index does not). One map, built once per build from the full file list -
+ * a component may import a component, so the graph is resolved before any
+ * compilation starts.
+ *
+ * `slots` is the child's slot declaration (`<slot name="row" item={post}>`),
+ * pre-scanned from its template: the parent needs the names the child passes
+ * INTO a slot to resolve them in the slot content it writes, and compilation
+ * order cannot guarantee the child is compiled first.
+ */
+export type RoseRegistry = Map<string, { index: number; scopeKey: string; slots: Array<{ name: string; props: string[] }> }>;
+
+/**
+ * Resolve every `.rose` import in a script against the registry. Returns the
+ * rewritten script plus the (local name, specifier, index) triples, so the
+ * generators can emit the right module path per bundle. An unresolvable
+ * specifier fails the build naming the file and the import - a typo'd
+ * component path must not silently ship a broken bundle.
+ */
+function resolveRoseImports(script: string, fromFile: string, registry: RoseRegistry): { script: string; imports: Array<{ name: string; specifier: string; index: number }> } {
+  const imports: Array<{ name: string; specifier: string; index: number }> = [];
+  const resolve = (spec: string): { index: number; scopeKey: string } => {
+    const abs = path.resolve(path.dirname(fromFile), spec);
+    const hit = registry.get(abs);
+    if (!hit) {
+      throw new Error(`${path.basename(fromFile)}: cannot import '${spec}' - no .rose file at ${abs}. A component lives under src/components/ (or src/pages/) and is imported by relative path.`);
+    }
+    return hit;
+  };
+  // A default import becomes a named one: the compiled module exports
+  // `render`, and the parent's `<Card>` tag calls exactly that.
+  let rewritten = script.replace(/import\s+(\w+)\s+from\s*(['"])([^'"]+\.rose)\2/g, (whole, name, q, spec) => {
+    const hit = resolve(spec);
+    imports.push({ name, specifier: spec, index: hit.index });
+    return `import { render as ${name} } from ${q}__rose_${hit.index}__${q}`;
+  });
+  // A named import (`import { render as Card }`) keeps its clause; only the
+  // specifier becomes the placeholder.
+  rewritten = rewritten.replace(/import\s*(\{[^}]*\})\s*from\s*(['"])([^'"]+\.rose)\2/g, (whole, clause, q, spec) => {
+    const hit = resolve(spec);
+    const alias = /\bas\s+(\w+)/.exec(clause)?.[1] ?? 'render';
+    imports.push({ name: alias, specifier: spec, index: hit.index });
+    return `import ${clause} from ${q}__rose_${hit.index}__${q}`;
+  });
+  return { script: rewritten, imports };
+}
+
+/**
+ * Rewrite the `__rose_N__` placeholders to this bundle's module paths. Both
+ * bundles are generated from the same resolved script, so one placeholder
+ * resolves to two different files - the only per-bundle difference in the
+ * whole component pipeline.
+ */
+function rewriteRoseImports(script: string, kind: 'ssr' | 'client'): string {
+  return script.replace(/from\s*(['"])__rose_(\d+)__\1/g, (_, q, n) => `from ${q}./comp-${n}.${kind}.js${q}`);
+}
+
+/**
+ * Pre-scan a file's template for its slot declarations -
+ * `<slot name="row" item={post}>` -> { name: 'row', props: ['item'] }.
+ * Cheap regex on purpose: the parent's compiler needs the names the child
+ * passes INTO a slot, before (and independently of) compiling the child.
+ */
+function scanSlotDecls(filePath: string): Array<{ name: string; props: string[] }> {
+  let src: string;
+  try {
+    src = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return [];
+  }
+  // Same template extraction compileComponent does: a <template> block when
+  // the file has one, otherwise everything that is not script/style/head.
+  const noBlocks = src.replace(STYLE_RE, '');
+  const tpl = noBlocks.match(TEMPLATE_RE)?.[1] ?? noBlocks.replace(HEAD_RE, '').replace(COMPONENT_RE, '').trim();
+  const out: Array<{ name: string; props: string[] }> = [];
+  for (const m of tpl.matchAll(/<slot\s+([^>]*?)\/?>/g)) {
+    const name = /\bname\s*=\s*["'](\w+)["']/.exec(m[1]);
+    if (!name) continue;
+    const props = [...m[1].matchAll(/\b(\w+)\s*=\s*\{/g)].map((x) => x[1]).filter((n) => n !== 'name');
+    out.push({ name: name[1], props });
+  }
+  return out;
+}
+
+/**
+ * Lift `import` statements out of a script block to module scope. The
+ * script body is embedded inside render(), where an import declaration is a
+ * syntax error - and a component import is exactly what a page/component
+ * script now carries. Line-based on purpose: multi-line imports are tracked
+ * by brace/paren depth and end at their `from '...'` clause.
+ */
+function hoistImports(script: string): { imports: string; rest: string } {
+  const imports: string[] = [];
+  const rest: string[] = [];
+  let buf: string[] | null = null;
+  let depth = 0;
+  const done = (line: string) => depth <= 0 && /from\s*['"][^'"]+['"]\s*;?\s*$/.test(line);
+  for (const line of script.split('\n')) {
+    if (buf) {
+      buf.push(line);
+      for (const ch of line) {
+        if (ch === '{' || ch === '(') depth++;
+        else if (ch === '}' || ch === ')') depth--;
+      }
+      if (done(line)) {
+        imports.push(buf.join('\n'));
+        buf = null;
+      }
+      continue;
+    }
+    if (/^\s*import\b/.test(line)) {
+      buf = [line];
+      depth = 0;
+      for (const ch of line) {
+        if (ch === '{' || ch === '(') depth++;
+        else if (ch === '}' || ch === ')') depth--;
+      }
+      if (done(line)) {
+        imports.push(line);
+        buf = null;
+      }
+      continue;
+    }
+    rest.push(line);
+  }
+  if (buf) imports.push(buf.join('\n')); // unterminated import: keep it whole
+  return { imports: imports.join('\n'), rest: rest.join('\n') };
+}
+
+export async function compileComponent(filePath: string, publicDir: string, scopeKey: string, isApi = false, plugins: Plugin[] = [], registry: RoseRegistry = new Map()): Promise<CompileResult> {
   let source = await fs.promises.readFile(filePath, 'utf-8');
  // Plugins see the raw source first: whatever they return
   // is what the compiler parses. A throwing plugin fails the build naming
   // itself and the file - a broken transform must never pass silently.
   for (const p of plugins) {
+    // a runtime-only plugin (onRequest/onServe, no transform) has nothing to
+    // rewrite - it must not break the build for lacking a build-time hook
+    if (!p.transform) continue;
     try {
       source = await p.transform(source, filePath);
     } catch (err) {
@@ -271,6 +492,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
     // per-request, a baked body would freeze one request's answer
     const usesContext = /getContext\s*\(/.test(rawScript);
     const hasPrerender = !usesContext && /(?:^|\n)\s*export\s+(?:const|let|var)\s+prerender\s*=\s*true\b/.test(rawScript);
+    const hoisted = hoistImports(resolveRoseImports(rawScript, filePath, registry).script);
     return {
       ssr: '',
       client: '',
@@ -278,7 +500,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
       actionNames: [],
       style: '',
       hasParams: false,
-      api: `import { getContext } from './runtime.js';\n${rawScript.trim()}`,
+      api: `import { getContext } from './runtime.js';\n${rewriteRoseImports(`${hoisted.imports}\n${hoisted.rest}`, 'ssr').trim()}`,
       apiMethods,
       hasPrerender,
       usesContext,
@@ -292,7 +514,32 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const sourceNoBlocks = source.replace(STYLE_RE, '');
 
   const scriptMatch = sourceNoBlocks.match(COMPONENT_RE);
-  const rawScript = scriptMatch?.[1] ?? '';
+ // Resolve `import Card from '../components/Card.rose'` against the
+  // build registry before anything else looks at the script: the rewritten
+  // specifier (a `__rose_N__` placeholder) is what the generators see, and an
+  // unresolvable path fails the build here, naming the file and the import.
+  const roseResolved = resolveRoseImports(scriptMatch?.[1] ?? '', filePath, registry);
+  const rawScript = roseResolved.script;
+  const roseImports = roseResolved.imports;
+ // The imports (a component import above all) belong at module scope,
+  // not inside render() - hoisted here, emitted by the generators.
+  const { imports: importStmts, rest: scriptNoImports } = hoistImports(rawScript);
+  // A component (src/components/*.rose) is not a route: the build marks it in
+  // the registry with a `components/...` scope key, which is also the cheapest
+  // reliable way to tell the two apart here.
+  const isComponent = registry.get(filePath)?.scopeKey.startsWith('components/') ?? false;
+ // Boundary, stated loudly at build time: a component renders INSIDE
+  // its parent's template phase, which is synchronous by design (that is what
+  // keeps wire() - and the whole zero-hydration resume - synchronous). $data
+  // is an await, so it cannot live there. The rosefn answer is the one the
+  // layout chain already uses: the route (or the middleware) fetches, and the
+  // value rides down as a prop.
+  if (isComponent && /\$data\s*\(/.test(rawScript)) {
+    throw new Error(
+      `${filePath}: $data() is not allowed in a component - an imported component renders synchronously inside its parent. ` +
+      `Fetch in the page's $data (or pages/_middleware.rose) and pass the value down as a prop: <Card user={user()}>.`
+    );
+  }
   // getContext() in the script makes the route dynamic: the request bag is
   // per-request, so the build must not bake it and the servers must not
  // answer it from a prerendered file. $store earns the same
@@ -384,7 +631,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   // itself is embedded inside render(), where export is a syntax error.
   // Every exported async function is a server-only action: it reaches the
   // SSR module but never the client bundle.
-  const { clean: scriptNoExports, exports: exportStmts, actions } = extractExports(rawScript);
+  const { clean: scriptNoExports, exports: exportStmts, actions, props } = extractExports(scriptNoImports);
   const script = scriptNoExports;
   const actionNames = new Set(actions.map((a) => a.name));
 
@@ -471,41 +718,70 @@ export async function compileComponent(filePath: string, publicDir: string, scop
     return `${setter}(${val})`;
   });
 
-  // on:event={fn} -> data-on-event="fn"; a handler that names a server
-  // action becomes data-on-event="$action:fn" (dispatched by $action);
-  // <slot /> -> block marker
-  const ssrTemplate = template
-    .replace(SLOT_RE, '{__slot__}')
-    .replace(/on:(\w+)=\{([^}]+)\}/g, (_, ev, fn) =>
-      actionNames.has(fn.trim()) ? `data-on-${ev}="$action:${fn.trim()}"` : `data-on-${ev}="${fn}"`);
-
   // Replace bare state reads with getter calls (after decl removal). A plain
   // regex would also rewrite state names inside string literals - 'name' in
   // new FormData(f).get('name') becoming 'name()' - so scan the script and
   // skip strings, comments, and template-literal text (${} still rewrites).
   cleanScript = callifyStateReads(cleanScript, stateDecls.map((s) => s.name));
 
+  // The template gets the same treatment: the script auto-calls a bare state
+  // read, so `{liked}` must not silently render the getter's source text.
+  // EXPRESSIONS ONLY - the word "likes" in prose stays prose (the same rule
+  // the {#each} rename follows). This runs BEFORE the slot encoding below so
+  // a slot prop that shadows a state name still resolves (the slot rewrite
+  // happens on the already-called expression).
+  const templateCalled = callifyTemplateExprs(template, stateDecls.map((s) => s.name));
+
+  // on:event={fn} -> data-on-event="fn"; a handler that names a server
+  // action becomes data-on-event="$action:fn" (dispatched by $action);
+  // <slot /> -> block marker
+ // A NAMED slot (<slot name="row" item={post} />) becomes a call of
+  // the per-render __slot() helper the generators emit: array pairs, never an
+  // object literal, because the template scanner cannot see nested braces.
+  const ssrTemplate = templateCalled
+    .replace(SLOT_NAMED_RE, (_w, attrs) => `{__slot(${encodeSlotCall(attrs)})}`)
+    .replace(SLOT_RE, '{__slot__}')
+    .replace(/on:(\w+)=\{([^}]+)\}/g, (_, ev, fn) =>
+      actionNames.has(fn.trim()) ? `data-on-${ev}="$action:${fn.trim()}"` : `data-on-${ev}="${fn}"`);
+
   const stateDeclsCode = decls
     .map((d) => {
+ // A component's state keys are namespaced by its file, so two
+      // components that both declare `let open = $state(false)` no longer
+      // share one signal (the signal map is global per document). The prefix
+      // is identical on both sides of the wire - it is generated code.
+      const key = isComponent ? `${scopeKey}:${d.name}` : d.name;
       if (d.kind === 'state') {
-        return `const [${d.name}, ${setterNames.get(d.name)!}] = state("${d.name}", ${d.expr});`;
+        return `const [${d.name}, ${setterNames.get(d.name)!}] = state(${JSON.stringify(key)}, ${d.expr});`;
       }
       // $data: fetch only when this key has no value yet (server: always after
       // clearRequestState; client: only on first visit or client-side nav)
       const isFn = d.expr.includes('=>') || d.expr.startsWith('function');
       const fn = isFn ? d.expr : `() => (${d.expr})`;
-      return `const __had_${d.name} = hasState("${d.name}");
-const [${d.name}, set${capitalize(d.name)}] = state("${d.name}", null);
+      return `const __had_${d.name} = hasState(${JSON.stringify(key)});
+const [${d.name}, set${capitalize(d.name)}] = state(${JSON.stringify(key)}, null);
 if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
     })
     .join('\n');
 
   const stateKeys = decls.map((d) => d.name);
 
-  const compiledTemplate = compileTemplate(ssrTemplate, 'h', '__c', null, 0);
+ // The local name -> module map for the components this file imports,
+  // handed to the template compiler so `<Card title={x}>` becomes a call to
+  // the imported module's render() instead of literal HTML. The slot
+  // declarations ride along: the parent must know which names the child
+  // passes INTO a slot to resolve them in the slot content it writes.
+  const comps = new Map(roseImports.map((r) => {
+    const abs = path.resolve(path.dirname(filePath), r.specifier);
+    const hit = registry.get(abs)!;
+    return [r.name, { index: hit.index, slots: hit.slots }] as const;
+  }));
+  const compiledTemplate = compileTemplate(ssrTemplate, 'h', '__c', null, 0, true, comps);
   // head block: no markers (esc() inline) - the whole block re-renders per
   // call, so one reactive closure drives document title/meta on navigation.
   const compiledHead = headContent.trim() ? compileTemplate(headContent, '__hd', '__hc', null, 0, false) : '';
+  // A named slot in the template needs the __slot() helper in the module.
+  const hasNamedSlots = /<slot\s+[^>]*\bname\s*=/.test(template);
 
   // Actions ship in the SSR module only; the client bundle gets every other
   // export (params, sync helpers) but never an action body.
@@ -521,11 +797,33 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   // compiler keeps server-side.)
   const isMiddleware = path.basename(filePath) === '_middleware.rose';
   const ssr = isMiddleware
-    ? `${RUNTIME_IMPORTS}\n\n${ssrExports}\n\n${cleanScript}\n`
-    : generateSSR(cleanScript, compiledTemplate, stateDeclsCode, ssrExports, compiledHead);
-  const client = generateClient(cleanScript, compiledTemplate, stateDeclsCode, eventBindings, exportStmts, compiledHead);
+    ? `${RUNTIME_IMPORTS}\n\n${importStmts}\n\n${ssrExports}\n\n${cleanScript}\n`
+    : generateSSR(cleanScript, compiledTemplate, stateDeclsCode, ssrExports, compiledHead, props, hasNamedSlots, importStmts, isComponent);
+  const client = generateClient(cleanScript, compiledTemplate, stateDeclsCode, eventBindings, exportStmts, compiledHead, props, hasNamedSlots, importStmts, isComponent);
 
-  return { ssr, client, stateKeys, actionNames: [...actionNames], style: scopedStyle, hasParams, usesContext, revalidate, csr, prefetch, bundle, needsClient, clientReasons, jsWarnings, headers };
+  // One rewrite for both bundles and every branch above: the `__rose_N__`
+  // placeholder resolves to this bundle's own module path, and nothing else in
+  // the generated source can contain that token.
+  return {
+    ssr: rewriteRoseImports(ssr, 'ssr'),
+    client: rewriteRoseImports(client, 'client'),
+    stateKeys,
+    actionNames: [...actionNames],
+    style: scopedStyle,
+    hasParams,
+    usesContext,
+    revalidate,
+    csr,
+    prefetch,
+    bundle,
+    needsClient,
+    clientReasons,
+    jsWarnings,
+    headers,
+    props,
+    roseImports,
+    isComponent,
+  };
 }
 
 /**
@@ -661,9 +959,13 @@ function extractObjectLiteral(script: string, name: string): string | null {
   return script.slice(start, i);
 }
 
-function extractExports(script: string): { clean: string; exports: string; actions: Array<{ name: string; stmt: string }> } {
+function extractExports(script: string): { clean: string; exports: string; actions: Array<{ name: string; stmt: string }>; props: Array<{ name: string; def: string | null }> } {
   const stmts: string[] = [];
   const actions: Array<{ name: string; stmt: string }> = [];
+ // `export let` is a PROP, not a module-scope value - it is read from
+  // the caller's props object per invocation. `export const/var` keeps its
+  // old meaning (a build-time consumer's value: params, headers, csr, ...).
+  const props: Array<{ name: string; def: string | null }> = [];
   let out = '';
   let pos = 0;
   let m: RegExpExecArray | null;
@@ -720,13 +1022,20 @@ function extractExports(script: string): { clean: string; exports: string; actio
     const asyncFn = stmt.match(/^export\s+async\s+function\s+(\w+)/);
     if (asyncFn) {
       actions.push({ name: asyncFn[1], stmt }); // server-only: kept out of the client bundle
+    } else if (kind === 'let') {
+ // A prop. The declaration never reaches module scope - the
+      // generated render reads it from the props object (with this default),
+      // so every invocation of the component gets its own value.
+      const pm = stmt.match(/^export\s+let\s+(\w+)\s*(?:=\s*([\s\S]*?))?\s*;?$/);
+      if (pm) props.push({ name: pm[1], def: pm[2]?.trim() ?? null });
+      else stmts.push(stmt); // a destructuring pattern: not a prop, keep it shared
     } else {
       stmts.push(stmt);
     }
     pos = i;
   }
   out += script.slice(pos);
-  return { clean: out, exports: stmts.join('\n'), actions };
+  return { clean: out, exports: stmts.join('\n'), actions, props };
 }
 
 function extractDecls(script: string): Decl[] {
@@ -804,6 +1113,12 @@ function removeRanges(text: string, ranges: Array<[number, number]>): string {
  *
  * Text/attr values are HTML-escaped on the server; wire() writes raw values
  * because DOM text nodes and attributes are not HTML-parsed.
+ *
+ * `comps` maps an imported component's local name to its module index
+ * and slot declarations. A `<Card title={x}>` tag compiles to a call of that
+ * module's render() - the child pushes its markers into the SAME closes array
+ * the parent is using, so one wire() pass covers the whole tree (the same
+ * trick the layout chain already uses with children html).
  */
 function compileTemplate(
   template: string,
@@ -811,7 +1126,8 @@ function compileTemplate(
   closes: string,
   scope: string | null,
   depth: number,
-  markers = true
+  markers = true,
+  comps: Map<string, { index: number; slots: Array<{ name: string; props: string[] }> }> = new Map()
 ): string {
   let result = '';
   let remaining = template;
@@ -824,12 +1140,14 @@ function compileTemplate(
     const eachMatch = remaining.match(/\{#each\s+([\w.]+(?:\(\))?)\s+as\s+(\w+)\}([\s\S]*?)\{\/each\}/) as RegExpExecArray | null;
     const boundaryMatch = remaining.match(/\{#boundary\}([\s\S]*?)\{\/boundary\}/) as RegExpExecArray | null;
     const exprMatch = remaining.match(/\{([^{}]+)\}/) as RegExpExecArray | null;
+    const compTag = comps.size > 0 ? findCompTag(remaining, comps) : null;
 
-    const candidates: Array<{ type: string; match: RegExpExecArray; index: number }> = [];
+    const candidates: Array<{ type: string; match: RegExpExecArray; index: number; tag?: CompTag }> = [];
     if (ifMatch?.index !== undefined) candidates.push({ type: 'if', match: ifMatch, index: ifMatch.index });
     if (eachMatch?.index !== undefined) candidates.push({ type: 'each', match: eachMatch, index: eachMatch.index });
     if (boundaryMatch?.index !== undefined) candidates.push({ type: 'boundary', match: boundaryMatch, index: boundaryMatch.index });
     if (exprMatch?.index !== undefined) candidates.push({ type: 'expr', match: exprMatch, index: exprMatch.index });
+    if (compTag) candidates.push({ type: 'comp', match: exprMatch!, index: compTag.start, tag: compTag });
     const earliest = candidates.length > 0
       ? candidates.reduce((a, b) => (a.index <= b.index ? a : b))
       : null;
@@ -848,7 +1166,7 @@ function compileTemplate(
       const innerScope = scope ?? '__s';
       // Inner markers live in the block's OWN closes array, so wiring an
       // adopted/cloned block never re-touches the parent's markers.
-      const inner = compileTemplate(content.trim(), 'h', '__c', innerScope, depth + 1, markers);
+      const inner = compileTemplate(content.trim(), 'h', '__c', innerScope, depth + 1, markers, comps);
       result += `const __b${id} = (__s, __c) => { let h = ''; ${inner} return h; };\n`;
       if (markers) {
         result += `const __c${id} = [];\n`;
@@ -868,9 +1186,15 @@ function compileTemplate(
       if (before) result += emitChunk(before, acc, closes, scope);
       const call = items.trim().endsWith('()') ? items.trim() : `${items.trim()}()`;
       const id = nextId();
-      // Rename the item variable to the block's scope parameter
-      const scoped = content.trim().replace(new RegExp(`\\b${item}\\b`, 'g'), '__s');
-      const inner = compileTemplate(scoped, 'h', '__c', '__s', depth + 1, markers);
+      // Rename the item variable to the block's scope parameter - INSIDE
+      // EXPRESSIONS ONLY. A plain text replace would also rewrite the word in
+      // prose ("row {row.id}" -> "__s {row.id}"); the scanner below sees
+      // {…}, {#if …} and {#each …} alike, so a condition or a nested loop that
+      // reads the item still resolves.
+      const itemRe = new RegExp(`\\b${item}\\b`, 'g');
+      const scoped = content.trim().replace(/\{([^{}]*)\}/g, (whole, expr) =>
+        `{${expr.replace(itemRe, '__s')}}`);
+      const inner = compileTemplate(scoped, 'h', '__c', '__s', depth + 1, markers, comps);
       result += `const __b${id} = (__s, __c) => { let h = ''; ${inner} return h; };\n`;
       if (markers) {
         result += `const __i${id} = ${closes}.length;\n`;
@@ -894,12 +1218,64 @@ function compileTemplate(
       // array and wire exactly like unwrapped content. Sync by design: the
       // template phase is sync ($data awaits happen before it), and the same
       // code runs on server and client.
-      const inner = compileTemplate(content.trim(), 'h', closes, scope, depth + 1, markers);
+      const inner = compileTemplate(content.trim(), 'h', closes, scope, depth + 1, markers, comps);
       result += `const __b${id} = (__c) => { let h = ''; ${inner} return h; };\n`;
       result += `let __bd${id} = '';\n`;
       result += `try { __bd${id} = __b${id}(${closes}); } catch { __bd${id} = ${JSON.stringify(BOUNDARY_FALLBACK)}; }\n`;
       result += `${acc} += __bd${id};\n`;
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
+    } else if (earliest.type === 'comp') {
+ // <Card prop={x}>...</Card> -> Card(closes, children, props, slots).
+      const tag = earliest.tag!;
+      if (tag.start > 0) result += emitChunk(remaining.substring(0, tag.start), acc, closes, scope);
+      const entry = comps.get(tag.name)!;
+      const id = nextId();
+      let childrenSrc = '';
+      let rest: string;
+      if (tag.selfClosing) {
+        rest = remaining.substring(tag.end);
+      } else {
+        const closeIdx = findClose(remaining, tag.end, tag.name);
+        if (closeIdx < 0) throw new Error(`unclosed <${tag.name}> - every component tag needs its matching close tag`);
+        childrenSrc = remaining.substring(tag.end, closeIdx);
+        rest = remaining.substring(closeIdx + tag.name.length + 3);
+      }
+      const { def, named } = splitSlots(childrenSrc);
+      // Default children render at CALL time with the enclosing scope (inside
+      // an {#each} that scope is the item), exactly like a layout's children.
+      result += `const __ch${id} = (__s, __c) => { let h = ''; ${compileTemplate(def, 'h', '__c', scope, depth + 1, markers, comps)} return h; };\n`;
+      // Named slots are functions of the object the child passes in AND of a
+      // marker array of their own: their content is a block scoped to that
+      // object (see SLOT_HELPER), so its markers must not land in the
+      // parent's array. The child's declared prop names resolve against the
+      // object (__s), so the parent writes plain `{item.title}` and the child
+      // owns the contract. Only inside {…} expressions: literal text must
+      // never be rewritten.
+      const slotFns = named.map(([nm, src]) => {
+        const decl = entry.slots.find((s) => s.name === nm);
+        let content = src;
+        for (const p of decl?.props ?? []) {
+          content = content.replace(/\{([^{}]*)\}/g, (whole, expr) =>
+            `{${expr.replace(new RegExp(`\\b${p}\\b`, 'g'), `__s.${p}`)}}`);
+        }
+        return `${JSON.stringify(nm)}: (__s, __c) => { let h = ''; ${compileTemplate(content, 'h', '__c', '__s', depth + 1, markers, comps)} return h; }`;
+      });
+      const propsObj = parseCompAttrs(tag.attrs)
+        .filter((a) => a.name !== 'slot')
+        .map((a) => {
+          // on:click={fn} is an event outward: the child receives it as the
+          // `onClick` prop and calls it - no extra machinery, a prop is a
+          // function like any other value.
+          const key = a.name.startsWith('on:') ? `on${capitalize(a.name.slice(3))}` : a.name;
+          const val = a.kind === 'expr' ? `(${a.value})` : a.kind === 'str' ? JSON.stringify(a.value) : 'true';
+          return `${JSON.stringify(key)}: ${val}`;
+        })
+        .join(', ');
+      // The imported binding IS the child's render function (a default
+      // `import Card from '...rose'` compiles to `import { render as Card }`),
+      // so the call is direct - not a property access on a namespace.
+      result += `${acc} += ${tag.name}(${closes}, __ch${id}(${scope ?? 'undefined'}, ${closes}), { ${propsObj} }, { ${slotFns.join(', ')} });\n`;
+      remaining = rest;
     } else {
       const [, expr] = earliest.match;
       const trimmed = expr.trim();
@@ -907,6 +1283,20 @@ function compileTemplate(
       if (trimmed === '__slot__') {
         if (before) result += emitChunk(before, acc, closes, scope);
         result += compileSlot(acc);
+        remaining = remaining.substring(earliest.index + earliest.match[0].length);
+        continue;
+      }
+      // <slot name="x" item={post}> -> the child's named slot, rendered from
+      // the parent's content with the object the child passes in. The name is
+      // quoted either way: the template encoder uses JSON.stringify, a
+      // hand-written call in a page may use single quotes.
+      const slotCall = /^__slot\((['"])(\w+)\1, \[([\s\S]*)\]\)$/.exec(trimmed);
+      if (slotCall) {
+        if (before) result += emitChunk(before, acc, closes, scope);
+        // The slot renders markup, so it is concatenated raw - esc() would
+        // turn the parent's own elements into text. It rides in a block so
+        // its markers are scoped to the slot object (see SLOT_HELPER).
+        result += `${acc} += __slotBlock(${closes}, __sl, ${JSON.stringify(slotCall[2])}, [${slotCall[3]}]);\n`;
         remaining = remaining.substring(earliest.index + earliest.match[0].length);
         continue;
       }
@@ -918,13 +1308,236 @@ function compileTemplate(
         result += emitAttr(attrMatch[1], trimmed, acc, closes, scope, markers);
       } else {
         if (before) result += emitChunk(before, acc, closes, scope);
-        result += emitText(trimmed, acc, closes, scope, markers);
+        // A marker whose value is followed by LITERAL TEXT needs an end
+        // marker: the wire patches the text node after the start marker, so
+        // without the pair it would overwrite the prose that follows the
+        // value ("likes {n} left" -> "likes 1ft"). Before a tag or another
+        // expression the value owns its text node already - no pair, no
+        // bytes (the common case stays exactly as small as it was).
+        const after = remaining.substring(earliest.index + earliest.match[0].length);
+        const pair = after.length > 0 && !/^<[a-zA-Z/!]/.test(after) && !after.startsWith('{');
+        result += emitText(trimmed, acc, closes, scope, markers, pair);
       }
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
     }
   }
 
   return result;
+}
+
+/** One component tag found in a template . */
+interface CompTag {
+  /** index of `<` in the searched string */
+  start: number;
+  /** index just past `>` */
+  end: number;
+  name: string;
+  /** the raw attribute text between the tag name and `>` */
+  attrs: string;
+  selfClosing: boolean;
+}
+
+/**
+ * Scan one tag from its `<` to its `>`, quote- and brace-aware so a `>` inside
+ * an attribute expression (`title={a > b}`) does not end the tag. Returns the
+ * index just past `>`, or -1 when the tag is never closed.
+ */
+function scanTagEnd(src: string, start: number): number {
+  let j = start + 1;
+  let quote = '';
+  let brace = 0;
+  while (j < src.length) {
+    const c = src[j];
+    if (quote) {
+      if (c === quote) quote = '';
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === '{') brace++;
+    else if (c === '}') brace = Math.max(0, brace - 1);
+    else if (c === '>' && brace === 0) return j + 1;
+    j++;
+  }
+  return -1;
+}
+
+/** The earliest open tag whose name is an imported component . */
+function findCompTag(src: string, comps: Map<string, unknown>): CompTag | null {
+  let i = 0;
+  while (i < src.length) {
+    const lt = src.indexOf('<', i);
+    if (lt < 0) return null;
+    const nm = /^<([a-zA-Z][\w-]*)/.exec(src.slice(lt, lt + 64));
+    if (nm && comps.has(nm[1])) {
+      const end = scanTagEnd(src, lt);
+      if (end > 0) {
+        const raw = src.slice(lt, end);
+        const selfClosing = /\/>$/.test(raw);
+        return { start: lt, end, name: nm[1], attrs: raw.slice(1 + nm[1].length, selfClosing ? -2 : -1), selfClosing };
+      }
+    }
+    i = lt + 1;
+  }
+  return null;
+}
+
+/** Index of the `</name>` that closes the tag opened before `from` (-1: none). */
+function findClose(src: string, from: number, name: string): number {
+  const re = new RegExp(`<(/?)${name}(?=[\\s/>])`, 'g');
+  re.lastIndex = from;
+  let depth = 1;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src))) {
+    const end = scanTagEnd(src, m.index);
+    if (end < 0) return -1;
+    if (m[1] === '/') {
+      depth--;
+      if (depth === 0) return m.index;
+    } else if (!/\/>$/.test(src.slice(m.index, end))) depth++;
+  }
+  return -1;
+}
+
+interface CompAttr { name: string; kind: 'expr' | 'str' | 'bool'; value: string }
+
+/** Parse a component tag's attributes into prop={expr} / prop="lit" / bool. */
+function parseCompAttrs(attrs: string): CompAttr[] {
+  const out: CompAttr[] = [];
+  let i = 0;
+  while (i < attrs.length) {
+    const nm = /^\s*([\w:.-]+)/.exec(attrs.slice(i));
+    if (!nm) break;
+    i += nm[0].length;
+    const eq = /^\s*=\s*/.exec(attrs.slice(i));
+    if (!eq) {
+      out.push({ name: nm[1], kind: 'bool', value: '' });
+      continue;
+    }
+    i += eq[0].length;
+    const ch = attrs[i];
+    if (ch === '{') {
+      let depth = 1;
+      let j = i + 1;
+      while (j < attrs.length && depth > 0) {
+        if (attrs[j] === '{') depth++;
+        else if (attrs[j] === '}') depth--;
+        j++;
+      }
+      out.push({ name: nm[1], kind: 'expr', value: attrs.slice(i + 1, j - 1).trim() });
+      i = j;
+    } else if (ch === '"' || ch === "'") {
+      const j = attrs.indexOf(ch, i + 1);
+      out.push({ name: nm[1], kind: 'str', value: attrs.slice(i + 1, j < 0 ? attrs.length : j) });
+      i = j < 0 ? attrs.length : j + 1;
+    } else break;
+  }
+  return out;
+}
+
+/**
+ * Reject a slot= that hides inside a named slot's content. The child only
+ * ever looks at its DIRECT named children, so `<span slot="a"><b slot="a">`
+ * would silently drop the inner one - say it at build time instead. The walk
+ * is quote-aware (scanTagEnd), so an attribute value containing '>' cannot
+ * fake a tag.
+ */
+function rejectNestedSlot(src: string, outer: string): void {
+  let i = 0;
+  while (i < src.length) {
+    const lt = src.indexOf('<', i);
+    if (lt < 0) return;
+    const nm = /^<(\/?)([a-zA-Z][\w-]*)/.exec(src.slice(lt, lt + 64));
+    if (!nm) { i = lt + 1; continue; }
+    const end = scanTagEnd(src, lt);
+    if (end < 0) return;
+    const hit = /\bslot\s*=\s*["'](\w+)["']/.exec(src.slice(lt, end));
+    if (hit && nm[1] !== '/') {
+      throw new Error(`slot="${hit[1]}" on <${nm[2]}> is nested inside slot="${outer}" - a slot must be a direct child of the component`);
+    }
+    i = end;
+  }
+}
+
+/**
+ * Split a component's children into the default slot and the named slots
+ * (`<li slot="row">`). Only DIRECT children may be slot content: lifting an
+ * element out of another element, or out of an {#if}/{#each} block, would
+ * break the template around it - so that is a build error, not a silent
+ * mis-render.
+ */
+function splitSlots(src: string): { def: string; named: Array<[string, string]> } {
+  let def = '';
+  const named = new Map<string, string>();
+  let i = 0;
+  let elemDepth = 0;
+  let blockDepth = 0;
+  while (i < src.length) {
+    const lt = src.indexOf('<', i);
+    const ob = src.indexOf('{#', i);
+    const cb = src.indexOf('{/', i);
+    const cands = [lt, ob, cb].filter((x) => x >= 0);
+    if (cands.length === 0) {
+      def += src.slice(i);
+      break;
+    }
+    const next = Math.min(...cands);
+    if (next > i) def += src.slice(i, next);
+    if (next === ob || next === cb) {
+      const close = src.indexOf('}', next);
+      const token = src.slice(next, close < 0 ? src.length : close + 1);
+      if (next === ob) blockDepth++;
+      else blockDepth = Math.max(0, blockDepth - 1);
+      def += token;
+      i = next + token.length;
+      continue;
+    }
+    const nm = /^<(\/?)([a-zA-Z][\w-]*)/.exec(src.slice(next, next + 64));
+    if (!nm) {
+      def += '<';
+      i = next + 1;
+      continue;
+    }
+    const end = scanTagEnd(src, next);
+    if (end < 0) {
+      def += src.slice(next);
+      break;
+    }
+    const tagText = src.slice(next, end);
+    const selfClosing = /\/>$/.test(tagText);
+    const isVoid = VOID_TAGS.has(nm[2].toLowerCase());
+    if (nm[1] === '/') {
+      elemDepth = Math.max(0, elemDepth - 1);
+      def += tagText;
+      i = end;
+      continue;
+    }
+    if (!selfClosing && !isVoid) elemDepth++;
+    const slotName = /\bslot\s*=\s*["'](\w+)["']/.exec(tagText)?.[1];
+    if (slotName && (elemDepth !== 1 || blockDepth !== 0)) {
+      throw new Error(`slot="${slotName}" on <${nm[2]}> must be a direct child of the component - it is nested inside another element or an {#if}/{#each} block`);
+    }
+    if (slotName) {
+      const stripped = tagText.replace(/\s*slot\s*=\s*["']\w+["']/, '');
+      if (selfClosing || isVoid) {
+        named.set(slotName, (named.get(slotName) ?? '') + stripped);
+      } else {
+        const closeIdx = findClose(src, end, nm[2]);
+        if (closeIdx < 0) throw new Error(`unclosed <${nm[2]}> inside slot="${slotName}"`);
+        const tail = `</${nm[2]}>`;
+        const inner = src.slice(end, closeIdx);
+        // The same rule one level down: a slot= INSIDE a named slot's
+        // content is nested too, and the child would silently never call it.
+        rejectNestedSlot(inner, slotName);
+        named.set(slotName, (named.get(slotName) ?? '') + stripped + inner + tail);
+        elemDepth = Math.max(0, elemDepth - 1);
+        i = closeIdx + tail.length;
+        continue;
+      }
+      i = end;
+      continue;
+    }
+    def += tagText;
+    i = end;
+  }
+  return { def, named: [...named.entries()] };
 }
 
 /** Emit a static chunk (attributes are handled by the expr branch). */
@@ -973,14 +1586,20 @@ function inlineImages(template: string, publicDir: string): string {
   });
 }
 
-/** Emit a reactive text marker: <!--⟦m:K⟧-->escaped value. */
-function emitText(expr: string, acc: string, closes: string, scope: string | null, markers = true): string {
+/**
+ * Emit a reactive text marker: <!--⟦m:K⟧-->escaped value, closed by
+ * <!--⟦/m:K⟧--> when the value is followed by literal text (pair = true).
+ * The pair is what lets the wire patch exactly the value and leave the
+ * prose around it alone.
+ */
+function emitText(expr: string, acc: string, closes: string, scope: string | null, markers = true, pair = false): string {
   const arg = scope ? `${scope}` : '';
   if (!markers) {
     // head block: inline escaped value, no marker comment (clean SSR html)
     return `${acc} += esc(${expr});\n`;
   }
-  return `${acc} += "<!--\u27e6m:" + (${closes}.push(${scope ? `(${scope})` : '()'} => (${expr})) - 1) + "\u27e7-->" + esc(${closes}[${closes}.length - 1](${arg}));\n`;
+  const end = pair ? ` + "<!--\u27e6/m:" + (${closes}.length - 1) + "\u27e7-->"` : '';
+  return `${acc} += "<!--\u27e6m:" + (${closes}.push(${scope ? `(${scope})` : '()'} => (${expr})) - 1) + "\u27e7-->" + esc(${closes}[${closes}.length - 1](${arg}))${end};\n`;
 }
 
 /** Emit a reactive attribute: name="value" data-b="K:name". */
@@ -1005,7 +1624,47 @@ function compileSlot(acc: string): string {
 // can never drift between them.
 const RUNTIME_IMPORTS = `import { state, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $t, bestLocale, $cookies, $sessionCookie, $store } from './runtime.js';`;
 
-function generateSSR(script: string, templateFn: string, stateDeclsCode: string, exports = '', headFn = ''): string {
+/**
+ * `export let title = 'x'` -> a per-invocation const read from the
+ * caller's props object, defaulting to the declared value. Emitted at the top
+ * of render(), BEFORE the state declarations: a prop may seed one
+ * (`let open = $state(collapsed)`).
+ */
+function propsCode(props: Array<{ name: string; def: string | null }>): string {
+  if (props.length === 0) return '';
+  return props
+    .map((p) => `const ${p.name} = __p.${p.name}${p.def ? ` ?? (${p.def})` : ''};`)
+    .join('\n');
+}
+
+// The named-slot helpers, identical in both bundles . __slot resolves
+// the parent's slot function and builds the object its <slot name item={...}>
+// declared; __slotBlock wraps the rendered content in block markers and
+// registers a closure that re-renders it with a FRESH marker array scoped to
+// that object. The wire adopts the server-rendered nodes in place (identity
+// preserved) and re-renders from the closure afterwards - the same path an
+// {#if} block takes, with the slot object as the scope. Without the block,
+// the slot's markers would be invoked with the ENCLOSING scope and read the
+// wrong variables.
+const SLOT_HELPER = `const __slot = (sl, name, pairs) => {
+  const fn = sl[name];
+  if (typeof fn !== 'function') return null;
+  const o = {};
+  for (let i = 0; i < pairs.length; i++) o[pairs[i][0]] = pairs[i][1];
+  return { o, fn };
+};
+const __slotBlock = (closes, sl, name, pairs) => {
+  const hit = __slot(sl, name, pairs);
+  const idx = closes.length;
+  closes.push(() => {
+    if (!hit) return null;
+    const c = [];
+    return { html: String(hit.fn(hit.o, c)), closes: c, scope: hit.o };
+  });
+  return "<!--\\u27e6i:" + idx + "\\u27e7-->" + (hit ? String(hit.fn(hit.o, [])) : "") + "<!--\\u27e6/i:" + idx + "\\u27e7-->";
+};`;
+
+function generateSSR(script: string, templateFn: string, stateDeclsCode: string, exports = '', headFn = '', props: Array<{ name: string; def: string | null }> = [], namedSlots = false, imports = '', isComponent = false): string {
   // The head block renders to a clean html string (no markers) and is wrapped
   // in an h marker pair: renderPage extracts it for <head> injection, the
   // client's wire() applies it to the document on navigation.
@@ -1016,16 +1675,28 @@ const __hi = closes.length;
 closes.push(__head);
 __html += "<!--\u27e6h:" + __hi + "\u27e7-->" + __head() + "<!--\u27e6/h:" + __hi + "\u27e7-->";`
     : '';
+  // A page's render is async ($data awaits); a component's is not - its
+  // parent calls it inside a string concatenation (`h += Card(...)`), and a
+  // Promise there would stringify to "[object Promise]". $data() is banned
+  // in components (build error in compileComponent), so there is nothing to
+  // await.
   return `
 ${RUNTIME_IMPORTS}
 
+${imports}
+
 ${exports}
 
-export async function render(closes, children) {
+${namedSlots ? SLOT_HELPER : ''}
+
+export ${isComponent ? 'function' : 'async function'} render(closes, children, __props, __slots) {
+  ${props.length > 0 ? 'const __p = __props || {};' : ''}
+  ${namedSlots ? 'const __sl = __slots || {};' : ''}
+  ${propsCode(props)}
   ${stateDeclsCode}
   ${script}
   const __root = (__c, children) => { let h = ''; ${templateFn} return h; };
-  let __html = await __root(closes, children);${headCode}
+  let __html = ${isComponent ? '' : 'await '}__root(closes, children);${headCode}
   return __html;
 }
 `;
@@ -1037,7 +1708,11 @@ function generateClient(
   stateDeclsCode: string,
   eventBindings: Array<{ event: string; fn: string }>,
   exports = '',
-  headFn = ''
+  headFn = '',
+  props: Array<{ name: string; def: string | null }> = [],
+  namedSlots = false,
+  imports = '',
+  isComponent = false
 ): string {
   // Handlers live on a shared global so one delegated listener per event
   // type can dispatch for any component, including freshly cloned nodes.
@@ -1055,16 +1730,23 @@ __html += "<!--\u27e6h:" + __hi + "\u27e7-->" + __head() + "<!--\u27e6/h:" + __h
   return `
 ${RUNTIME_IMPORTS}
 
+${imports}
+
 ${exports}
 
 const __handlers = globalThis.__rosefn_handlers ?? (globalThis.__rosefn_handlers = {});
 
-export async function render(closes, children) {
+${namedSlots ? SLOT_HELPER : ''}
+
+export ${isComponent ? 'function' : 'async function'} render(closes, children, __props, __slots) {
+  ${props.length > 0 ? 'const __p = __props || {};' : ''}
+  ${namedSlots ? 'const __sl = __slots || {};' : ''}
+  ${propsCode(props)}
   ${stateDeclsCode}
   ${script}
   ${handlerRegistry}
   const __root = (__c, children) => { let h = ''; ${templateFn} return h; };
-  let __html = await __root(closes, children);${headCode}
+  let __html = ${isComponent ? '' : 'await '}__root(closes, children);${headCode}
   return __html;
 }
 `;
@@ -1102,8 +1784,8 @@ const routeShipsNoJs = (infos: RouteInfo[], compiled: CompileResult[], i: number
 export function buildReport(infos: RouteInfo[], compiled: CompileResult[]): string[] {
   return infos
     .map((info, i) => ({ info, i }))
-    .filter(({ info }) => !info.isLayout && !info.isNotFound && !info.isError && !info.isApi && !info.isMiddleware)
-    .map(({ info, i }) => {
+    .filter(({ info }) => !info.isLayout && !info.isNotFound && !info.isError && !info.isApi && !info.isMiddleware && !info.isComponent)
+     .map(({ info, i }) => {
       if (routeShipsNoJs(infos, compiled, i)) {
         return `${info.routePath}  zero-JS  nothing in the chain needs the client`;
       }
@@ -1125,11 +1807,13 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
     /^(?:comp-\d+\.(?:ssr|client)|runtime|(?:server|client)-entry)\.js$/.test(f));
   await Promise.all(stale.map((f) => fs.promises.rm(path.join(outDir, f), { force: true })));
 
-  const files = await scanRoseFiles(root);
+  const pageFiles = await scanRoseFiles(root);
+  const compFiles = await scanComponentFiles(root);
+  const files = [...pageFiles, ...compFiles];
  // A build that silently produces nothing is the worst possible
   // failure mode (an empty dist/ deploys as a blank site). Say it plainly:
   // this is not a project root, or the pages live somewhere else.
-  if (files.length === 0) {
+  if (pageFiles.length === 0) {
     throw new Error(`no .rose pages found under ${path.join(root, 'src', 'pages')} - run rosefn from a project root, or pass one: rosefn build <dir>`);
   }
   const infos = files.map((f) => ({ ...getRouteInfo(f, root) }));
@@ -1137,16 +1821,80 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
   // fresh per build so the dev server's hot rebuild picks up config edits.
   const plugins = await loadPlugins(root);
   // scope key: the component's path under pages/ (index, _layout, blog/[id])
-  // - stable across builds, unique per file, independent of scan order
-  const scopeKeys = files.map((f) =>
-    path.relative(path.join(root, 'src', 'pages'), f).replace(/\\/g, '/').replace(/\.rose$/, ''));
-  const compiled = await Promise.all(
-    files.map((f, i) => compileComponent(f, path.join(root, 'public'), scopeKeys[i], infos[i].isApi, plugins))
+  // - stable across builds, unique per file, independent of scan order.
+  // A component (src/components/**) is keyed under src/ instead, so its
+  // scope key can never collide with a page's.
+  const scopeKeys = files.map((f, i) => {
+    const base = infos[i].isComponent ? path.join(root, 'src') : path.join(root, 'src', 'pages');
+    return path.relative(base, f).replace(/\\/g, '/').replace(/\.rose$/, '');
+  });
+ // The build-wide import registry: absolute path -> module index,
+  // scope key, and the named slots the component declares. It exists before
+  // any compilation because every importer needs it, and the indices are the
+  // same for pages and components - one module index space.
+  const registry: RoseRegistry = new Map(
+    files.map((f, i) => [f, { index: i, scopeKey: scopeKeys[i], slots: scanSlotDecls(f) }])
   );
+  const compiled = await Promise.all(
+    files.map((f, i) => compileComponent(f, path.join(root, 'public'), scopeKeys[i], infos[i].isApi, plugins, registry))
+  );
+
+  // A component that needs the client drags every page that imports it into
+  // the client bundle - the page renders it, so it must be able to resume
+  // it. Walk each module's IMPORT closure (what it imports, transitively),
+  // memoized and cycle-safe.
+  const importsOf = new Map<number, number[]>();
+  files.forEach((_, i) => {
+    const list: number[] = [];
+    for (const r of compiled[i].roseImports ?? []) {
+      const abs = path.resolve(path.dirname(files[i]), r.specifier);
+      const hit = registry.get(abs);
+      if (hit) list.push(hit.index);
+    }
+    importsOf.set(i, list);
+  });
+  // The walk reports WHICH dependency needs the client, so the build's lint
+  // line names the component instead of the page.
+  const needyDep = (i: number, seen = new Set<number>()): string | null => {
+    if (compiled[i].needsClient) return path.basename(files[i]);
+    if (seen.has(i)) return null;
+    seen.add(i);
+    for (const dep of importsOf.get(i) ?? []) {
+      const hit = needyDep(dep, seen);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  compiled.forEach((c, i) => {
+    if (c.needsClient) return;
+    const who = needyDep(i);
+    if (who) {
+      c.needsClient = true;
+      c.clientReasons = [...(c.clientReasons ?? []), `imported component ${who} needs the client`];
+    }
+  });
+
+  // Reachability: a component no page (transitively) imports ships in neither
+  // bundle - not the server's, not the client's.
+  const reachable = new Set<number>();
+  const visit = (i: number) => {
+    if (reachable.has(i)) return;
+    reachable.add(i);
+    for (const r of compiled[i].roseImports ?? []) {
+      const abs = path.resolve(path.dirname(files[i]), r.specifier);
+      const hit = registry.get(abs);
+      if (hit) visit(hit.index);
+    }
+  };
+  files.forEach((_, i) => {
+    if (!infos[i].isComponent) visit(i);
+  });
 
   // Every component's scoped CSS in one stylesheet, inlined into the shell:
   // styles ship inside the document like the JS bundle - zero requests.
-  const styles = compiled.map((c) => c.style).filter(Boolean).join('\n');
+  const styles = compiled
+    .map((c, i) => (reachable.has(i) ? c.style : ''))
+    .filter(Boolean).join('\n');
   if (styles) await fs.promises.writeFile(path.join(outDir, 'styles.css'), styles);
   else await fs.promises.rm(path.join(outDir, 'styles.css'), { force: true });
 
@@ -1175,6 +1923,37 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
   const buildDir = path.join(outDir, '.build');
   await fs.promises.rm(buildDir, { recursive: true, force: true });
   await fs.promises.mkdir(buildDir, { recursive: true });
+
+ // The runtime half of the plugins. A transform already ran at
+  // build time (in compileComponent); onRequest/onResponse must run per
+  // request INSIDE the server bundle, so the config's runtime hooks are
+  // bundled into dist/server.js - the config itself is not deployed, and
+  // dist/ stays self-contained (the same rule that keeps the component
+  // modules out of the deploy dir). The module is written only when a plugin
+  // actually declares a runtime hook: no hook, no module, no import - and a
+  // transform-only config keeps its (possibly node-only) imports out of the
+  // server bundle entirely.
+  const runtimePlugins = plugins.filter((p) => p && (p.onRequest || p.onResponse));
+  if (runtimePlugins.length > 0) {
+    // Relative from .build/, so the build works from any cwd (`rosefn build
+    // <dir>` from elsewhere). The whole config module is bundled, not just
+    // the hooks - a named re-export still evaluates the module - hence the
+    // "no node-only imports in the config" rule on the Plugin type.
+    const configRel = path.relative(buildDir, path.join(root, 'rosefn.config.js')).replace(/\\/g, '/');
+    await fs.promises.writeFile(path.join(buildDir, 'plugins.js'), `// Generated by rosefn - the runtime half of rosefn.config.js. Do not edit.
+// Bundled into dist/server.js: these hooks run per request on every server
+// (Node, dev/preview, edge). Transform hooks already ran at build time.
+import config from ${JSON.stringify(configRel)};
+
+const list = Array.isArray(config) ? config : [];
+export const hooks = list
+  .filter((p) => p && (p.onRequest || p.onResponse))
+  .map((p) => ({ name: p.name, onRequest: p.onRequest ? p.onRequest.bind(p) : null, onResponse: p.onResponse ? p.onResponse.bind(p) : null }));
+
+export const hasRequestHooks = hooks.some((p) => p.onRequest);
+export const hasResponseHooks = hooks.some((p) => p.onResponse);
+`);
+  }
 
   // Shared runtime module, bundled once into client and server output.
   // The runtime ships WITH THE COMPILER, not with the app: resolve it from
@@ -1208,7 +1987,7 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
 
   const pages = infos
     .map((info, i) => ({ info, i }))
-    .filter(({ info }) => !info.isLayout && !info.isNotFound && !info.isError && !info.isApi && !info.isMiddleware);
+    .filter(({ info }) => !info.isLayout && !info.isNotFound && !info.isError && !info.isApi && !info.isMiddleware && !info.isComponent);
 
   // API routes (pages/api/*.rose) dispatch handlers, never render HTML: they
   // live in the server bundle only and are excluded from the client route
@@ -1259,6 +2038,7 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
 
   const serverImports = compiled
     .map((_, i) => {
+      if (!reachable.has(i)) return ''; // an unimported component ships nowhere
       if (infos[i].isMiddleware) {
         // pages/_middleware.rose: server-only, imported as a namespace so a
         // missing `handle` export is simply "no middleware" (null), never a
@@ -1309,6 +2089,12 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
       // decision is the compiler's since #29). An explicit opt-out is also
       // checked against the chain: a layout needing the bundle under a
       // csr = false page would ship dead handlers, so the build fails.
+      if (compiled[i].csr === false && compiled[i].needsClient) {
+        throw new Error(
+          `${info.filePath}: csr = false but this route needs the client bundle ` +
+          `(${(compiled[i].clientReasons ?? ['needs the client']).join(' + ')}).`
+        );
+      }
       if (compiled[i].csr === false) {
         const needy = layoutsOf(infos, i).find((li) => compiled[li].needsClient);
         if (needy !== undefined) {
@@ -1326,6 +2112,52 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
   const serverEntry = `
 ${serverImports}
 import { setState, clearRequestState, serializeState, resetRequestContext, isLocale, setLocales, localeList, setStoreTransport, applyStorePatch } from './runtime.js';
+${runtimePlugins.length > 0
+    ? `import { hooks as __pluginHooks, hasRequestHooks as __hasRequestHooks, hasResponseHooks as __hasResponseHooks } from './plugins.js';`
+: `// no plugin declares a runtime hook, so there is no plugins
+// module to import - the runners below stay no-ops and the servers call them
+// unconditionally (one code path, no flags to keep in sync).
+const __pluginHooks = [];
+const __hasRequestHooks = false;
+const __hasResponseHooks = false;`}
+
+// The runtime plugin hooks. onRequest runs before routing and
+// middleware and may short-circuit the request with its own Response; onResponse
+// runs once the response exists and may replace it. Both are no-ops when the
+// project declares no runtime hooks. A throwing hook is logged and skipped -
+// the request continues - so a broken logging plugin can never take a site
+// down (a build-time transform, by contrast, fails loudly).
+export async function runRequestHooks(ctx) {
+  for (const p of __pluginHooks) {
+    if (!p.onRequest) continue;
+    try {
+      const r = await p.onRequest(ctx);
+      if (r instanceof Response) return r;
+    } catch (err) {
+      console.error('Rosefn: plugin', p.name, 'onRequest failed:', err instanceof Error ? err.message : err);
+    }
+  }
+  return null;
+}
+
+export async function runResponseHooks(ctx, res) {
+  let out = res;
+  for (const p of __pluginHooks) {
+    if (!p.onResponse) continue;
+    try {
+      const r = await p.onResponse(ctx, out);
+      if (r instanceof Response) out = r;
+    } catch (err) {
+      console.error('Rosefn: plugin', p.name, 'onResponse failed:', err instanceof Error ? err.message : err);
+    }
+  }
+  return out;
+}
+
+// The servers read these to skip building the hook context entirely when no
+// hook exists - the hot path pays nothing for the feature.
+export const hasRequestHooks = __hasRequestHooks;
+export const hasResponseHooks = __hasResponseHooks;
 
 // i18n: the dictionaries baked at build time from
 // src/locales/*.json. A route segment named [lang] is the locale: the value
@@ -1702,7 +2534,7 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
   // imports at all - every route module arrives in its own chunk.
   const clientImports = split ? '' : compiled
     .map((_, i) => ({ i }))
-    .filter(({ i }) => !infos[i].isApi && !infos[i].isMiddleware)
+    .filter(({ i }) => !infos[i].isApi && !infos[i].isMiddleware && reachable.has(i))
     .map(({ i }) => `import { render as render_${i} } from './comp-${i}.client.js';`)
     .join('\n');
 
@@ -2130,6 +2962,27 @@ export async function scanRoseFiles(root: string): Promise<string[]> {
   return scan(pagesDir);
 }
 
+/** Every .rose file under <root>/src/components, recursively . These
+ *  are not routes: they are compiled into the same module index space as the
+ *  pages so a page can `import Card from '../components/Card.rose'`. */
+export async function scanComponentFiles(root: string): Promise<string[]> {
+  const compDir = path.join(root, 'src', 'components');
+  if (!fs.existsSync(compDir)) return [];
+
+  async function scan(dir: string): Promise<string[]> {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    const files: string[] = [];
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) files.push(...(await scan(full)));
+      else if (entry.name.endsWith('.rose')) files.push(full);
+    }
+    return files;
+  }
+
+  return scan(compDir);
+}
+
 function isAncestorDir(layoutPath: string, pagePath: string): boolean {
   const layoutDir = path.dirname(layoutPath);
   const pageDir = path.dirname(pagePath);
@@ -2141,16 +2994,21 @@ function getRouteInfo(filePath: string, root: string): RouteInfo {
   const relative = path.relative(pagesDir, filePath).replace(/\\/g, '/');
   const withoutExt = relative.replace(/\.rose$/, '');
   const base = path.posix.basename(withoutExt);
-  const isLayout = base === '_layout';
-  const isNotFound = base === '404';
-  const isError = base === '500';
+ // A component (src/components/**) is not a route at all - it is
+  // imported by one. Everything below still runs so a broken file reports a
+  // sane routePath in build errors, but the flags that would put it in the
+  // route table (api/middleware/layout/404/500) are all off.
+  const isComponent = filePath.replace(/\\/g, '/').includes('/src/components/');
+  const isLayout = !isComponent && base === '_layout';
+  const isNotFound = !isComponent && base === '404';
+  const isError = !isComponent && base === '500';
   // pages/api/*.rose: Web-standard handler routes (JSON in, JSON out), never
   // HTML pages - they dispatch by method and never reach the client bundle.
-  const isApi = withoutExt === 'api' || withoutExt.startsWith('api/');
+  const isApi = !isComponent && (withoutExt === 'api' || withoutExt.startsWith('api/'));
   // pages/_middleware.rose: the request interceptor. It runs before every
   // render and is not a route: it matches nothing and never reaches the
   // client bundle. trade-off: root only - one chain, no matcher config.
-  const isMiddleware = withoutExt === '_middleware';
+  const isMiddleware = !isComponent && withoutExt === '_middleware';
 
   let parts = withoutExt.split('/').filter((p) => p !== '_layout');
   // a trailing `index` segment names its directory (blog/index -> /blog,
@@ -2177,6 +3035,7 @@ function getRouteInfo(filePath: string, root: string): RouteInfo {
     isError,
     isApi,
     isMiddleware,
+    isComponent,
   };
 }
 

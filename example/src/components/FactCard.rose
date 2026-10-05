@@ -1,0 +1,11 @@
+<script>
+ // A reusable component: a prop with a default and nothing
+  // else - the cheapest shape that is still a real component instead of a
+  // copy-pasted <li>. about.rose imports it by relative path and renders one
+  // per fact; the compiler compiles it into the same module space as the
+  // pages, so there is no component runtime to ship and no wrapper node the
+  // DOM has to adopt.
+  export let fact = 'a fact about Rosefn';
+</script>
+
+<li class="fact">🌹 {fact}</li>
