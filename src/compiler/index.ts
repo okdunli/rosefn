@@ -115,6 +115,12 @@ export interface CompileResult {
   /** the component exports `headers = { ... }` (per-route response headers) */
   headers?: Record<string, string>;
   /**
+ * The component exports `csp = { nonce: true }` - its documents get a
+   * per-request nonce policy instead of the hashed one. Never prerendered: a
+   * baked file cannot carry a fresh nonce.
+   */
+  cspNonce?: boolean;
+  /**
  * The component's props - `export let title = 'x'` in its script.
    * A prop is a plain value the caller passes per invocation (never a
    * signal: the parent re-renders the child when a prop changes), so it is
@@ -665,6 +671,33 @@ export async function compileComponent(filePath: string, publicDir: string, scop
     headers = value as Record<string, string>;
   }
 
+  // An exported `csp = { nonce: true }` switches this route from the hashed
+ // policy to a per-request nonce . The hash is the stronger default
+  // - it needs no per-request work and cannot be replayed - but it breaks the
+  // day something between the server and the browser touches the document: a
+  // CDN, a WAF or an A/B injector that adds one byte invalidates the sha256
+  // and the browser blocks the page's own bundle. A nonce survives that,
+  // because the header and the tag are generated together per request. The
+  // price is real: a baked file cannot carry a fresh nonce, so the route
+  // joins dynamicRoutes - it is never prerendered and always rendered live
+  // (on Node/Edge; the Go binary serves only baked files, so it has no nonce
+  // route to serve, which is the same boundary it already has for middleware).
+  let cspNonce: boolean | undefined;
+  const cspLiteral = extractObjectLiteral(rawScript, 'csp');
+  if (cspLiteral) {
+    let value: unknown;
+    try {
+      value = new Function(`return ${cspLiteral}`)();
+    } catch {
+      throw new Error(`${filePath}: export const csp must be an object literal`);
+    }
+    const nonce = (value as { nonce?: unknown } | null)?.nonce;
+    if (nonce !== undefined && typeof nonce !== 'boolean') {
+      throw new Error(`${filePath}: csp.nonce must be a boolean`);
+    }
+    cspNonce = nonce === true;
+  }
+
   // Top-level `export` statements (e.g. `export const params = {...}` for
   // dynamic-route prerendering) are hoisted to module scope: the script body
   // itself is embedded inside render(), where export is a syntax error.
@@ -865,6 +898,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
     clientReasons,
     jsWarnings,
     headers,
+    cspNonce,
     props,
     roseImports,
     isComponent,
@@ -2324,12 +2358,14 @@ export const routeParams = {
   ${pages.filter(({ info, i }) => compiled[i].hasParams).map(({ info, i }) => `'${info.routePath}': comp_${i}.params`).join(',\n  ')}
 };
 
-// Routes whose component reads the request context (getContext()): the bag
-// is per-request, so these are dynamic - the build never bakes them and the
-// servers never answer them from a prerendered file. Public routes keep the
-// static fast path (file cache, ETag/304, streaming) untouched.
+// Routes whose component reads the request context (getContext()), mutates a
+// shared store ($store), or opted into nonce-based CSP: the bag is
+// per-request, the store is per-process, and a nonce is per-response, so
+// these are dynamic - the build never bakes them and the servers never
+// answer them from a prerendered file. Public routes keep the static fast
+// path (file cache, ETag/304, streaming) untouched.
 export const dynamicRoutes = [
-  ${pages.filter(({ i }) => compiled[i].usesContext).map(({ info }) => `'${info.routePath}'`).join(',\n  ')}
+  ${pages.filter(({ i }) => compiled[i].usesContext || compiled[i].cspNonce).map(({ info }) => `'${info.routePath}'`).join(',\n  ')}
 ];
 
 // Which api routes opt into build-time baking (export const prerender = true):
@@ -2395,6 +2431,22 @@ export const routeHeaders = [
 export function headersFor(pathname) {
   const hit = routeHeaders.find((r) => matchRoute(r.pattern, pathname));
   return hit ? hit.headers : null;
+}
+
+// Routes that opted into nonce-based CSP (export const csp = { nonce: true },
+// ). The servers ask this BEFORE writing a document: when it is true they
+// mint one random nonce per response, put it in the CSP header ('nonce-...'
+// plus 'strict-dynamic', so the document's own code may load more code) and
+// stamp the same value on the script tag. The default policy stays a hash -
+// cspNonceRoutes is empty for an app that never asks, so the fast path is
+// unchanged. The Go binary never sees this: these routes are dynamic, so it
+// has no baked file for them to serve.
+export const cspNonceRoutes = [
+  ${pages.filter(({ i }) => compiled[i].cspNonce).map(({ info }) => `'${info.routePath}'`).join(',\n  ')}
+];
+
+export function cspNonce(pathname) {
+  return cspNonceRoutes.some((pattern) => matchRoute(pattern, pathname));
 }
 
 // A Web-standard Request from whatever the host provides: the edge adapter

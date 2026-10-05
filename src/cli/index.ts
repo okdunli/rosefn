@@ -8,7 +8,7 @@ import * as zlib from 'zlib';
 import { createRequire } from 'module';
 import { pathToFileURL, fileURLToPath } from 'url';
 import { buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadPlugins, type RouteInfo } from '../compiler/index.js';
-import { getHtmlShell, getClientSource, getStyles, shellOpen, clientScriptTag, securityHeaders, setBundleMode } from './shell.js';
+import { getHtmlShell, getClientSource, getStyles, shellOpen, clientScriptTag, securityHeaders, mintNonce, setBundleMode } from './shell.js';
 // Type-only: erased by esbuild/tsx, so the published CLI stays a ~100 KB
 // bundle with no TypeScript dependency. `rosefn check` loads the PROJECT's
 // own typescript at runtime instead.
@@ -116,9 +116,14 @@ async function sendWebResponse(web: any, res: any): Promise<void> {
 async function sendPage(req: any, res: any, ssrModule: any, hookCtx: any, page: any, routePath: string): Promise<void> {
   let status = page.status ?? 200;
  // page.lang/page.dir are the locale the render used: the document's
-  // <html> attributes follow the route's [lang] segment.
-  let html = getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir);
-  let headers: Record<string, any> = pageHeaders(ssrModule, routePath);
+ // <html> attributes follow the route's [lang] segment. nonce: '' for
+  // every hashed route, so the document is byte-identical to before.
+  const nonce = nonceFor(ssrModule, routePath);
+  // a nonce route is dynamic by construction (the compiler put it in
+  // dynamicRoutes), so it always lands here or in the stream below - never on
+  // the baked-file path, where a fresh nonce per response is impossible
+  let html = getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, nonce);
+  let headers: Record<string, any> = pageHeaders(ssrModule, routePath, nonce);
   if (hookCtx) {
     const out = await ssrModule.runResponseHooks(hookCtx, new Response(html, { status, headers }));
     status = out.status;
@@ -397,13 +402,24 @@ const ASSET_EXT = new Set(['.js', '.css', '.json', '.png', '.jpg', '.jpeg', '.gi
 // headers, which win. Keys are lower-cased first: HTTP header names are
 // case-insensitive, and an overridden header must not survive under a
 // second spelling. The same data ships to the Go binary as
-// dist/headers.json at build time.
-function pageHeaders(ssrModule: any, pathname: string): Record<string, string> {
+// dist/headers.json at build time. `nonce` switches this one
+// response to the nonce policy, which the caller must also stamp on the
+// document's script tag - the two are generated together here or not at all.
+function pageHeaders(ssrModule: any, pathname: string, nonce = ''): Record<string, string> {
   const headers: Record<string, string> = {};
-  for (const [k, v] of Object.entries(securityHeaders(getClientSource()))) headers[k.toLowerCase()] = v;
+  for (const [k, v] of Object.entries(securityHeaders(getClientSource(), nonce))) headers[k.toLowerCase()] = v;
   const own = ssrModule.headersFor?.(pathname) as Record<string, string> | null | undefined;
   if (own) for (const [k, v] of Object.entries(own)) headers[k.toLowerCase()] = v;
   return headers;
+}
+
+/**
+ * The nonce for one response, or '' when the route keeps the hashed policy
+ * . Only the routes that exported `csp = { nonce: true }` ask for one,
+ * so every other document is byte-for-byte what it was.
+ */
+function nonceFor(ssrModule: any, pathname: string): string {
+  return ssrModule.cspNonce?.(pathname) ? mintNonce() : '';
 }
 
 // ISR background pass: re-render a stale baked route and
@@ -827,7 +843,12 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
         // the wire cannot be replaced - which is the honest limit of a
         // streamed response, not a missing feature.
         let status = 200;
-        let headers: Record<string, any> = pageHeaders(ssrModule, pathnameOf(safe2));
+ // The nonce is minted before the first flush, because a
+        // streamed response cannot change its headers afterwards - and the
+        // document's script tag is written into that same stream, so both
+        // halves carry this one value.
+        const nonce = nonceFor(ssrModule, pathnameOf(safe2));
+        let headers: Record<string, any> = pageHeaders(ssrModule, pathnameOf(safe2), nonce);
         if (hookCtx) {
           const out = await ssrModule.runResponseHooks(hookCtx, new Response(null, { status, headers }));
           status = out.status;
@@ -872,7 +893,7 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
  // The streamed shell opens before the render, so its <html
         // lang>/<dir> come from the pathname (the server bundle's docAttrs)
         const doc = ssrModule.docAttrs(safe2);
-        await ssrModule.renderPageStream(safe2, write, shellOpen(getStyles(), doc.lang, doc.dir), clientScriptTag(getClientSource()));
+        await ssrModule.renderPageStream(safe2, write, shellOpen(getStyles(), doc.lang, doc.dir), clientScriptTag(getClientSource(), nonce));
         done();
         return;
       }

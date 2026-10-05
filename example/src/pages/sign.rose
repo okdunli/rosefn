@@ -1,4 +1,22 @@
 <script>
+ // This route asks for a NONCE policy instead of the hashed one. The
+  // hash is rosefn's default and its strongest form, but it only holds while
+  // the document the browser parses is byte-for-byte the document this server
+  // wrote - and a CDN, WAF or A/B injector in between does not promise that.
+  // One injected byte and the sha256 no longer matches, so the browser blocks
+  // this page's own bundle. A nonce survives the rewrite, because the header
+  // and the <script nonce> are minted together per response.
+  //
+  // The price is real, which is why it is opt-in per route: a nonce cannot
+  // ride a baked file, so this route is never prerendered (the compiler puts
+  // it in dynamicRoutes) and the Go single binary - which serves only baked
+  // files - has nothing to serve for it. Everything else keeps the hash.
+  //
+  // Behind a rewriting proxy, the route ALSO wants 'strict-dynamic' (the
+  // policy carries it) so a third-party loader this page pulls in may load
+  // more scripts - the usual reason a deployment reaches for a nonce at all.
+  export const csp = { nonce: true };
+
   // Server-side store. A real app would read/write a database here; $store
   // is what makes it shared across requests AND across cluster workers
  //: the write broadcasts to every worker, reads stay local, and

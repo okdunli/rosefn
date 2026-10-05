@@ -157,6 +157,9 @@ if (__state.__route === window.location.pathname) {
 // /client.js plus a tiny inline bootstrap. There the hash covers exactly
 // the bootstrap's bytes and 'self' covers the external modules - still no
 // 'unsafe-inline' anywhere.
+// The policy tail, shared by both script-src shapes so the two can never
+// drift: only the script source differs between them.
+const CSP_TAIL = `style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`;
 let cspCache: { for: string | null; value: string } | null = null;
 // The exact bytes between the external bootstrap's script tags - the single
 // source of truth shared by the tag and the CSP hash, same contract as
@@ -168,7 +171,40 @@ const EXTERNAL_BOOTSTRAP = `\nimport { start, prefetch, postForm } from '/client
 function inlineScript(client: string): string {
   return `\n${client}\n${BOOTSTRAP}`;
 }
-export function securityHeaders(client: string | null): Record<string, string> {
+/**
+ * A fresh CSP nonce: 128 bits from the platform RNG, base64 - the syntax the
+ * header and the tag share . Web Crypto on purpose: the same helper
+ * serves the Node server and the edge adapter, and an edge runtime has no
+ * node:crypto. Minted per response and never reused: a nonce is only worth
+ * anything an attacker cannot predict, and a repeated one would hand a
+ * guessed value unlimited script execution.
+ */
+export function mintNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  let raw = '';
+  for (const b of bytes) raw += String.fromCharCode(b);
+  return btoa(raw);
+}
+
+/**
+ * The document's CSP. Two shapes, chosen per response:
+ *
+ * - no nonce (the default): `script-src 'sha256-…'` over the exact bytes the
+ *   tag will carry. Nothing else may run - the strongest policy rosefn has,
+ *   and the reason a rosefn document needs no 'unsafe-inline'.
+ * - a nonce (a route exporting `csp = { nonce: true }`):
+ *   `script-src 'nonce-…' 'strict-dynamic'`. A hash dies the moment anything
+ *   between the server and the browser touches the document - a CDN, a WAF,
+ *   an A/B injector that adds one byte blocks the page's own bundle. A nonce
+ *   survives that, and 'strict-dynamic' lets the page's own code load more
+ *   code (a third-party loader, a lazily imported chunk), which is the reason
+ *   a deployment reaches for a nonce in the first place. It is weaker in one
+ *   way: whatever the document's script loads is trusted. That is the trade
+ *   the route opts into, per route, not a framework default.
+ */
+export function securityHeaders(client: string | null, nonce = ''): Record<string, string> {
+  if (nonce) return { 'Content-Security-Policy': `script-src 'nonce-${nonce}' 'strict-dynamic'; ${CSP_TAIL}` };
   if (!cspCache || cspCache.for !== client) {
     // client === null: split mode (or the edge without a built client.js).
     // 'self' covers the external modules and chunks, the hash covers the
@@ -178,7 +214,7 @@ export function securityHeaders(client: string | null): Record<string, string> {
       : `'self' 'sha256-${createHash('sha256').update(EXTERNAL_BOOTSTRAP, 'utf-8').digest('base64')}'`;
     cspCache = {
       for: client,
-      value: `script-src ${scriptSrc}; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`,
+      value: `script-src ${scriptSrc}; ${CSP_TAIL}`,
     };
   }
   return { 'Content-Security-Policy': cspCache.value };
@@ -245,11 +281,19 @@ function mergeHeadBlocks(blocks: string[]): string {
   return order.map((k) => byKey.get(k)!).join('\n  ');
 }
 
-/** The script tag carrying the inlined bundle (+ bootstrap), or the external fallback. */
-export function clientScriptTag(client: string | null): string {
+/**
+ * The script tag carrying the inlined bundle (+ bootstrap), or the external
+ * fallback. `nonce` stamps the same value the CSP header carries, so
+ * a route running a nonce policy has its own code allowed to run; without it
+ * the tag is byte-identical to what the sha256 in the header was computed
+ * over. Both tags in split mode get it: the external module and the inline
+ * bootstrap are the same trust root.
+ */
+export function clientScriptTag(client: string | null, nonce = ''): string {
+  const n = nonce ? ` nonce="${nonce}"` : '';
   return client
-    ? `<script type="module">${inlineScript(client)}</script>`
-    : `<script type="module" src="/client.js"></script>\n<script type="module">${EXTERNAL_BOOTSTRAP}</script>`;
+    ? `<script type="module"${n}>${inlineScript(client)}</script>`
+    : `<script type="module"${n} src="/client.js"></script>\n<script type="module"${n}>${EXTERNAL_BOOTSTRAP}</script>`;
 }
 
 /**
@@ -278,8 +322,8 @@ export function shellOpen(styles: string = getStyles(), lang = 'en', dir = ''): 
 }
 
 /** Build the document from an explicit client source (edge runtimes have no fs). */
-export function buildShell(ssrHtml: string, stateJson: string, client: string | null, head: string[] = [], styles: string = getStyles(), js = true, lang = 'en', dir = ''): string {
-  const clientTag = clientScriptTag(client);
+export function buildShell(ssrHtml: string, stateJson: string, client: string | null, head: string[] = [], styles: string = getStyles(), js = true, lang = 'en', dir = '', nonce = ''): string {
+  const clientTag = clientScriptTag(client, nonce);
 
   const mergedHead = mergeHeadBlocks(head);
   // a route-provided <title> replaces the default one
@@ -312,6 +356,6 @@ export function buildShell(ssrHtml: string, stateJson: string, client: string | 
 }
 
 /** Node entry: reads dist/client.js from disk (mtime-cached). */
-export function getHtmlShell(ssrHtml: string, stateJson: string, head: string[] = [], js = true, lang = 'en', dir = ''): string {
-  return buildShell(ssrHtml, stateJson, getClientSource(), head, getStyles(), js, lang, dir);
+export function getHtmlShell(ssrHtml: string, stateJson: string, head: string[] = [], js = true, lang = 'en', dir = '', nonce = ''): string {
+  return buildShell(ssrHtml, stateJson, getClientSource(), head, getStyles(), js, lang, dir, nonce);
 }

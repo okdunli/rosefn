@@ -19,7 +19,7 @@
 
 import { pathToFileURL } from 'url';
 import { join } from 'path';
-import { buildShell, shellOpen, clientScriptTag, securityHeaders } from './shell.js';
+import { buildShell, shellOpen, clientScriptTag, securityHeaders, mintNonce } from './shell.js';
 
 type ServerModule = {
   renderPage(pathname: string, form?: FormData): Promise<{ html: string; state: string; head: string[]; status?: number; csr?: boolean; lang?: string; dir?: string }>;
@@ -49,6 +49,8 @@ type ServerModule = {
   routeHeaders: Array<{ pattern: string; headers: Record<string, string> }>;
   /** the route's own exported headers for a pathname, or null */
   headersFor(pathname: string): Record<string, string> | null;
+ /** Routes that exported `csp = { nonce: true }` - nonce policy, never baked */
+  cspNonce(pathname: string): boolean;
 };
 
 /**
@@ -84,10 +86,11 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
   // names are case-insensitive, and a Headers object built from a plain
   // object would otherwise carry BOTH spellings of an overridden header
   // as two values. Without fs there is no inlined bundle to hash, so only
-  // the route's own headers ship.
-  const pageHeaders = (pathname: string): Record<string, string> => {
+ // the route's own headers ship. `nonce` switches this one response
+  // to the nonce policy; the caller stamps the same value on the script tag.
+  const pageHeaders = (pathname: string, nonce = ''): Record<string, string> => {
     const headers: Record<string, string> = {};
-    if (client) for (const [k, v] of Object.entries(securityHeaders(client))) headers[k.toLowerCase()] = v;
+    if (client) for (const [k, v] of Object.entries(securityHeaders(client, nonce))) headers[k.toLowerCase()] = v;
     const own = mod.headersFor?.(pathname);
     if (own) for (const [k, v] of Object.entries(own)) headers[k.toLowerCase()] = v;
     return headers;
@@ -128,6 +131,10 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
     // document would carry the shell's default <title> - the route head is
     // applied client-side at boot, and there is no client.
     if (!form && !broken.has(pathname) && mod.canStream(pathname) && !mod.isNoJs(pathname)) {
+ // The nonce is minted before the Response exists, because its
+      // headers are fixed from then on - and the document's script tag is
+      // written into that same stream, so both halves carry this one value.
+      const nonce = mod.cspNonce?.(pathname) ? mintNonce() : '';
       // streaming GET: one chunked Response, still exactly one request.
  // onResponse runs before the stream is created, while the
       // status and headers can still change; a replacement body is ignored,
@@ -135,7 +142,7 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
       // streamed response.
       const streamed = new Response(null, {
         status: 200,
-        headers: { 'content-type': 'text/html; charset=utf-8', ...pageHeaders(pathname) }
+        headers: { 'content-type': 'text/html; charset=utf-8', ...pageHeaders(pathname, nonce) }
       });
       const head = hookCtx ? await mod.runResponseHooks(hookCtx, streamed) : streamed;
       const encoder = new TextEncoder();
@@ -148,7 +155,7 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
             pathname,
             (chunk) => controller.enqueue(encoder.encode(chunk)),
             shellOpen(styles, doc.lang, doc.dir),
-            clientScriptTag(client)
+            clientScriptTag(client, nonce)
           );
           controller.close();
         }
@@ -159,13 +166,16 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
     // The middleware already ran at the top of this handler, so the render
     // below sees its context.
     const page = await mod.renderPage(pathname, form);
+ // '' for every hashed route, so the document is byte-identical to
+    // what it was before nonce mode existed.
+    const nonce = mod.cspNonce?.(pathname) ? mintNonce() : '';
     // js = page.csr !== false: a csr = false route ships no bundle, no state
  // script - the document is HTML + CSS only . page.lang /
  // page.dir are the locale the render used and its direction .
-    const html = buildShell(page.html, page.state, client, page.head, styles, page.csr !== false, page.lang, page.dir);
+    const html = buildShell(page.html, page.state, client, page.head, styles, page.csr !== false, page.lang, page.dir, nonce);
     const buffered = new Response(html, {
       status: page.status ?? 200,
-      headers: { 'content-type': 'text/html; charset=utf-8', ...pageHeaders(pathname) }
+      headers: { 'content-type': 'text/html; charset=utf-8', ...pageHeaders(pathname, nonce) }
     });
     return hookCtx ? mod.runResponseHooks(hookCtx, buffered) : buffered;
   };
