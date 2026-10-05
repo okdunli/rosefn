@@ -1,0 +1,28 @@
+# Fly.io: the rosefn Node service as a machine.
+#
+#   cp deploy/fly.toml ./fly.toml
+#   fly launch --no-deploy
+#   fly deploy
+#
+# The app builds deploy/Dockerfile.node (Node builds the site, then runs
+# `rosefn serve` - the cluster runner). Swap the dockerfile line for
+# "deploy/Dockerfile.static" to ship the Go single binary instead, and set
+# UPSTREAM to the Node app for the dynamic half.
+app = "rosefn"
+primary_region = "iad"
+
+[build]
+  dockerfile = "deploy/Dockerfile.node"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # rosefn serve already clusters across every core of the machine; give it
+  # the cores instead of paying for more, smaller machines.
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "512mb"
