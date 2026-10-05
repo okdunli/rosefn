@@ -1,5 +1,9 @@
 <script>
   import { $cookies } from './runtime.js';
+  // Type-only import: erased at build time, zero bytes in either bundle. The
+  // VALUE stays lazily imported below (node:sqlite must never sit in the
+  // server bundle's static import graph - see the comment there).
+  import type { DatabaseSync } from 'node:sqlite';
 
  // The blog's backstage skeleton: a real database behind the API.
   // node:sqlite ships inside Node 22+ - zero dependencies, zero native
@@ -18,7 +22,7 @@
   // working directory you started the server from (your project root), never
   // inside dist/: dist is a build artifact and the Go single binary embeds
   // it verbatim - a database in dist would ship inside the binary.
-  let conn;
+  let conn: DatabaseSync | undefined;
   const getDb = async () => {
     if (!conn) {
       const { DatabaseSync } = await import('node:sqlite');
@@ -41,22 +45,31 @@
   // The demo's single author: session cookie value '1' is the users row id
   // (see api/login.rose). A real app stores a signed token and verifies it;
   // the cookie helpers (#35) build the cookie either way.
-  const signedIn = (req) => $cookies(req).session === '1';
+  const signedIn = (req: Request) => $cookies(req).session === '1';
+
+  // A row of the posts table. SQLite returns untyped objects; the interface
+  // is the contract the SELECT below promises, so the API's JSON shape is
+  // checked at compile time instead of being discovered by its consumers.
+  interface PostRow { id: number; title: string; body: string; author: string }
 
   // API answers are JSON, errors included - never an HTML error page.
-  const json = (obj, status = 200) =>
+  const json = (obj: unknown, status = 200) =>
     new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
 
   // Public read: the list, newest first. A page or a client calls this the
   // same way; on the Node server it is one request with no hydration.
   export async function GET() {
     const db = await getDb();
-    return { posts: db.prepare('SELECT id, title, body, author FROM posts ORDER BY id DESC').all() };
+    // node:sqlite types every row as Record<string, SQLOutputValue>; the
+    // SELECT above promises the PostRow shape, so assert it (through
+    // unknown - the two shapes do not overlap enough for a direct cast).
+    const posts = db.prepare('SELECT id, title, body, author FROM posts ORDER BY id DESC').all() as unknown as PostRow[];
+    return { posts };
   }
 
   // Create. Writes need the session: a missing or wrong cookie is a 401 with
   // a JSON body, so a browser and a script get the same contract.
-  export async function POST(req) {
+  export async function POST(req: Request) {
     if (!signedIn(req)) return json({ error: 'sign in first' }, 401);
     const form = await req.formData();
     const title = String(form.get('title') ?? '').trim();
@@ -69,7 +82,7 @@
 
   // Delete by ?id=. Same wall as POST - the CSRF guard (#35) already refuses
   // cross-site writes before a handler runs.
-  export async function DELETE(req) {
+  export async function DELETE(req: Request) {
     if (!signedIn(req)) return json({ error: 'sign in first' }, 401);
     const id = Number(new URL(req.url).searchParams.get('id'));
     if (!id) return json({ error: 'id is required' }, 400);

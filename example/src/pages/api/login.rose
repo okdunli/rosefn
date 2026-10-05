@@ -1,5 +1,8 @@
 <script>
   import { $sessionCookie } from './runtime.js';
+  // Type-only: erased at build time (see api/posts.rose for why the VALUE
+  // import stays lazy inside getDb).
+  import type { DatabaseSync } from 'node:sqlite';
 
   // Login for the demo: one seeded users row, checked against the same
   // blog.db the posts API uses. The session is the cookie $sessionCookie()
@@ -14,7 +17,7 @@
   // IS the pool; a real deploy swaps it for pg.Pool here. The file is
   // relative to the working directory you started the server from, never
   // inside dist/ (the Go binary embeds dist verbatim).
-  let conn;
+  let conn: DatabaseSync | undefined;
   const getDb = async () => {
     if (!conn) {
       const { DatabaseSync } = await import('node:sqlite');
@@ -31,18 +34,18 @@
     return conn;
   };
 
-  const json = (obj, status = 200, headers = {}) =>
+  const json = (obj: unknown, status = 200, headers: Record<string, string> = {}) =>
     new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json', ...headers } });
 
   // POST user=ada pass=lovelace -> 200 + Set-Cookie: session=1
   // Trade-off: plaintext passwords, one seeded row - a demo, not a vault. A
   // real login hashes with node:crypto scrypt and compares in constant time;
   // everything around it (this file, the cookie, the middleware) stays.
-  export async function POST(req) {
+  export async function POST(req: Request) {
     const form = await req.formData();
     const user = String(form.get('user') ?? '');
     const db = await getDb();
-    const row = db.prepare('SELECT id FROM users WHERE name = ? AND pass = ?').get(user, String(form.get('pass') ?? ''));
+    const row = db.prepare('SELECT id FROM users WHERE name = ? AND pass = ?').get(user, String(form.get('pass') ?? '')) as { id: number } | undefined;
     if (!row) return json({ error: 'bad credentials' }, 401);
     return json({ ok: true, user }, 200, { 'set-cookie': $sessionCookie('session', String(row.id)) });
   }

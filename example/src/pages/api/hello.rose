@@ -11,7 +11,7 @@
     return { hello: 'Rosefn', framework: 'one request, zero hydration' };
   }
 
-  export async function POST(req) {
+  export async function POST(req: Request) {
     const form = await req.formData();
     const name = String(form.get('name') || 'world').trim();
     return { hello: name };

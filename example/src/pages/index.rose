@@ -16,11 +16,12 @@
   // Zero-request form: no POST, no fetch - the action runs client-side and
   // fine-grained reactivity repaints only what changed. (HTML-over-the-wire stacks
   // pay one server round-trip per submit.)
-  function signGuestbook(e) {
+  function signGuestbook(e: SubmitEvent) {
     e.preventDefault();
-    const guest = String(new FormData(e.target).get('name') || '').trim();
+    const form = e.target as HTMLFormElement;
+    const guest = String(new FormData(form).get('name') || '').trim();
     if (guest) $setState('guests', [guest, ...guests()]);
-    e.target.reset();
+    form.reset();
   }
   // A widget whose data source is offline. Inside {#boundary} its throw is
   // contained: only this section degrades, the rest of the page renders.

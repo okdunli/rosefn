@@ -5,9 +5,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
+import { createRequire } from 'module';
 import { pathToFileURL, fileURLToPath } from 'url';
-import { buildProject, type RouteInfo } from '../compiler/index.js';
+import { buildProject, scanRoseFiles, scriptOf, type RouteInfo } from '../compiler/index.js';
 import { getHtmlShell, getClientSource, shellOpen, clientScriptTag, securityHeaders, setBundleMode } from './shell.js';
+// Type-only: erased by esbuild/tsx, so the published CLI stays a ~100 KB
+// bundle with no TypeScript dependency. `rosefn check` loads the PROJECT's
+// own typescript at runtime instead.
+import type * as ts from 'typescript';
 
 // --- wire performance: compression + conditional caching (stdlib only) ---
 // The Go binary already compresses; the Node server must match it or the
@@ -938,22 +943,52 @@ async function scaffold(): Promise<void> {
       build: 'rosefn build',
       preview: 'rosefn preview',
       serve: 'rosefn serve',
+      check: 'rosefn check',
     },
     dependencies: { rosefn: `^${version()}` },
+    // TypeScript is a first-class citizen: .rose scripts are typed, and
+    // `npm run check` type-checks every one of them with THIS project's
+    // TypeScript (the framework never drags its own copy in).
+    devDependencies: { typescript: '^5.6.0' },
+  }, null, 2) + '\n');
+
+  // The ambient globals a .rose script can call ($state, $data, $t, ...),
+  // pulled in from the installed package: editors and tsc both see them.
+  fs.writeFileSync(path.join(dir, 'rosefn-env.d.ts'), `/// <reference types="rosefn" />\n`);
+  fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: {
+      target: 'ES2022',
+      module: 'ESNext',
+      moduleResolution: 'bundler',
+      lib: ['ES2022', 'DOM', 'DOM.Iterable'],
+      strict: true,
+      noEmit: true,
+      skipLibCheck: true,
+    },
+    // the env file first (it is what makes the globals visible), then any
+    // .ts the project grows - .rose scripts are checked by `npm run check`
+    include: ['rosefn-env.d.ts', 'src/**/*.ts'],
   }, null, 2) + '\n');
 
   fs.writeFileSync(path.join(pages, 'index.rose'), `<script>
   // One file per route: markup, script and styles together.
+  // The script block is TypeScript - interfaces, annotations, generics and
+  // casts all compile, and \`npm run check\` type-checks them.
+  interface Item { label: string }
+
   let count = $state(0);
-  let items = $state(['zero hydration', 'one request', 'no build config']);
+  let items = $state<string[]>(['zero hydration', 'one request', 'no build config']);
   let showList = $state(true);
 
   function increment() { $setState('count', count() + 1); }
   function toggleList() { $setState('showList', !showList()); }
+  // typed server data: the body runs per request on the server (and ships
+  // to the client, where it re-runs on a client-side navigation)
+  let first: Item = $data((): Item => ({ label: items()[0] ?? 'nothing yet' }));
 </script>
 
 <h1>🌹 Rosefn</h1>
-<p>Count: <strong>{count()}</strong></p>
+<p>Count: <strong>{count()}</strong> - first item: {first().label}</p>
 <button on:click={increment}>Increment</button>
 <button on:click={toggleList}>{showList() ? 'Hide' : 'Show'} the list</button>
 
@@ -976,10 +1011,11 @@ async function scaffold(): Promise<void> {
 A Rosefn project. One file per route in \`src/pages/\`.
 
 \`\`\`bash
-npm install     # pulls the rosefn package
+npm install     # pulls the rosefn package (and typescript, for checking)
 npm run dev     # dev server with hot rebuild: http://localhost:3000
 npm run build   # compiles to dist/
 npm run serve   # production runner (cluster, access log, graceful shutdown)
+npm run check   # type-checks every .rose script
 \`\`\`
 
 Add a route by adding a file: \`src/pages/about.rose\` serves \`/about\`.
@@ -991,9 +1027,152 @@ Full syntax: the README of the rosefn package.
   fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/\ndist/\n');
 
   console.log(`🌹 Created ${dir}`);
-  console.log(`   src/pages/index.rose  - a page that builds and runs`);
+  console.log(`   src/pages/index.rose  - a typed page that builds and runs`);
+  console.log(`   rosefn-env.d.ts + tsconfig.json - the script globals, typed`);
   console.log(`\n   cd ${name}`);
   console.log(`   npm install && npm run dev`);
+  console.log(`   npm run check    # type-checks every .rose script`);
+}
+
+/**
+ * `rosefn check [dir]` - type-check every .rose script with the
+ * PROJECT's own TypeScript.
+ *
+ * esbuild strips types without checking them, so a wrong argument type or a
+ * typo in an interface is invisible at build time: the build succeeds and the
+ * bug ships. This closes that hole - it extracts the exact block the compiler
+ * embeds (scriptOf, one regex, one truth), pads it so line and column numbers
+ * still point at the .rose file, and runs the project's TypeScript over all
+ * of them in one program, with rosefn's own globals in scope.
+ *
+ * No TypeScript in the project is a hard error: a check that cannot run must
+ * never pass silently. trade-off: no temp files, no tsconfig parsing - an
+ * in-memory compiler host and fixed strict options, documented.
+ */
+async function check(): Promise<void> {
+  const files = await scanRoseFiles(SRC_DIR);
+  if (files.length === 0) {
+    console.error(`Rosefn: no .rose pages found under ${path.join(SRC_DIR, 'src', 'pages')} - run rosefn check from a project root, or pass one: rosefn check <dir>`);
+    process.exit(1);
+  }
+
+  // The project's typescript, resolved FROM the project: the framework must
+  // not drag its own copy into a user's install, and the version that
+  // reports the errors should be the one the user's editor uses.
+  let tsMod: typeof ts;
+  try {
+    const req = createRequire(pathToFileURL(path.join(SRC_DIR, 'package.json')));
+    tsMod = await import(pathToFileURL(req.resolve('typescript')).href) as typeof ts;
+  } catch {
+    console.error(`Rosefn: type checking needs typescript in this project - npm i -D typescript`);
+    process.exit(1);
+  }
+
+  // rosefn's ambient globals, resolved from the COMPILER's own location:
+  // src/types/rosefn.d.ts is a sibling in the repo and two levels down in
+  // the published package (same two layouts as the runtime entry).
+  const nextTo = (rel: string[]) => rel.map((r) => fileURLToPath(new URL(r, import.meta.url))).find((p) => fs.existsSync(p));
+  const typesFile = nextTo(['../types/rosefn.d.ts', '../src/types/rosefn.d.ts']);
+  if (!typesFile) {
+    console.error('Rosefn: the type definitions (src/types/rosefn.d.ts) were not found next to the compiler');
+    process.exit(1);
+  }
+  // The runtime source, for scripts that import helpers from './runtime.js'
+  // (the module the compiler generates beside the intermediates). Point that
+  // import at the real source so it is checked against the actual signatures
+  // instead of a copy that can drift.
+  const runtimeSource = nextTo(['../runtime/index.ts', '../src/runtime/index.ts']);
+
+  // Each script becomes a virtual file NAMED after its .rose file, padded so
+  // a diagnostic's line/column are the .rose file's own: the <script> tag
+  // sits on line L, so L-1 blank lines put the script's first line back on
+  // line L. (The script capture starts with the newline right after the tag,
+  // so its own line 1 is the rest of line L - the mapping is exact, tag on
+  // line 1 included.)
+  //
+  // The map is keyed the way TS normalizes paths (absolute, forward slashes):
+  // a raw `src\pages\index.rose` key never matches and the host silently
+  // reads the REAL .rose file off disk, which parses as HTML and reports a
+  // thousand nonsense errors (measured, not hypothetical).
+  const norm = (f: string) => path.resolve(f).replace(/\\/g, '/');
+  const virtual = new Map<string, string>();
+  let checked = 0;
+  for (const file of files) {
+    const source = await fs.promises.readFile(file, 'utf-8');
+    const m = /<script>/.exec(source);
+    const script = scriptOf(source);
+    if (!script) continue; // a pure-markup component has nothing to check
+    const tagLine = source.slice(0, m!.index + '<script>'.length).split('\n').length;
+    const wired = runtimeSource
+      ? script.replace(/['"]\.\/runtime\.js['"]/g, JSON.stringify(runtimeSource.replace(/\\/g, '/')))
+      : script;
+    virtual.set(norm(file), '\n'.repeat(tagLine - 1) + wired);
+    checked++;
+  }
+  if (checked === 0) {
+    console.log('Rosefn: no .rose scripts to check');
+    return;
+  }
+
+  const options: ts.CompilerOptions = {
+    noEmit: true,
+    strict: true,
+    target: tsMod.ScriptTarget.ES2022,
+    module: tsMod.ModuleKind.ESNext,
+    moduleResolution: tsMod.ModuleResolutionKind.Bundler,
+    lib: ['lib.es2022.d.ts', 'lib.dom.d.ts', 'lib.dom.iterable.d.ts'],
+    // the virtual files are named after the .rose files (so a diagnostic
+    // points at the real path); without this TypeScript refuses them for
+    // their extension before it ever asks the host for their content
+    allowNonTsExtensions: true,
+    // the rewired './runtime.js' import points at a real .ts source
+    allowImportingTsExtensions: true,
+    // `types` is deliberately NOT set: the project's own @types packages
+    // (@types/node for node:sqlite, say) load automatically, the way they do
+    // for the user's own .ts files. Errors inside them are filtered below.
+    skipLibCheck: true,
+  };
+  const host = tsMod.createCompilerHost(options);
+  // @types discovery starts at the project root, not the process cwd - the
+  // command works from anywhere, like every other rosefn command.
+  host.getCurrentDirectory = () => path.resolve(SRC_DIR);
+  const realRead = host.readFile.bind(host);
+  const realGet = host.getSourceFile.bind(host);
+  host.readFile = (f) => virtual.get(norm(f)) ?? realRead(f);
+  host.fileExists = (f) => virtual.has(norm(f)) || tsMod.sys.fileExists(f);
+  host.getSourceFile = (f, version, onError, shouldCreate) => {
+    const src = virtual.get(norm(f));
+    return src ? tsMod.createSourceFile(f, src, version, true) : realGet(f, version, onError, shouldCreate);
+  };
+
+  // rosefn's ambient globals as a program root: a global .d.ts contributes
+  // its declarations to every file in the program, so no per-file reference
+  // directive is needed (and none could fit on line 1 without shifting the
+  // line numbers the padding just restored).
+  const program = tsMod.createProgram([...virtual.keys(), typesFile], options, host);
+  // Only the project's own scripts: an error inside @types/node or inside
+  // rosefn's runtime source is not the user's bug (skipLibCheck already
+  // covers most of it, and a rewired import drags real files into the
+  // program - their internals stay out of the report).
+  const diagnostics = tsMod.getPreEmitDiagnostics(program)
+    .filter((d) => d.file && virtual.has(norm(d.file.fileName)));
+  if (diagnostics.length === 0) {
+    console.log(`Rosefn: ${checked} script${checked === 1 ? '' : 's'} type-checked, no errors`);
+    return;
+  }
+  for (const d of diagnostics) {
+    // paths relative to the project root, the way tsc prints them
+    const at = d.file ? tsMod.getLineAndCharacterOfPosition(d.file, d.start ?? 0) : null;
+    const where = d.file && at
+      ? `${path.relative(SRC_DIR, d.file.fileName)}(${at.line + 1},${at.character + 1})`
+      : 'rosefn';
+    const text = tsMod.flattenDiagnosticMessageText(d.messageText, '\n');
+    const kind = d.category === 1 ? 'error' : 'warning';
+    console.error(`${where}: ${kind} TS${d.code}: ${text}`);
+  }
+  const errors = diagnostics.filter((d) => d.category === 1).length;
+  console.error(`Rosefn: ${errors} type error${errors === 1 ? '' : 's'} in ${checked} script${checked === 1 ? '' : 's'}`);
+  process.exit(1);
 }
 
 const cmd = process.argv[2];
@@ -1002,4 +1181,5 @@ else if (cmd === 'build') build();
 else if (cmd === 'preview') preview();
 else if (cmd === 'serve') serve();
 else if (cmd === 'new') scaffold();
-else console.log('Usage: rosefn dev|build|preview|serve|new [dir]   (dir defaults to the current directory; dist/ is written there)');
+else if (cmd === 'check') check();
+else console.log('Usage: rosefn dev|build|preview|serve|new|check [dir]   (dir defaults to the current directory; dist/ is written there)');

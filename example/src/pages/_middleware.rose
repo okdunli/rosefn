@@ -6,7 +6,7 @@
   // server actions and api handlers. This is the middleware job -
   // in one file, with the
   // same Web-standard Request the edge adapter passes.
-  export async function handle(request) {
+  export async function handle(request: Request) {
     const { pathname } = new URL(request.url);
  // $cookies(request) parses the Cookie header ; to SET one, use
     // $sessionCookie(name, value) - HttpOnly + SameSite=Lax by default.

@@ -15,7 +15,7 @@
   //   with JS-> the bootstrap intercepts the submit, POSTs via fetch, and
   //             adopts the response in place: one request, no reload.
   // The returned patch seeds this render's state.
-  export async function action(form) {
+  export async function action(form: FormData) {
     const name = String(form.get('name') ?? '').trim();
     if (name) store.update((g) => [name, ...g]);
     return { guests: [...store.get()] };

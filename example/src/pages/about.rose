@@ -30,9 +30,9 @@
   // and stops the moment you navigate away, so a page never leaks a timer
   // into the next route.
   let ticks = $state(0);
-  let heartbeat = null;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
   onMount(() => {
-    heartbeat = setInterval(() => setTicks(ticks() + 1), 100);
+    heartbeat = setInterval(() => $setState('ticks', ticks() + 1), 100);
   });
   onCleanup(() => {
     if (heartbeat) clearInterval(heartbeat);

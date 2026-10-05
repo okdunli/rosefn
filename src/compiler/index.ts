@@ -19,7 +19,17 @@ const HEAD_RE = /<head>([\s\S]*?)<\/head>/;
 // component's top-level elements and inlined into the document (zero
 // stylesheet requests, same bet as the inlined JS bundle).
 const STYLE_RE = /<style>([\s\S]*?)<\/style>/;
-const DECL_RE = /(?:let|const|var)\s+(\w+)[^=]*=\s*\$(state|data)\s*\(/g;
+// A declaration's initializer may carry TypeScript: a type argument
+// (`$state<Record<string, Post>>(...)`) and/or a cast (`$state(0) as
+// Counter`). Both belong to the declaration and must be consumed with it -
+// a generic list left in place makes the match fail (the declaration then
+// ships verbatim and `$state` is not a real import: the name is never
+// rewritten and reads it before initialization), and a cast left behind
+// survives as a stray `as Counter` expression statement. The regex stops at
+// `$state`/`$data`; the type-argument list is scanned (nesting and function
+// types included) in extractDecls, where a regex cannot go.
+const DECL_RE = /(?:let|const|var)\s+(\w+)[^=]*=\s*\$(state|data)\b/g;
+const DECL_CAST_RE = /^\s+as\s+[^;\n]+/;
 const SETSTATE_RE = /\$setState\(([^,]+),\s*([^)]+)\)/g;
 const EVENT_RE = /on:(\w+)=\{([^}]+)\}/g;
 const SLOT_RE = /<slot\s*\/?>/g;
@@ -32,6 +42,16 @@ const BOUNDARY_FALLBACK = '<p>This section failed to render.</p>';
 // (pages/api/*.rose). trade-off: function declarations only - an arrow-exported
 // handler is a syntax error at import time, which is loud enough.
 const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
+// A .rose <script> block is TypeScript: interfaces, annotations,
+// `as`, generics. The compiler's intermediates therefore hold TypeScript,
+// and esbuild must STRIP the types, not choke on them (a `.js` name made it
+// parse `interface Post` as JavaScript and fail the build). The intermediates
+// keep their .js names - the generated entry files import them by specifier
+// and the deploy dir's static server never sees them - so the loader is
+// overridden per build instead of renaming every file. esbuild's ts loader
+// accepts everything the js loader does, so the compiler's own generated
+// JavaScript parses unchanged under it.
+const TS_LOADER = { loader: { '.js': 'ts' as const } };
 
 export interface CompileResult {
   ssr: string;
@@ -189,6 +209,15 @@ function callifyStateReads(script: string, names: string[]): string {
     return out;
   };
   return scan(script);
+}
+
+/**
+ * The <script> block of a .rose source, verbatim. `rosefn check` must
+ * type-check exactly what the compiler will embed, so the extraction lives
+ * here and both consumers share it - one regex, one truth.
+ */
+export function scriptOf(source: string): string | null {
+  return source.match(COMPONENT_RE)?.[1] ?? null;
 }
 
 /** A plugin transforms a component's raw source before compilation sees it. */
@@ -705,7 +734,28 @@ function extractDecls(script: string): Decl[] {
   DECL_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = DECL_RE.exec(script))) {
-    const open = m.index + m[0].length;
+    // The regex matched up to `$state`/`$data`; what follows is an optional
+    // type-argument list and then the call. Scan the list by hand: it can
+    // nest (`Record<string, Post>`), and a function type inside it
+    // (`<() => void>`) has a `>` that is not a closing bracket.
+    let j = m.index + m[0].length;
+    const skipSpace = () => { while (j < script.length && /\s/.test(script[j])) j++; };
+    skipSpace();
+    if (script[j] === '<') {
+      let depth = 0;
+      while (j < script.length) {
+        const ch = script[j];
+        if (ch === '<') depth++;
+        else if (ch === '>' && script[j - 1] !== '=') {
+          depth--;
+          if (depth === 0) { j++; break; }
+        } else if (ch === '=' && script[j + 1] === '>') j++; // `=>`: both chars are one token
+        j++;
+      }
+      skipSpace();
+    }
+    if (script[j] !== '(') continue; // `$state` used as a value, not a call
+    const open = j + 1;
     let depth = 1;
     let i = open;
     while (i < script.length && depth > 0) {
@@ -715,6 +765,8 @@ function extractDecls(script: string): Decl[] {
       i++;
     }
     let end = i;
+    const cast = DECL_CAST_RE.exec(script.slice(i));
+    if (cast) end = i + cast[0].length;
     if (script[end] === ';') end++;
     decls.push({
       name: m[1],
@@ -1642,6 +1694,7 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
     format: 'esm',
     platform: 'node',
     write: true,
+    ...TS_LOADER,
   });
 
   // api routes and the middleware have no client module: they are
@@ -2010,6 +2063,7 @@ setRefreshHook(async () => {
       entryNames: 'client',
       chunkNames: 'chunks/[name]-[hash]',
       write: true,
+      ...TS_LOADER,
     });
   } else {
     await esbuild.build({
@@ -2020,6 +2074,7 @@ setRefreshHook(async () => {
       platform: 'browser',
       minify: true,
       write: true,
+      ...TS_LOADER,
     });
   }
 
@@ -2056,7 +2111,8 @@ setRefreshHook(async () => {
   return { routes: pages.map(({ info }) => info), bundle: bundleMode };
 }
 
-async function scanRoseFiles(root: string): Promise<string[]> {
+/** Every .rose file under <root>/src/pages, recursively (layouts and api included). */
+export async function scanRoseFiles(root: string): Promise<string[]> {
   const pagesDir = path.join(root, 'src', 'pages');
   if (!fs.existsSync(pagesDir)) return [];
 
