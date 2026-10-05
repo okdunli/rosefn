@@ -1,12 +1,13 @@
 {
   "name": "rosefn",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "The next-century web framework: zero-hydration, compile-time reactivity, single binary deploy",
   "type": "module",
   "scripts": {
     "dev": "tsx src/cli/index.ts dev example",
     "build": "tsx src/cli/index.ts build example",
     "preview": "tsx src/cli/index.ts preview example",
+    "serve": "tsx src/cli/index.ts serve example",
     "benchmark": "tsx benchmark.ts",
     "test": "tsx src/cli/index.ts build example && tsx test-client.ts",
     "test:cli": "node test-cli.mjs",
