@@ -5,7 +5,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
-import { pathToFileURL } from 'url';
+import { pathToFileURL, fileURLToPath } from 'url';
 import { buildProject, type RouteInfo } from '../compiler/index.js';
 import { getHtmlShell, getClientSource, shellOpen, clientScriptTag, securityHeaders, setBundleMode } from './shell.js';
 
@@ -82,9 +82,16 @@ async function sendWebResponse(web: any, res: any): Promise<void> {
 // dev/preview server's handful of files; swap for an LRU if it ever isn't.
 const fileCache = new Map<string, { mtimeMs: number; raw: Buffer; br: Buffer; gzip: Buffer; etag: string }>();
 
-const ROOT = process.cwd();
-const EXAMPLE_DIR = path.join(ROOT, 'example');
-const OUT_DIR = path.join(ROOT, 'dist');
+// Phase 0 (the "the framework is real" gate): the CLI builds ANY project,
+// not just this repo's demo. `rosefn build [dir]` - the dir defaults to the
+// cwd, so inside a project a bare `rosefn build` is all there is. The
+// project's rosefn.config.js is read from that same dir (plugins).
+// ponytail: the output still lands in ./dist of the directory the command
+// runs from (the repo's Go binary embeds <repo>/dist, and a project's own
+// dist belongs beside the command you ran) - `cd` into the project, or pass
+// its path and collect dist/ from here.
+const SRC_DIR = process.argv[3] ? path.resolve(process.argv[3]) : process.cwd();
+const OUT_DIR = path.join(process.cwd(), 'dist');
 // PORT env override (default 3000): lets a preview server run beside a dev
 // server on the same machine - the e2e ISR test does exactly that.
 const PORT = Number(process.env.PORT) || 3000;
@@ -116,7 +123,15 @@ async function loadServer(): Promise<any> {
 async function build(): Promise<void> {
   // P0 §1: the build reports the bundle mode ('inline' | 'split') so the
   // shell follows it for every document, header and streaming tag it emits
-  const { routes, bundle } = await buildProject(EXAMPLE_DIR, OUT_DIR);
+  const { routes, bundle } = await buildProject(SRC_DIR, OUT_DIR);
+  // The previous build's prerendered output must not survive: a route that
+  // stopped being static (it started reading getContext() or $store())
+  // would otherwise leave its old baked document - and brotli sibling -
+  // behind, and the Go binary embeds dist/ verbatim, so it would serve
+  // that frozen file forever. Runs after the bundles are rewritten (an
+  // in-flight dev request never sees a missing server.js) and before
+  // prerender writes the new set.
+  await clearPrerendered(OUT_DIR);
   setBundleMode(bundle);
   const skipped = await prerender(routes);
   // The broken-route manifest: the server reads it to pick the buffered path
@@ -161,6 +176,36 @@ async function writeBrotli(dir: string): Promise<void> {
 }
 
 /**
+ * Delete the prerendered output of a previous build: HTML documents and
+ * baked API bodies, with their brotli siblings. Everything else in dist/
+ * (the bundles, styles) was just rewritten by buildProject.
+ *
+ * ponytail: Windows hands out transient EPERM/EBUSY when an antivirus or
+ * the search indexer holds a just-written file, so a couple of retries
+ * per file - a build that fails because a scanner blinked is the worst
+ * kind of flake.
+ */
+async function clearPrerendered(dir: string): Promise<void> {
+  for (const e of await fs.promises.readdir(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      await clearPrerendered(p);
+      continue;
+    }
+    if (!/\.(?:html|json)(?:\.br)?$/.test(e.name)) continue;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await fs.promises.rm(p, { force: true });
+        break;
+      } catch (err) {
+        if (attempt >= 2 || !/EPERM|EBUSY|EACCES/.test(String(err))) throw err;
+        await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+      }
+    }
+  }
+}
+
+/**
  * Prerender every static route to dist/<route>/index.html at build time.
  * Those files are served straight from disk: zero server work, instant TTFB.
  * Dynamic routes with an exported `params` map (e.g. blog posts) are
@@ -199,16 +244,17 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
     // on disk carries no bundle and no state script, so a visitor who lands
     // on it runs zero JavaScript.
     await fs.promises.writeFile(path.join(routeDir, 'index.html'), getHtmlShell(page.html, page.state, page.head, page.csr !== false));
-    console.log(`prerendered ${routePath} -> ${path.relative(ROOT, path.join(routeDir, 'index.html'))}`);
+    console.log(`prerendered ${routePath} -> ${path.relative(process.cwd(), path.join(routeDir, 'index.html'))}`);
   };
 
   for (const info of routes) {
-    // routes that read the request context are dynamic by construction:
-    // the bag is per-request, so a baked file would freeze one request's
-    // answer. They keep rendering on demand (and the servers know them from
-    // the server bundle's dynamicRoutes).
+    // routes that read the request context (getContext()) or a shared store
+    // ($store()) are dynamic by construction: the bag is per-request and the
+    // store is per-process, so a baked file would freeze one answer. They
+    // keep rendering on demand (and the servers know them from the server
+    // bundle's dynamicRoutes).
     if ((ssrModule.dynamicRoutes as string[]).includes(info.routePath)) {
-      console.log(`dynamic route ${info.routePath}: reads the request context, rendered on demand`);
+      console.log(`dynamic route ${info.routePath}: per-request state (getContext/$store), rendered on demand`);
       continue;
     }
     if (info.paramNames.length === 0) {
@@ -254,7 +300,7 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
       const outFile = path.join(OUT_DIR, routePath.slice(1) + '.json');
       await fs.promises.mkdir(path.dirname(outFile), { recursive: true });
       await fs.promises.writeFile(outFile, body);
-      console.log(`prerendered api ${routePath} -> ${path.relative(ROOT, outFile)}`);
+      console.log(`prerendered api ${routePath} -> ${path.relative(process.cwd(), outFile)}`);
     } catch (err) {
       console.error(`api prerender skipped for ${routePath}: ${err instanceof Error ? err.message : err}`);
     }
@@ -332,8 +378,107 @@ function revalidateInBackground(routePath: string, filePath: string): void {
   })();
 }
 
+// --- Phase 1: production server posture --------------------------------------
+//
+// "Can run a real app" is a threshold, not a nice-to-have: a body any
+// anonymous client can make you buffer until you die, a request that stalls
+// holding a worker forever, a cross-site POST riding the victim's cookies,
+// and a SIGTERM that drops every in-flight request are all disqualifying.
+
+/** A request body is bounded. 1 MB holds any form and any JSON API call a
+ * site this size makes; a deployment that needs more sets it explicitly. */
+const MAX_BODY = Number(process.env.ROSEFN_MAX_BODY) || 1024 * 1024;
+
+/**
+ * Collect a request body, refusing anything past MAX_BODY with a 413. The
+ * refusal stops buffering immediately, so a client streaming 10 GB gets one
+ * small response instead of a 10 GB buffer.
+ */
+function readBody(req: any, res: any, onDone: (body: any) => void): void {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let refused = false;
+  req.on('data', (c: Buffer) => {
+    if (refused) return;
+    size += c.length;
+    if (size > MAX_BODY) {
+      refused = true;
+      res.statusCode = 413;
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.end(`Payload too large (limit ${MAX_BODY} bytes)`);
+      return;
+    }
+    chunks.push(c);
+  });
+  req.on('end', () => { if (!refused) onDone(Buffer.concat(chunks)); });
+  // an aborted upload must not throw an unhandled 'error' and take the
+  // process down with it
+  req.on('error', () => {});
+}
+
+/**
+ * CSRF: a state-changing request that did not come from this site is
+ * refused before anything else runs. Browsers stamp every cross-origin POST
+ * with an Origin header, so the check is free for real browsers; a client
+ * that sends neither Origin nor Sec-Fetch-Site (curl, a health check, the
+ * test suites) is not attackable by CSRF - the attack rides the victim's
+ * cookies in a browser - so it passes. Returns the refusal, or null.
+ */
+function crossSiteWrite(req: any): { status: number; body: string } | null {
+  const m = req.method;
+  if (m !== 'POST' && m !== 'PUT' && m !== 'PATCH' && m !== 'DELETE') return null;
+  const origin = req.headers.origin;
+  if (origin) {
+    let host: string;
+    try {
+      host = new URL(origin).host;
+    } catch {
+      return { status: 403, body: 'Cross-site request blocked (unparsable Origin header)' };
+    }
+    return host === req.headers.host ? null : { status: 403, body: 'Cross-site request blocked (Origin does not match Host)' };
+  }
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'same-site' && site !== 'none') {
+    return { status: 403, body: `Cross-site request blocked (sec-fetch-site: ${site})` };
+  }
+  return null;
+}
+
+/**
+ * One access line per request on stdout - the same greppable shape the Go
+ * binary writes (`ts method path status bytes duration`), with the worker id
+ * in front when several workers share one stdout. Logged on the response's
+ * finish, so a streamed route is recorded when it is actually done.
+ */
+function withAccessLog(handler: (req: any, res: any) => void, tag?: string): (req: any, res: any) => void {
+  return (req, res) => {
+    const started = process.hrtime.bigint();
+    let bytes = 0;
+    const write = res.write.bind(res);
+    const end = res.end.bind(res);
+    res.write = (chunk: any, ...rest: any[]) => { if (chunk) bytes += Buffer.byteLength(chunk); return write(chunk, ...rest); };
+    res.end = (chunk: any, ...rest: any[]) => { if (chunk) bytes += Buffer.byteLength(chunk); return end(chunk, ...rest); };
+    res.on('finish', () => {
+      const ms = Number(process.hrtime.bigint() - started) / 1e6;
+      const dur = ms >= 1 ? `${ms.toFixed(3)}ms` : `${(ms * 1000).toFixed(0)}us`;
+      console.log(`${new Date().toISOString().slice(0, 19)}Z${tag ? ` [${tag}]` : ''} ${req.method} ${req.url} ${res.statusCode} ${bytes}B ${dur}`);
+    });
+    handler(req, res);
+  };
+}
+
 function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
   return (req, res) => {
+    // The origin guard runs before everything else - middleware, api
+    // dispatch, the static lookup - because a cross-site write must not
+    // reach any of them.
+    const blocked = crossSiteWrite(req);
+    if (blocked) {
+      res.statusCode = blocked.status;
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.end(blocked.body);
+      return;
+    }
     // Everything below needs the server module (API dispatch, POST actions,
     // SSR), so load it once up front: the import is cached until dist/server.js
     // changes on disk, and the promise makes the static path wait for it.
@@ -362,11 +507,8 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
       // bodies are small, and Next.js/Express don't compress them either.
       const apiPath = pathnameOf(req.url);
       if (ssrModule.isApi(apiPath)) {
-        const chunks: Buffer[] = [];
-        req.on('data', (c: Buffer) => chunks.push(c));
-        req.on('end', async () => {
+        readBody(req, res, async (body) => {
           try {
-            const body = Buffer.concat(chunks);
             const headers: Record<string, string> = {};
             for (const [k, v] of Object.entries(req.headers)) {
               if (v !== undefined) headers[k] = Array.isArray(v) ? v.join(', ') : String(v);
@@ -393,11 +535,8 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
       // form). This must precede the static lookup: prerendered files exist on
       // disk and would otherwise answer the POST without running the action.
       if (req.method === 'POST') {
-        const chunks: Buffer[] = [];
-        req.on('data', (c: Buffer) => chunks.push(c));
-        req.on('end', async () => {
+        readBody(req, res, async (body) => {
           try {
-            const body = Buffer.concat(chunks);
             const form = await new Response(body, {
               headers: { 'content-type': req.headers['content-type'] || 'application/x-www-form-urlencoded' },
             }).formData();
@@ -581,10 +720,14 @@ function pathnameOf(url: string | undefined): string {
   }
 }
 
-/** The version from package.json - one source of truth, no constant to drift. */
+/**
+ * The version from package.json - one source of truth, no constant to drift.
+ * Resolved from THIS module (not the cwd): the banner names the framework's
+ * version even when it builds somebody else's project.
+ */
 function version(): string {
   try {
-    return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf-8')).version ?? '0.0.0';
+    return JSON.parse(fs.readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf-8')).version ?? '0.0.0';
   } catch {
     return '0.0.0';
   }
@@ -601,7 +744,7 @@ async function dev(): Promise<void> {
   }
 
   let timeout: any;
-  fs.watch(EXAMPLE_DIR, { recursive: true }, () => {
+  fs.watch(SRC_DIR, { recursive: true }, () => {
     clearTimeout(timeout);
     timeout = setTimeout(async () => {
       try {
@@ -634,8 +777,89 @@ async function preview(): Promise<void> {
   });
 }
 
+/**
+ * Phase 1: `rosefn serve` runs what `build` produced - no rebuild, no
+ * watcher, production semantics (a preview that re-rendered on the fly
+ * could serve a half-written file). Multi-core through the stdlib cluster:
+ * the primary supervises and serves no traffic, the workers serve; every
+ * request is logged; SIGTERM drains in-flight work and exits.
+ *
+ * ponytail boundaries, stated plainly:
+ *  - each worker is its own process with its own dist/server.js module.
+ *    Module-scope state is therefore per-worker, which is what $store()
+ *    (Phase 2) fixes: writes broadcast through the primary, reads stay
+ *    local-synchronous. ISR revalidation may run in more than one worker
+ *    for one route: the guard is per-worker and the cost is one duplicate
+ *    render.
+ *  - the signal-driven drain is POSIX behavior. On Windows a kill() is
+ *    abrupt by the platform's design, so the worker instead exits on the
+ *    primary's death (the disconnect handler below) - a killed primary must
+ *    never leave orphans holding the port.
+ */
+async function serve(): Promise<void> {
+  if (!fs.existsSync(path.join(OUT_DIR, 'server.js'))) {
+    console.error(`Rosefn: ${OUT_DIR} has no server.js - run rosefn build first`);
+    process.exit(1);
+  }
+  // .default: node:cluster is an `export =` module, so the dynamic import
+  // hands back the namespace with the real module on `.default`
+  const cluster = (await import('node:cluster')).default as any;
+  // Round-robin the accepts between workers. The default leaves the handout
+  // to the operating system, and on Windows that hands nearly every
+  // connection to whichever worker happens to accept first - one core does
+  // all the work on a multi-core box, exactly what the cluster exists to
+  // prevent. The primary does the balancing, so it costs the workers
+  // nothing.
+  cluster.schedulingPolicy = cluster.SCHED_RR;
+  const os = await import('node:os');
+  const workers = Math.max(1, Number(process.env.ROSEFN_WORKERS) || os.cpus().length);
+  const PORT = Number(process.env.PORT) || 3000;
+  if (cluster.isPrimary) {
+    for (let i = 0; i < workers; i++) cluster.fork();
+    // Phase 2: the store relay. A worker broadcasts every $store write here;
+    // the primary forwards each patch to every OTHER worker (the writer
+    // already holds the value locally - the patch is for its siblings), so
+    // shared state survives the cluster instead of living in one worker.
+    cluster.on('message', (worker: any, msg: any) => {
+      if (!msg || msg.type !== 'rosefn:store') return;
+      for (const w of Object.values<any>(cluster.workers ?? {})) {
+        if (w && w.id !== worker.id) w.send(msg);
+      }
+    });
+    let live = workers;
+    const stop = () => {
+      for (const w of Object.values<any>(cluster.workers ?? {})) w.kill();
+      setTimeout(() => process.exit(0), 5000).unref();
+    };
+    process.on('SIGTERM', stop);
+    process.on('SIGINT', stop);
+    cluster.on('exit', () => { if (--live <= 0) process.exit(0); });
+    console.log(`🌹 Rosefn v${version()} serve: ${workers} worker${workers > 1 ? 's' : ''} on http://localhost:${PORT} (cluster, bounded bodies, graceful shutdown, access log on stdout)`);
+    return;
+  }
+  // worker
+  // the primary's death is the worker's death: no orphan holding the port
+  process.on('disconnect', () => process.exit(0));
+  const http = await import('node:http');
+  const server = http.createServer(withAccessLog(serveStatic(OUT_DIR, true), `w${process.pid}`));
+  // A client that stalls mid-request is dropped instead of holding a worker;
+  // idle keep-alive sockets close so a drained worker can actually exit.
+  server.requestTimeout = 30_000;
+  server.headersTimeout = 65_000; // must exceed requestTimeout
+  server.keepAliveTimeout = 5_000;
+  server.listen(PORT, () => console.log(`🌹 Rosefn worker ${process.pid} listening on http://localhost:${PORT}`));
+  const stop = () => {
+    server.close(() => process.exit(0)); // finish what is in flight
+    server.closeIdleConnections?.();      // drop the idle keep-alive sockets
+    setTimeout(() => process.exit(0), 5000).unref(); // a stuck one must not hold the worker
+  };
+  process.on('SIGTERM', stop);
+  process.on('SIGINT', stop);
+}
+
 const cmd = process.argv[2];
 if (cmd === 'dev') dev();
 else if (cmd === 'build') build();
 else if (cmd === 'preview') preview();
-else console.log('Usage: rosefn dev|build|preview');
+else if (cmd === 'serve') serve();
+else console.log('Usage: rosefn dev|build|preview|serve [dir]   (dir defaults to the current directory; dist/ is written there)');

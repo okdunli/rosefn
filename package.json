@@ -4,14 +4,15 @@
   "description": "The next-century web framework: zero-hydration, compile-time reactivity, single binary deploy",
   "type": "module",
   "scripts": {
-    "dev": "tsx src/cli/index.ts dev",
-    "build": "tsx src/cli/index.ts build",
-    "preview": "tsx src/cli/index.ts preview",
+    "dev": "tsx src/cli/index.ts dev example",
+    "build": "tsx src/cli/index.ts build example",
+    "preview": "tsx src/cli/index.ts preview example",
     "benchmark": "tsx benchmark.ts",
-    "test": "tsx src/cli/index.ts build && tsx test-client.ts",
+    "test": "tsx src/cli/index.ts build example && tsx test-client.ts",
+    "test:cli": "node test-cli.mjs",
     "test:e2e": "tsx test-e2e.ts",
     "test:edge": "tsx test-edge.ts",
-    "test:go": "tsx src/cli/index.ts build && node test-go.mjs",
+    "test:go": "tsx src/cli/index.ts build example && node test-go.mjs",
     "build:go": "go build -o rosefn-server ."
   },
   "dependencies": {
