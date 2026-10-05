@@ -1,0 +1,11 @@
+{
+  "about.title": "حول، مترجم",
+  "about.heading": "هذه الصفحة تتحدث لغتك",
+  "about.body": "كل جملة في هذه الصفحة جاءت من src/locales/ar.json. اختار المسار القاموس من مقطع اللغة في الرابط، ومحوّل اللغة أدناه يعيد الرسم من الحزمة المضمّنة — صفر طلبات، بلا تنقّل.",
+  "about.greeting": "مرحبًا، {name} — هذه الجملة تُرجمت بمتغيّر.",
+  "about.current": "اللغة الحالية",
+  "about.switch": "تغيير اللغة",
+  "about.plural": "{count, plural, =0 {لا توقيعات بعد} one {توقيع واحد} two {توقيعان} few {# توقيعات} many {# توقيعًا} other {# توقيع}} في سجل الزوار",
+  "about.ordinal": "أنت الزائر رقم {n, selectordinal, other {#}} اليوم",
+  "about.role": "مسجّل الدخول بصفة {who, select, rose {الوردة} thorn {الشوكة} other {بستاني}}"
+}

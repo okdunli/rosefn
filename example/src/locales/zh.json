@@ -4,5 +4,8 @@
   "about.body": "这一页上的每一句都来自 src/locales/zh.json。路由从 URL 的语言段选中了这本字典,下面的语言切换器由内联包重绘 - 零请求,不导航。",
   "about.greeting": "你好,{name} - 这句话带变量翻译。",
   "about.current": "当前语言",
-  "about.switch": "切换语言"
+  "about.switch": "切换语言",
+  "about.plural": "留言簿上有{count, plural, other{# 条签名}}",
+  "about.ordinal": "你是今天的第 {n, selectordinal, other{#}} 位访客",
+  "about.role": "以{who, select, rose {玫瑰} thorn {荆棘} other {园丁}}身份登录"
 }

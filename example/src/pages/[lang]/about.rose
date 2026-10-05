@@ -8,12 +8,29 @@
   // /en/about and /zh/about as plain static files; Node and edge render any
   // LISTED locale live, and a segment naming no dictionary answers 404 (the
   // URL is the contract - no duplicate content under a bogus language).
-  export const params = { lang: ['en', 'zh'] };
+  // ar is a runtime pack (i18n.preload in rosefn.config.js): the server
+  // bakes and renders it like any locale, and the CLIENT fetches its
+  // dictionary the first time it paints /ar/about - one request, once.
+  export const params = { lang: ['en', 'zh', 'ar'] };
 
   // {name} interpolation (the template parser has no nested braces, so the
   // call lives in a function: the marker closure runs it per repaint)
   function greeting() {
     return $t('about.greeting', { name: 'Rosefn' });
+  }
+
+ // ICU MessageFormat: a plural with an exact =0 arm, an ordinal,
+  // and a select - each rendered for the locale's own plural categories
+  // (Intl.PluralRules), so Arabic's zero/one/two/few/many/other arms all
+  // resolve and # formats with the locale's digits.
+  function plural(n) {
+    return $t('about.plural', { count: n });
+  }
+  function ordinal() {
+    return $t('about.ordinal', { n: 3 });
+  }
+  function role() {
+    return $t('about.role', { who: 'rose' });
   }
 </script>
 
@@ -31,6 +48,13 @@
     {$t('about.switch')}:
     <a href="/en/about">English</a>
     <a href="/zh/about">中文</a>
+    <a href="/ar/about">العربية</a>
   </p>
+  <h2>ICU MessageFormat</h2>
+  <p>{plural(0)}</p>
+  <p>{plural(1)}</p>
+  <p>{plural(7)}</p>
+  <p>{ordinal()}</p>
+  <p>{role()}</p>
   <p><a href="/about">Back to the plain About page</a></p>
 </div>

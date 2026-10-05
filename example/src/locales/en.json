@@ -4,5 +4,8 @@
   "about.body": "Every string on this page came from src/locales/en.json. The route picked the dictionary from the URL's language segment, and the switcher below repaints from the inlined bundle - zero requests, no navigation.",
   "about.greeting": "Hello, {name} - this sentence was translated with a variable.",
   "about.current": "Current language",
-  "about.switch": "Switch language"
+  "about.switch": "Switch language",
+  "about.plural": "{count, plural, =0 {No signatures yet} one {# signature} other {# signatures}} on the guestbook",
+  "about.ordinal": "You are visitor number {n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}} today",
+  "about.role": "Signed in as {who, select, rose {the rose} thorn {the thorn} other {a gardener}}"
 }

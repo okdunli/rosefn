@@ -12,3 +12,14 @@ export default [
     },
   },
 ];
+
+// i18n (+ ): which dictionaries bake into the CLIENT
+// bundle. The default is "all of them"; this demo leaves ar out on purpose.
+// en and zh are inline, so switching between them is a zero-request
+// navigation - the one-request bet taken to its conclusion. ar is a runtime
+// pack: the build writes dist/locales/ar.json, the client fetches it the
+// first time it renders /ar/about (one request per session, then it renders
+// from memory), and the server - which carries every locale - renders
+// /ar/about on demand either way. Both halves stay correct; only the size
+// of the bundle moves.
+export const i18n = { preload: ['en', 'zh'] };
