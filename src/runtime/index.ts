@@ -176,51 +176,57 @@ export function tpl(html: string): DocumentFragment {
 // first client-side navigation.
 const HEAD_ATTR = 'data-rosefn-head';
 
+// The delegated-event handler registry: every compiled module registers its
+// handlers here (Object.assign(handlers, { ... })), and one listener per event
+// type on the app container dispatches by name - including for freshly cloned
+// nodes, which is why the registry is a shared global rather than per-module
+// state. It lives in the runtime, not in each generated module: an initializer
+// with a side effect (the `??=` assignment) defeats esbuild's tree-shaking, so
+// a per-module copy would ship in every document even when nothing dispatches.
+export const handlers: Record<string, (e: Event) => void> =
+  (globalThis as { __rosefn_handlers?: Record<string, (e: Event) => void> }).__rosefn_handlers ??= {};
+
 /**
- * Apply one rendered <head> block to the document: <title> replaces the title,
- * <meta>/<link>/<base> are matched by name/property/rel/charset and updated
- * in place (or created). `provided` accumulates the keys of every block in the
- * route's head (a page renders inside its layouts, so several blocks apply per
- * navigation); keys it stops providing are dropped from the document.
+ * Apply one route's whole <head> (every block of its chain, page first) to the
+ * document: <title> replaces the title, <meta>/<link>/<base> are matched by
+ * name/property/rel/charset. First occurrence of a key wins, so a page
+ * overrides its layouts - the same rule the server's mergeHeadBlocks applies,
+ * which is why the two halves agree without talking to each other.
+ *
+ * The managed set is REBUILT from the block rather than patched element by
+ * element: a route's head is the whole truth, so anything the previous route
+ * provided and this one does not is dropped, and a key that moved tags is
+ * replaced instead of duplicated. It is also a third of the code.
  */
-export function applyHead(html: string, provided: Set<string>): void {
+export function applyHead(html: string): void {
+  const seen = new Set<string>();
   const frag = tpl(html);
-  for (const el of Array.from(frag.children)) {
-    const tag = el.tagName.toLowerCase();
-    if (tag === 'title') {
-      // Manage the title element directly: the document.title setter would
-      // update the FIRST title element in tree order - the inert placeholder
-      // wire() is about to remove from the page body.
-      let titleEl = document.head.querySelector('title');
-      if (!titleEl) {
-        titleEl = document.createElement('title');
-        document.head.appendChild(titleEl);
-      }
-      titleEl.textContent = el.textContent ?? '';
-      continue;
+  const title = frag.querySelector('title');
+  if (title) {
+    // Manage the title element directly: the document.title setter would
+    // update the FIRST title element in tree order - the inert placeholder
+    // wire() is about to remove from the page body.
+    let cur = document.head.querySelector('title');
+    if (!cur) {
+      cur = document.createElement('title');
+      document.head.appendChild(cur);
     }
-    if (tag !== 'meta' && tag !== 'link' && tag !== 'base') continue;
+    cur.textContent = title.textContent ?? '';
+  }
+  for (const el of Array.from(document.head.querySelectorAll(`[${HEAD_ATTR}]`))) el.remove();
+  for (const el of Array.from(frag.children)) {
+    if (el.tagName === 'TITLE') continue;
     const key = el.getAttribute('name')
       ?? el.getAttribute('property')
       ?? el.getAttribute('rel')
       ?? el.getAttribute('charset');
     if (!key) continue;
-    const managed = `${tag}:${key}`;
-    provided.add(managed);
-    let target = document.head.querySelector(`[${HEAD_ATTR}="${managed}"]`);
-    if (!target) {
-      target = document.createElement(tag);
-      target.setAttribute(HEAD_ATTR, managed);
-      document.head.appendChild(target);
-    }
-    for (const a of Array.from(el.attributes)) target.setAttribute(a.name, a.value);
-    target.textContent = el.textContent;
+    const managed = `${el.tagName.toLowerCase()}:${key}`;
+    if (seen.has(managed)) continue; // first block wins: page over layout
+    seen.add(managed);
+    el.setAttribute(HEAD_ATTR, managed);
+    document.head.appendChild(el);
   }
-  // Drop managed meta/link/base the new head no longer provides. The title
-  // persists across routes that don't declare one (standard SPA behavior).
-  document.head.querySelectorAll(`[${HEAD_ATTR}]`).forEach((el) => {
-    if (!provided.has(el.getAttribute(HEAD_ATTR)!)) el.remove();
-  });
 }
 
 /** Drop every rosefn-managed head element (routes without <head> blocks). */
@@ -275,13 +281,14 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
     if (m) ends.set(+m[2], c);
   }
 
-  // Head blocks are collected during the walk and applied afterwards in
-  // REVERSE document order: a page renders inside its layout's <slot/>, so its
-  // block comes first in the document - applying last makes the page win.
-  // `provided` is shared by every block of this route so a layout-only key
-  // (e.g. a generator meta) survives alongside the page's own keys.
+  // Head blocks are collected during the walk and applied afterwards as ONE
+  // effect over the whole route's head: the blocks render in document order (a
+  // page renders inside its layout's <slot/>, so its block comes first) into a
+  // single string, and applyHead resolves the duplicates - page over layout,
+  // the same first-wins rule the server's mergeHeadBlocks uses. One effect
+  // instead of one per block: a head is a handful of elements, and rebuilding
+  // it whole is smaller than patching it key by key.
   const headBlocks: Array<{ idx: number; start: Comment; end: Comment; nodes: ChildNode[] }> = [];
-  const headProvided = new Set<string>();
 
   for (const c of comments) {
     if (nested.has(c) || wired.has(c) || !c.parentNode) continue;
@@ -397,18 +404,23 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
     }
   }
 
-  // Apply head blocks in reverse document order (page over layout), then drop
-  // the inert placeholder nodes from the page body. A top-level wire with no
-  // head blocks (route without <head>) clears the previous route's managed
-  // head; nested wires (if/each blocks) never contain head blocks.
-  for (let i = headBlocks.length - 1; i >= 0; i--) {
-    const { idx, start, end, nodes } = headBlocks[i];
-    weff(() => applyHead(String((closes[idx] as (s?: unknown) => unknown)(scope)), headProvided));
-    nodes.forEach((nd) => nd.remove());
-    start.remove();
-    end.remove();
-  }
-  if (headBlocks.length === 0 && root.nodeType !== 11) clearHead();
+  // Apply head blocks, then drop the inert placeholder nodes from the page
+  // body. A top-level wire with no head blocks (route without <head>) clears
+  // the previous route's managed head; nested wires (if/each blocks) never
+  // contain head blocks.
+  if (headBlocks.length > 0) {
+    const blocks = headBlocks;
+    weff(() => {
+      let html = '';
+      for (const b of blocks) html += String((closes[b.idx] as (s?: unknown) => unknown)(scope));
+      applyHead(html);
+    });
+    for (const b of blocks) {
+      b.nodes.forEach((nd) => nd.remove());
+      b.start.remove();
+      b.end.remove();
+    }
+  } else if (root.nodeType !== 11) clearHead();
 
   // Attributes: data-b="K:attrName"
   const els = (holder as Element).querySelectorAll('[data-b]');
@@ -613,14 +625,54 @@ export function adoptCleanups(fns: Iterable<Cleanup>): void {
 // bundle entries call setLocales() once at boot - server, edge and client
 // alike - so $t resolves on both sides with no per-request plumbing, and a
 // client-side switch between locales renders from the bundle: zero requests.
-// Trade-off: flat keys + {name} interpolation only - no plurals, no ICU.
 // A missing key renders the key itself: loud in dev, greppable in prod.
+//
+// Lifts the value format from "flat string with {name} holes" to the
+// ICU MessageFormat subset real apps need - cardinal plurals, ordinals and
+// selects - and lets an app leave a locale OUT of the bundle. The flat form
+// stays the default and stays byte-identical: a message with no ICU syntax
+// parses to one literal node and interpolates exactly as before, and every
+// dictionary still ships inline unless rosefn.config.js says otherwise
+// (i18n.preload). The one-request bet is the default; a thirty-language app
+// pays one fetch per language per session instead of thirty bundles.
 let LOCALES: Record<string, Record<string, string>> = {};
 let DEFAULT_LOCALE = 'en';
+// The locales this build did NOT bake in: they live at /locales/<lang>.json
+// and ensureLocale() fetches one on first use. Empty in the default build -
+// then every locale is inline and a switch costs nothing at all.
+let LOCALE_PACKS: string[] = [];
 
 export function setLocales(dicts: Record<string, Record<string, string>>, def: string): void {
   LOCALES = dicts;
   DEFAULT_LOCALE = def;
+}
+
+/** The locales the build left out of this bundle (generated code calls this). */
+export function setLocalePacks(langs: string[]): void {
+  LOCALE_PACKS = langs;
+}
+
+/** Merge a dictionary that arrived at runtime - a fetched pack, or an app's own import(). */
+export function loadLocale(lang: string, dict: Record<string, string>): void {
+  LOCALES[lang] = { ...LOCALES[lang], ...dict };
+}
+
+/**
+ * Resolve once `lang`'s dictionary is present: immediately for an inline
+ * locale, after one fetch for a runtime pack, never for an unknown one (the
+ * URL is the contract - the server 404s it). A failed fetch leaves the locale
+ * unresolved and $t falls back to the default language; the next navigation
+ * retries. This is the seam a bundled-per-locale app can bypass entirely by
+ * calling loadLocale() itself.
+ */
+export async function ensureLocale(lang: string): Promise<void> {
+  if (LOCALES[lang] || !LOCALE_PACKS.includes(lang)) return;
+  try {
+    const res = await fetch(`/locales/${encodeURIComponent(lang)}.json`);
+    if (res.ok) loadLocale(lang, await res.json());
+  } catch {
+    // offline, or the pack is missing: the inline dictionaries still render
+  }
 }
 
 export function localeList(): string[] {
@@ -628,7 +680,9 @@ export function localeList(): string[] {
 }
 
 export function isLocale(lang: string): boolean {
-  return Object.prototype.hasOwnProperty.call(LOCALES, lang);
+  // A pack counts as a known locale BEFORE it loads: the client router must
+  // not 404 /ar/about while /locales/ar.json is still in flight.
+  return Object.hasOwn(LOCALES, lang) || LOCALE_PACKS.includes(lang);
 }
 
 /**
@@ -649,17 +703,82 @@ export function bestLocale(header: string | null | undefined): string | null {
 }
 
 /**
+ * Reading direction of a locale. The set of right-to-left scripts is closed
+ * (Arabic, Hebrew and their relatives), so a base-tag test covers every
+ * language that uses them - no per-app config, and the document's <html dir>
+ * is server-rendered correct for no-JS visitors. A regex LITERAL, not a
+ * string .split(): esbuild drops side-effect-free initializers, so an app
+ * whose scripts never call localeDir ships neither it nor the table.
+ */
+const RTL_RE = /^(ar|fa|he|ur|ps|sd|ug|yi|ckb|dv|ks|prs|haz|mzn|nqo)/;
+/** 'rtl' for a right-to-left locale, '' otherwise - '' is the html default. */
+export function localeDir(lang: string): string {
+  return RTL_RE.test(lang) ? 'rtl' : '';
+}
+
+// --- ICU MessageFormat, the subset real apps use ---------------------
+//
+//   {count, plural, =0 {No signatures yet} one {# item} other {# items}}
+//   {n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}
+//   {who, select, rose {her} thorn {its} other {their}}
+//
+// `#` is the count, `=N` an exact arm, and the plural CATEGORY comes from the
+// platform (Intl.PluralRules) rather than a re-implementation of CLDR - so
+// Arabic's zero/one/two/few/many/other arms all resolve, for free. A branch
+// body may hold one level of {braces}, so a {name} hole inside a branch
+// works: the interpolation pass at the bottom fills it after the expansion.
+// Anything the grammar does not match (nested ICU, a missing `other` arm)
+// renders verbatim - the same loud-degradation rule as a missing key.
+//
+// Trade-off: two regexes and a replace - no parse tree, no memoization. A
+// message is a few dozen bytes and the scan is linear; the cached tree cost
+// more code than it ever saved in time. The plural rules object is built per
+// expansion for the same reason: Intl caches its own internals, and a cache
+// here would be more code than the constructions it saves.
+const ICU_RE = /\{([\w$]+),\s*(plural|selectordinal|select),\s*((?:\s*[=\w]+\s*\{(?:[^{}]|\{[^{}]*\})*\})*)\}/g;
+const BRANCH_RE = /([=\w]+)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g;
+
+/** The CLDR category of `n` in `locale`, or null where Intl has no answer. */
+function pluralCategory(locale: string, ordinal: boolean, n: number): string | null {
+  try {
+    return new Intl.PluralRules(locale, ordinal ? { type: 'ordinal' } : undefined).select(n);
+  } catch {
+    return null; // no Intl.PluralRules, or an invalid tag: the English-ish fallback
+  }
+}
+
+/** Expand every ICU block of a message; leave the rest (and {name} holes) alone. */
+function expandIcu(msg: string, vars: Record<string, string | number> | undefined, locale: string): string {
+  return msg.replace(ICU_RE, (whole, arg: string, kind: string, branchText: string) => {
+    const branches: Record<string, string> = {};
+    for (const m of branchText.matchAll(BRANCH_RE)) branches[m[1]] = m[2];
+    if (!branches.other) return whole; // no fallback arm: not valid ICU, render it verbatim
+    const v = vars?.[arg];
+    if (kind === 'select') return branches[typeof v === 'string' && branches[v] ? v : 'other'];
+    const num = typeof v === 'number' ? v : Number(v);
+    // An =N arm wins over the category; a value with no number in it has no
+    // category at all, so it takes the other arm - and # prints the value as
+    // given, which is the loudest thing a typo'd count can do.
+    const cat = isFinite(num)
+      ? (branches['=' + num] ? '=' + num : pluralCategory(locale, kind === 'selectordinal', num) ?? 'other')
+      : 'other';
+    return (branches[cat] ?? branches.other).replace(/#/g, String(v));
+  });
+}
+
+/**
  * Translate a key for the current language. The [lang] route param arrives
  * as state before the render (the same seeding as any dynamic param), and
  * reading it through the signal getter makes $t reactive: switching locale
  * re-runs the marker, so only the translated nodes repaint.
  */
-export function $t(key: string, vars?: Record<string, string>): string {
+export function $t(key: string, vars?: Record<string, string | number>): string {
   const [lang] = state('lang', DEFAULT_LOCALE);
   const dict = LOCALES[lang()] ?? LOCALES[DEFAULT_LOCALE] ?? {};
-  let s = Object.prototype.hasOwnProperty.call(dict, key) ? dict[key] : key;
-  if (vars) for (const k in vars) s = s.split(`{${k}}`).join(vars[k]);
-  return s;
+  const msg = dict[key];
+  let out = expandIcu(typeof msg === 'string' ? msg : key, vars, lang());
+  if (vars) for (const k in vars) out = out.split(`{${k}}`).join(String(vars[k]));
+  return out;
 }
 
 // --- the shared server store ----------------------------------------

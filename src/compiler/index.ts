@@ -315,6 +315,29 @@ export interface Plugin {
 }
 
 /**
+ * The i18n half of rosefn.config.js - a named export beside the
+ * plugins:
+ *
+ *   export const i18n = { preload: ['en', 'zh'] };
+ *
+ * `preload` lists the locales baked into the CLIENT bundle. The default is
+ * every locale: a language switch then costs zero requests, which is the
+ * one-request bet taken to its conclusion. An app with many languages lists
+ * the ones it wants inline; the rest are written to dist/locales/<lang>.json
+ * and fetched on first use (ensureLocale in the runtime). The SERVER bundle
+ * always carries every locale - it renders any language on demand, and its
+ * size is nobody's hot path.
+ */
+export interface I18nConfig {
+  preload?: string[];
+}
+
+export interface RosefnConfig {
+  plugins: Plugin[];
+  i18n: I18nConfig;
+}
+
+/**
  * Plugins live in `<root>/rosefn.config.js` as the default export: an array
  * of `{ name, transform, onRequest, onResponse, onServe, onShutdown }`.
  * `transform` runs over each component's raw source (template + script +
@@ -324,14 +347,23 @@ export interface Plugin {
  * anything, including the script block; the request/serve hooks cover auth,
  * logging and lifecycle, which no source rewrite can express. The import is
  * cache-busted per build so a config edit takes effect on the dev server's
- * next rebuild, and a missing file is simply "no plugins" (existence is
+ * next rebuild, and a missing file is simply "no config" (existence is
  * checked first, so a config with a syntax error still fails loudly).
+ * One import, one evaluation: the i18n options ride in the same module.
  */
-export async function loadPlugins(root: string): Promise<Plugin[]> {
+export async function loadConfig(root: string): Promise<RosefnConfig> {
   const file = path.join(root, 'rosefn.config.js');
-  if (!fs.existsSync(file)) return [];
+  if (!fs.existsSync(file)) return { plugins: [], i18n: {} };
   const mod = await import(pathToFileURL(file).href + `?t=${Date.now()}`);
-  return (mod.default as Plugin[] | undefined) ?? [];
+  return {
+    plugins: (mod.default as Plugin[] | undefined) ?? [],
+    i18n: (mod.i18n as I18nConfig | undefined) ?? {},
+  };
+}
+
+/** The plugins alone (the serve command's lifecycle hooks). */
+export async function loadPlugins(root: string): Promise<Plugin[]> {
+  return (await loadConfig(root)).plugins;
 }
 
 /**
@@ -840,6 +872,21 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
 }
 
 /**
+ * Collapse a declaration block's whitespace outside strings. Every byte of
+ * component CSS ships inside every document, so the source's formatting is a
+ * tax paid on every route; collapsing it is free - declarations are not
+ * whitespace-sensitive, and quoted strings (content: "a  b") are left
+ * untouched by the alternation.
+ */
+function minifyDecls(block: string): string {
+  return block
+    .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"']+/g, (m) =>
+      m[0] === '"' || m[0] === "'" ? m : m.replace(/\s+/g, ' ').replace(/\s*([:;{},])\s*/g, '$1').trim()
+    )
+    .trim();
+}
+
+/**
  * Scope a component's CSS to its own subtree: every selector is prefixed
  * with the component's scope attribute, recursing into @media/@supports.
  * Trade-off: no full CSS parser - comma lists only, and @keyframes blocks
@@ -867,10 +914,10 @@ function scopeCss(css: string, key: string): string {
       if (sel.startsWith('@')) {
         // at-rule: keep the prelude, scope the inner rules (keyframes pass
         // through: their 0%/from/to "selectors" are not selectors)
-        out += `${sel} { ${/^@(?:-[\w]+-)?keyframes/.test(sel) ? block : scopeCss(block, key)} }`;
+        out += `${sel}{${/^@(?:-[\w]+-)?keyframes/.test(sel) ? minifyDecls(block) : scopeCss(block, key)}}`;
       } else if (sel) {
-        const scoped = sel.split(',').map((s) => `${attr} ${s.trim()}`).join(', ');
-        out += `${scoped} { ${block} }`;
+        const scoped = sel.split(',').map((s) => `${attr} ${s.trim()}`).join(',');
+        out += `${scoped}{${minifyDecls(block)}}`;
       }
       prelude = '';
       i = j;
@@ -1287,7 +1334,13 @@ function compileTemplate(
       const { def, named } = splitSlots(childrenSrc);
       // Default children render at CALL time with the enclosing scope (inside
       // an {#each} that scope is the item), exactly like a layout's children.
-      result += `const __ch${id} = (__s, __c) => { let h = ''; ${compileTemplate(def, 'h', '__c', scope, depth + 1, markers, comps)} return h; };\n`;
+      // An EMPTY default slot passes '' straight through: emitting a closure
+      // that returns '' and calling it costs every reader of the generated
+      // module ~60 bytes to say nothing (`<Card/>` is the common case).
+      const hasChildren = def.trim().length > 0;
+      if (hasChildren) {
+        result += `const __ch${id} = (__s, __c) => { let h = ''; ${compileTemplate(def, 'h', '__c', scope, depth + 1, markers, comps)} return h; };\n`;
+      }
       // Named slots are functions of the object the child passes in AND of a
       // marker array of their own: their content is a block scoped to that
       // object (see SLOT_HELPER), so its markers must not land in the
@@ -1318,7 +1371,8 @@ function compileTemplate(
       // The imported binding IS the child's render function (a default
       // `import Card from '...rose'` compiles to `import { render as Card }`),
       // so the call is direct - not a property access on a namespace.
-      result += `${acc} += ${tag.name}(${closes}, __ch${id}(${scope ?? 'undefined'}, ${closes}), { ${propsObj} }, { ${slotFns.join(', ')} });\n`;
+      const childrenArg = hasChildren ? `__ch${id}(${scope ?? 'undefined'}, ${closes})` : `''`;
+      result += `${acc} += ${tag.name}(${closes}, ${childrenArg}, { ${propsObj} }, { ${slotFns.join(', ')} });\n`;
       remaining = rest;
     } else {
       const [, expr] = earliest.match;
@@ -1670,7 +1724,7 @@ function compileSlot(acc: string): string {
 // can never drift between them. esbuild tree-shakes what a module never
 // references, so a page that uses none of the action helpers ships none
 // of them.
-const RUNTIME_IMPORTS = `import { state, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $t, bestLocale, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, ifMark, eachMark, headMark } from './runtime.js';`;
+const RUNTIME_IMPORTS = `import { state, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, ifMark, eachMark, headMark } from './runtime.js';`;
 
 /**
  * `export let title = 'x'` -> a per-invocation const read from the
@@ -1765,10 +1819,11 @@ function generateClient(
   imports = '',
   isComponent = false
 ): string {
-  // Handlers live on a shared global so one delegated listener per event
-  // type can dispatch for any component, including freshly cloned nodes.
+  // Handlers live on a shared global (the runtime's `handlers` registry) so
+  // one delegated listener per event type can dispatch for any component,
+  // including freshly cloned nodes.
   const handlerRegistry = eventBindings.length > 0
-    ? `Object.assign(__handlers, { ${eventBindings.map((b) => b.fn).join(', ')} });`
+    ? `Object.assign(handlers, { ${eventBindings.map((b) => b.fn).join(', ')} });`
     : '';
   const headCode = headFn
     ? `
@@ -1782,8 +1837,6 @@ ${RUNTIME_IMPORTS}
 ${imports}
 
 ${exports}
-
-const __handlers = globalThis.__rosefn_handlers ?? (globalThis.__rosefn_handlers = {});
 
 ${namedSlots ? SLOT_HELPER : ''}
 
@@ -1866,9 +1919,11 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
     throw new Error(`no .rose pages found under ${path.join(root, 'src', 'pages')} - run rosefn from a project root, or pass one: rosefn build <dir>`);
   }
   const infos = files.map((f) => ({ ...getRouteInfo(f, root) }));
- // Plugins: rosefn.config.js at the project root, loaded
-  // fresh per build so the dev server's hot rebuild picks up config edits.
-  const plugins = await loadPlugins(root);
+ // rosefn.config.js: the plugins and the i18n options
+ // , loaded fresh per build so the dev server's hot rebuild picks up
+  // config edits.
+  const config = await loadConfig(root);
+  const plugins = config.plugins;
   // scope key: the component's path under pages/ (index, _layout, blog/[id])
   // - stable across builds, unique per file, independent of scan order.
   // A component (src/components/**) is keyed under src/ instead, so its
@@ -1964,6 +2019,27 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
   }
   const defaultLocale = locales.en ? 'en' : Object.keys(locales).sort()[0] ?? 'en';
   const localesJson = JSON.stringify(locales).replace(/</g, '\\u003c');
+
+ // Which dictionaries ride in the CLIENT bundle. Default: all of
+  // them, so a locale switch stays a zero-request navigation. An app with
+  // more languages than it wants to ship inline lists the ones it wants in
+  // i18n.preload; the rest are written beside the documents as
+  // dist/locales/<lang>.json and the client fetches one on first use
+  // (ensureLocale). The SERVER bundle always carries every locale - it
+  // renders any language on demand.
+  const preload: string[] = config.i18n.preload ?? Object.keys(locales);
+  const packed = Object.keys(locales).filter((l) => !preload.includes(l));
+  for (const l of preload) {
+    if (!locales[l]) console.warn(`Rosefn: i18n.preload lists '${l}' but there is no src/locales/${l}.json - ignored`);
+  }
+  await fs.promises.rm(path.join(outDir, 'locales'), { recursive: true, force: true });
+  if (packed.length > 0) {
+    const packDir = path.join(outDir, 'locales');
+    await fs.promises.mkdir(packDir, { recursive: true });
+    for (const l of packed) await fs.promises.writeFile(path.join(packDir, `${l}.json`), JSON.stringify(locales[l]));
+  }
+  const clientLocales = Object.fromEntries(Object.keys(locales).filter((l) => !packed.includes(l)).map((l) => [l, locales[l]]));
+  const clientLocalesJson = JSON.stringify(clientLocales).replace(/</g, '\\u003c');
 
   // Intermediates (component modules, shared runtime, bundle entries) live in
   // a build dir that is removed before returning: both bundles are fully
@@ -2167,7 +2243,7 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
 
   const serverEntry = `
 ${serverImports}
-import { setState, clearRequestState, serializeState, resetRequestContext, isLocale, setLocales, localeList, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta } from './runtime.js';
+import { setState, clearRequestState, serializeState, resetRequestContext, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta } from './runtime.js';
 ${runtimePlugins.length > 0
     ? `import { hooks as __pluginHooks, hasRequestHooks as __hasRequestHooks, hasResponseHooks as __hasResponseHooks } from './plugins.js';`
 : `// no plugin declares a runtime hook, so there is no plugins
@@ -2367,11 +2443,31 @@ const notFound = ${notFoundRender};
 // whose render throws degrades to this instead of failing the response.
 const errorPage = ${errorRender};
 
+// The <html> attributes of the document for a pathname - the locale
+// of its [lang] segment (the default when there is none, or when the segment
+// names no dictionary: that request 404s in the default language) and the
+// reading direction that locale implies. The buffered render returns the same
+// pair; the streaming path needs it BEFORE the shell flushes, which is why
+// the servers ask for it by pathname.
+export function docAttrs(pathname) {
+  for (const route of routes) {
+    if (!matchRoute(route.pattern, pathname)) continue;
+    const parts = route.pattern.split('/');
+    const langIdx = parts.indexOf(':lang');
+    if (langIdx >= 0) {
+      const lang = pathname.split('/')[langIdx];
+      if (isLocale(lang)) return { lang, dir: localeDir(lang) };
+    }
+    break; // matched, but not a localized route (or a bogus locale): the default
+  }
+  return { lang: defaultLocale, dir: localeDir(defaultLocale) };
+}
+
 // Paint a fallback page (404/500) and serialize its state.
 async function renderFallback(pathname, render) {
   const { html, head } = extractHead(await render([], ''));
   const state = JSON.stringify({ __route: pathname, ...JSON.parse(serializeState()) });
-  return { html, state, head };
+  return { html, state, head, ...docAttrs(pathname) };
 }
 
 export function matchRoute(pattern, pathname) {
@@ -2430,8 +2526,11 @@ export async function renderPage(pathname, form) {
       const langIdx = patternParts.indexOf(':lang');
       if (langIdx >= 0 && !isLocale(pathParts[langIdx])) {
         if (notFound) return { ...(await renderFallback(pathname, notFound)), status: 404 };
-        return { html: '<h1>404</h1><p>Page not found</p>', state: '{}', head: [], status: 404 };
+        return { html: '<h1>404</h1><p>Page not found</p>', state: '{}', head: [], status: 404, ...docAttrs(pathname) };
       }
+ // The document's <html lang>/<dir> follow this route's locale
+      // (the default's when the route is not localized)
+      const docLang = langIdx >= 0 ? pathParts[langIdx] : defaultLocale;
  // The action dispatch. The page's guard (exported
       // beforeAction) runs FIRST and vetoes with an ActionError - the
       // action-level permission check. Then the selected action runs and its
@@ -2476,7 +2575,7 @@ export async function renderPage(pathname, form) {
       } catch (err) {
         console.error('Rosefn: render failed for', pathname, err instanceof Error ? err.message : err);
         if (errorPage) return { ...(await renderFallback(pathname, errorPage)), status: 500 };
-        return { html: '<h1>500</h1><p>Something went wrong rendering this page.</p>', state: '{}', head: [], status: 500 };
+        return { html: '<h1>500</h1><p>Something went wrong rendering this page.</p>', state: '{}', head: [], status: 500, ...docAttrs(pathname) };
       }
       // __route tells the bootstrap which route this document was rendered for.
       // A static-file server may serve another route's document (SPA fallback);
@@ -2491,13 +2590,15 @@ export async function renderPage(pathname, form) {
       // rendered fine, so the body is the page with the failure visible, and
       // the status says what happened (a 403 from the guard, a 422 from a
       // validation action). 200 otherwise.
-      return { html: rendered.html, state, head: rendered.head, status: actionStatus || 200, csr: route.csr !== false };
+ // Lang/dir are the document's <html> attributes - the locale
+      // this route rendered in, and its reading direction.
+      return { html: rendered.html, state, head: rendered.head, status: actionStatus || 200, csr: route.csr !== false, lang: docLang, dir: localeDir(docLang) };
     }
   }
   if (notFound) {
     return { ...(await renderFallback(pathname, notFound)), status: 404 };
   }
-  return { html: '<h1>404</h1><p>Page not found</p>', state: '{}', head: [], status: 404 };
+  return { html: '<h1>404</h1><p>Page not found</p>', state: '{}', head: [], status: 404, ...docAttrs(pathname) };
 }
 
 // Would renderPageStream handle this path? (matched route = stream, anything
@@ -2639,14 +2740,49 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
   // (hover/focus/touch + viewport/idle). trade-off: app-global, not per-route.
   const prefetchMode = compiled.find((c) => c.prefetch)?.prefetch ?? 'all';
 
+ // The <html lang dir> tracker only exists when the app actually has
+  // a [lang] route - an app without i18n pays nothing for it (and the whole
+  // block, localeDir included, tree-shakes away). The 404 guard for a bogus
+  // locale rides at the end of the block, so it goes away with it.
+  const hasLang = infos.some((i) => i.pattern.includes(':lang'));
+  const langDirBlock = hasLang
+    ? `      // <html lang dir> follows the route - the one part of the document
+      // client-side navigation cannot leave stale (screen readers and CSS
+      // logical properties both read it). A route with no [lang] segment
+      // returns to the default locale, and a bogus segment falls back to it
+      // too, exactly like the server's docAttrs.
+      const seg = langIdx >= 0 ? pathname.split('/')[langIdx] : '';
+      const known = !seg || isLocale(seg);
+      const docLang = known && seg ? seg : __defLocale;
+      document.documentElement.lang = docLang;
+      const docDir = localeDir(docLang);
+      if (docDir) document.documentElement.setAttribute('dir', docDir);
+      else document.documentElement.removeAttribute('dir');
+      if (!known) {`
+    : `      if (langIdx >= 0 && !isLocale(pathname.split('/')[langIdx])) {`;
+
   const clientEntry = `
 ${clientImports}
-import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, setLocales, isLocale } from './runtime.js';
+import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir } from './runtime.js';
 
 // i18n: the dictionaries baked at build time - the client
-// renders any locale from the bundle, so switching language costs zero
-// requests (the same bet as the inlined route table).
-setLocales(${localesJson}, '${defaultLocale}');
+// renders any PRELOADED locale from the bundle, so switching language costs
+// zero requests (the same bet as the inlined route table). a locale
+// the app left out of the preload (i18n.preload in rosefn.config.js) is a
+// pack instead: it lives at /locales/<lang>.json and applyParams() fetches it
+// on first use - one request per language per session, then it renders from
+// memory like any other. The default build preloads everything and ships no
+// packs at all.
+setLocales(${clientLocalesJson}, '${defaultLocale}');
+setLocalePacks(${JSON.stringify(packed)});
+${hasLang ? `// the default locale, kept beside setLocales' own copy so <html lang> can
+// follow a route that carries no [lang] segment (a non-i18n page)
+const __defLocale = '${defaultLocale}';` : ''}
+// The two pack doors, re-exported for an app that wants to warm a language
+// before its visitor asks for it (ensureLocale) or to feed a dictionary it
+// fetched itself (loadLocale). Both are already in the bundle - ensureLocale
+// is what applyParams calls - so the re-export costs the statement alone.
+export { ensureLocale, loadLocale } from './runtime.js';
 
 const routes = [
   ${clientRoutes}
@@ -2742,12 +2878,20 @@ const prefetchCache = new Map(); // pathname -> { html, closes, state } | Promis
 let prefetchQueue = Promise.resolve();
 let prefetchPending = 0;
 
-function applyParams(route, pathname) {
+// Applies the route's params to state. A [lang] segment whose dictionary is
+// a runtime pack (i18n.preload) is awaited HERE - the one place every client
+// render path goes through (navigation, prefetch, action adopt) - so a packed
+// locale costs one request per session and then renders from memory. A
+// preloaded locale (the default: every dictionary inline) resolves without
+// touching the network, so the common path stays synchronous in spirit.
+async function applyParams(route, pathname) {
   const patternParts = route.pattern.split('/');
   const pathParts = pathname.split('/');
   for (let i = 0; i < patternParts.length; i++) {
     if (patternParts[i].startsWith(':')) setState(patternParts[i].slice(1), pathParts[i]);
   }
+  const langIdx = patternParts.indexOf(':lang');
+  if (langIdx >= 0) await ensureLocale(pathParts[langIdx]);
 }
 
 export function prefetch(pathname, source = 'hover') {
@@ -2767,7 +2911,7 @@ export function prefetch(pathname, source = 'hover') {
       // cleanups, so the prefetched route's timers are disposed on the next
       // navigation like any live route's
       const { result, state, mounts, cleanups } = await isolateStateAsync(async () => {
-        applyParams(route, pathname);
+        await applyParams(route, pathname); // a packed locale's dictionary lands before the render
         const closes = [];
         const render = await getRender(route); // split mode: loads the route's chunk here
         const html = await render(closes, '');
@@ -2813,7 +2957,7 @@ function bindEvents(container) {
       if (!el || !container.contains(el)) return;
       const fn = el.getAttribute('data-on-' + ev);
       if (fn.startsWith('$action:')) return $action(fn.slice(8), e);
-      const h = globalThis.__rosefn_handlers[fn];
+      const h = handlers[fn];
       if (h) h(e);
     });
   }
@@ -2866,7 +3010,7 @@ export async function start(container, pathname, initial) {
       // (before the prefetch check: a cached entry for a bogus locale is
       // discarded, never painted)
       const langIdx = route.pattern.split('/').indexOf(':lang');
-      if (langIdx >= 0 && !isLocale(pathname.split('/')[langIdx])) {
+${langDirBlock}
         await paintFallback(container, notFound, '<h1>404</h1><p>Page not found</p>');
         return;
       }
@@ -2890,7 +3034,7 @@ export async function start(container, pathname, initial) {
         resetEffects();
         clearRequestState();
       }
-      applyParams(route, pathname);
+      await applyParams(route, pathname);
       const closes = [];
       let html;
       try {
@@ -2910,7 +3054,10 @@ export async function start(container, pathname, initial) {
     }
   }
   // unmatched route: pages/404.rose renders (with its head + interactivity),
-  // else the built-in plain 404
+  // else the built-in plain 404 - and an i18n app's document returns to the
+  // default locale, the same one the server stamps on its 404
+${hasLang ? `  document.documentElement.lang = __defLocale;
+  document.documentElement.removeAttribute('dir');` : ''}
   await paintFallback(container, notFound, '<h1>404</h1><p>Page not found</p>');
 }
 
@@ -2931,7 +3078,7 @@ export async function adopt(container, html, stateJson) {
   if (st) st.textContent = stateJson;
   for (const route of routes) {
     if (matchRoute(route.pattern, location.pathname)) {
-      applyParams(route, location.pathname);
+      await applyParams(route, location.pathname);
       const closes = [];
       try {
         const render = await getRender(route); // split mode: loads the route's chunk here

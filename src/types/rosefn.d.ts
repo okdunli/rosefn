@@ -47,8 +47,29 @@ declare function $data<T>(fn: () => T | Promise<T>): Getter<T>;
 /** The per-request bag filled by `pages/_middleware.rose` (auth, db, cache). */
 declare function getContext<T = Record<string, unknown>>(): T;
 
-/** Translate a key from src/locales/<lang>.json, with `{name}` interpolation. */
-declare function $t(key: string, vars?: Record<string, string>): string;
+/**
+ * Translate a key from src/locales/<lang>.json.
+ *
+ * Values are either plain strings with `{name}` holes or ICU MessageFormat:
+ * `{count, plural, one {# item} other {# items}}`, `{n, selectordinal, ...}`,
+ * `{who, select, ...}` - so `vars` carries numbers for counts and strings for
+ * names and select arms. A missing key renders the key itself.
+ */
+declare function $t(key: string, vars?: Record<string, string | number>): string;
+
+/** 'rtl' for a right-to-left locale (ar, he, fa, ur, ...), 'ltr' otherwise. */
+declare function localeDir(lang: string): string;
+
+/**
+ * Resolve once a locale's dictionary is present: immediately for a baked one,
+ * after one fetch of /locales/<lang>.json for a runtime pack (a locale the
+ * build left out of the bundle via i18n.preload). The client router awaits
+ * this on every navigation, so a page rarely needs to call it directly.
+ */
+declare function ensureLocale(lang: string): Promise<void>;
+
+/** Merge a dictionary that arrived at runtime (a fetched pack, or your own import()). */
+declare function loadLocale(lang: string, dict: Record<string, string>): void;
 
 /** A named, process-wide store. Values must be JSON-serializable. */
 declare function $store<T>(name: string, initial: T): Store<T>;
