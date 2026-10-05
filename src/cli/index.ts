@@ -67,12 +67,26 @@ function sendHtml(req: any, res: any, status: number, html: string, extraHeaders
   }
 }
 
+// Copy a Web-standard Response's headers onto the Node response. set-cookie
+// is the one header that may legally repeat, and res.setHeader overwrites -
+// so gather the list through getSetCookie() (undici keeps them separate) and
+// set it whole. One session cookie never hits this; a handler that rotates a
+// token and clears the old one does.
+function writeWebHeaders(web: any, res: any): void {
+  const cookies = web.headers.getSetCookie?.() ?? [];
+  web.headers.forEach((v: string, k: string) => {
+    if (cookies.length && k.toLowerCase() === 'set-cookie') return;
+    res.setHeader(k, v);
+  });
+  if (cookies.length) res.setHeader('set-cookie', cookies);
+}
+
 // A middleware's short-circuit: a Web-standard Response (status, headers,
 // body) written straight to the Node response - a redirect, an auth wall,
 // a rewrite. ponytail: uncompressed, like every framework's middleware
 // response (they are tiny: a 302 has no body at all).
 async function sendWebResponse(web: any, res: any): Promise<void> {
-  web.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+  writeWebHeaders(web, res);
   res.statusCode = web.status;
   res.end(Buffer.from(await web.arrayBuffer()));
 }
@@ -519,7 +533,7 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
               body: body.length > 0 ? body : undefined,
             });
             const apiRes = await ssrModule.handleApi(req.method || 'GET', apiPath, request);
-            apiRes.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+            writeWebHeaders(apiRes, res);
             res.statusCode = apiRes.status;
             res.end(Buffer.from(await apiRes.arrayBuffer()));
           } catch {

@@ -1,0 +1,80 @@
+<script>
+  import { $cookies } from './runtime.js';
+
+  // The blog's backstage skeleton (Phase 2): a real database behind the API.
+  // node:sqlite ships inside Node 22+ - zero dependencies, zero native
+  // modules, zero build steps. A Postgres deploy swaps this block for a
+  // pg.Pool (same shape: prepare/run/all), nothing else in the file moves.
+
+  // The connection opens on first use, never at module load:
+  //   1. node:sqlite is imported LAZILY - a static import would put it in the
+  //      server bundle, and the edge adapter loads that same bundle, so the
+  //      whole app would fail to boot on an edge runtime instead of just
+  //      this route (Node caches the module: one microtask per call).
+  //   2. no side effect at build time: `rosefn build` imports the server
+  //      bundle (route headers, prerender) and must not create a database.
+  // ponytail: one connection per worker process - that IS the pool; a real
+  // deploy replaces it with pg.Pool right here. The file is relative to the
+  // working directory you started the server from (your project root), never
+  // inside dist/: dist is a build artifact and the Go single binary embeds
+  // it verbatim - a database in dist would ship inside the binary.
+  let conn;
+  const getDb = async () => {
+    if (!conn) {
+      const { DatabaseSync } = await import('node:sqlite');
+      conn = new DatabaseSync('blog.db');
+      conn.exec(`
+        CREATE TABLE IF NOT EXISTS posts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          author TEXT NOT NULL DEFAULT 'anonymous'
+        );
+        INSERT OR IGNORE INTO posts (id, title, body, author) VALUES
+          (1, 'Hello Rosefn', 'One request, zero hydration - and a database too.', 'ada'),
+          (2, 'The dynamic half', 'Every route keeps the single-request contract, DB or not.', 'grace');
+      `);
+    }
+    return conn;
+  };
+
+  // The demo's single author: session cookie value '1' is the users row id
+  // (see api/login.rose). A real app stores a signed token and verifies it;
+  // the cookie helpers (#35) build the cookie either way.
+  const signedIn = (req) => $cookies(req).session === '1';
+
+  // API answers are JSON, errors included - never an HTML error page.
+  const json = (obj, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
+
+  // Public read: the list, newest first. A page or a client calls this the
+  // same way; on the Node server it is one request with no hydration.
+  export async function GET() {
+    const db = await getDb();
+    return { posts: db.prepare('SELECT id, title, body, author FROM posts ORDER BY id DESC').all() };
+  }
+
+  // Create. Writes need the session: a missing or wrong cookie is a 401 with
+  // a JSON body, so a browser and a script get the same contract.
+  export async function POST(req) {
+    if (!signedIn(req)) return json({ error: 'sign in first' }, 401);
+    const form = await req.formData();
+    const title = String(form.get('title') ?? '').trim();
+    const body = String(form.get('body') ?? '').trim();
+    if (!title || !body) return json({ error: 'title and body are required' }, 400);
+    const db = await getDb();
+    const info = db.prepare('INSERT INTO posts (title, body, author) VALUES (?, ?, ?)').run(title, body, 'ada');
+    return json({ id: Number(info.lastInsertRowid) }, 201);
+  }
+
+  // Delete by ?id=. Same wall as POST - the CSRF guard (#35) already refuses
+  // cross-site writes before a handler runs.
+  export async function DELETE(req) {
+    if (!signedIn(req)) return json({ error: 'sign in first' }, 401);
+    const id = Number(new URL(req.url).searchParams.get('id'));
+    if (!id) return json({ error: 'id is required' }, 400);
+    const db = await getDb();
+    db.prepare('DELETE FROM posts WHERE id = ?').run(id);
+    return json({ deleted: id });
+  }
+</script>

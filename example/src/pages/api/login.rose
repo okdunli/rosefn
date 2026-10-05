@@ -1,0 +1,55 @@
+<script>
+  import { $sessionCookie } from './runtime.js';
+
+  // Login for the demo: one seeded users row, checked against the same
+  // blog.db the posts API uses. The session is the cookie $sessionCookie()
+  // builds (#35): HttpOnly, SameSite=Lax, Path=/, 7 days - the middleware
+  // and every write endpoint read it back with $cookies(request).
+
+  // Same lazy-connection pattern as api/posts.rose: node:sqlite is imported
+  // inside the accessor so the server bundle stays edge-loadable (the edge
+  // adapter loads that same bundle - a static import would boot-crash the
+  // whole app there instead of failing this one route), and `rosefn build`
+  // creates no database as a side effect. One connection per worker: that
+  // IS the pool; a real deploy swaps it for pg.Pool here. The file is
+  // relative to the working directory you started the server from, never
+  // inside dist/ (the Go binary embeds dist verbatim).
+  let conn;
+  const getDb = async () => {
+    if (!conn) {
+      const { DatabaseSync } = await import('node:sqlite');
+      conn = new DatabaseSync('blog.db');
+      conn.exec(`
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL UNIQUE,
+          pass TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO users (id, name, pass) VALUES (1, 'ada', 'lovelace');
+      `);
+    }
+    return conn;
+  };
+
+  const json = (obj, status = 200, headers = {}) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json', ...headers } });
+
+  // POST user=ada pass=lovelace -> 200 + Set-Cookie: session=1
+  // ponytail: plaintext passwords, one seeded row - a demo, not a vault. A
+  // real login hashes with node:crypto scrypt and compares in constant time;
+  // everything around it (this file, the cookie, the middleware) stays.
+  export async function POST(req) {
+    const form = await req.formData();
+    const user = String(form.get('user') ?? '');
+    const db = await getDb();
+    const row = db.prepare('SELECT id FROM users WHERE name = ? AND pass = ?').get(user, String(form.get('pass') ?? ''));
+    if (!row) return json({ error: 'bad credentials' }, 401);
+    return json({ ok: true, user }, 200, { 'set-cookie': $sessionCookie('session', String(row.id)) });
+  }
+
+  // Logout: expire the cookie (Max-Age=0). DELETE keeps the REST shape -
+  // no body needed, and the CSRF guard (#35) already screened it.
+  export function DELETE() {
+    return json({ ok: true }, 200, { 'set-cookie': $sessionCookie('session', '', { maxAge: 0 }) });
+  }
+</script>

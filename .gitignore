@@ -3,3 +3,4 @@ rosefn-server
 rosefn-server-go
 rosefn-server-go.exe
 node_modules/
+blog.db
