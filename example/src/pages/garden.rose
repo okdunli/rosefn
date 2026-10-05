@@ -1,6 +1,6 @@
 <script>
   // Pure content: no $state, no events, no lifecycle - and the document
-  // proves it. `csr = false` (innovation #25) keeps the client bundle OUT
+ // proves it. `csr = false` keeps the client bundle OUT
   // of this document entirely: no runtime, no state script, zero
   // JavaScript for whoever lands here. The route's render function still
   // rides in the bundle, so a client-side navigation from an interactive

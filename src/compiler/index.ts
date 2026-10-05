@@ -25,11 +25,11 @@ const EVENT_RE = /on:(\w+)=\{([^}]+)\}/g;
 const SLOT_RE = /<slot\s*\/?>/g;
 // {#boundary}...{/boundary}: an error boundary - its content renders into
 // its own string; a throw anywhere inside swaps in this fallback instead of
-// failing the whole page. ponytail: one generic message, no per-boundary
+// failing the whole page. trade-off: one generic message, no per-boundary
 // custom fallback yet - add {:fallback}...{/fallback} when an app needs it.
 const BOUNDARY_FALLBACK = '<p>This section failed to render.</p>';
 // API route handlers are exported functions named by HTTP method
-// (pages/api/*.rose). ponytail: function declarations only - an arrow-exported
+// (pages/api/*.rose). trade-off: function declarations only - an arrow-exported
 // handler is a syntax error at import time, which is loud enough.
 const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 
@@ -56,14 +56,14 @@ export interface CompileResult {
   csr?: boolean;
   /** the component exports `prefetch = 'off' | 'hover' | 'viewport' | 'all'` (app-global link-prefetch strategy) */
   prefetch?: string;
-  /** the component exports `bundle = 'inline' | 'split'` (app-global client bundle mode, P0 §1) */
+ /** the component exports `bundle = 'inline' | 'split'` (app-global client bundle mode) */
   bundle?: string;
-  /** innovation #29: the static analysis says this component needs the client bundle */
+ /** The static analysis says this component needs the client bundle */
   needsClient?: boolean;
-  /** innovation #31: WHY it needs the client - the rules that fired, for the build report */
+ /** WHY it needs the client - the rules that fired, for the build report */
   clientReasons?: string[];
   /**
-   * innovation #31: shapes that MIGHT need JavaScript but the syntactic
+ * Shapes that MIGHT need JavaScript but the syntactic
    * predicate cannot prove, on a component that otherwise ships none (an
    * inline on* attribute, a javascript: URL, eval/new Function). Warnings,
    * never errors: the document still ships, but the build says it out loud.
@@ -200,7 +200,7 @@ export interface Plugin {
 /**
  * Plugins live in `<root>/rosefn.config.js` as the default export: an array
  * of `{ name, transform }`, run over each component's raw source (template +
- * script + style, before any parsing). ponytail: ONE hook - it covers macros,
+ * script + style, before any parsing). trade-off: ONE hook - it covers macros,
  * custom syntax, includes and auto-imports; add bundler/build hooks when a
  * real plugin needs one. The import is cache-busted per build so a config
  * edit takes effect on the dev server's next rebuild, and a missing file is
@@ -216,7 +216,7 @@ export async function loadPlugins(root: string): Promise<Plugin[]> {
 
 export async function compileComponent(filePath: string, publicDir: string, scopeKey: string, isApi = false, plugins: Plugin[] = []): Promise<CompileResult> {
   let source = await fs.promises.readFile(filePath, 'utf-8');
-  // Plugins (innovation #30) see the raw source first: whatever they return
+ // Plugins see the raw source first: whatever they return
   // is what the compiler parses. A throwing plugin fails the build naming
   // itself and the file - a broken transform must never pass silently.
   for (const p of plugins) {
@@ -266,7 +266,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const rawScript = scriptMatch?.[1] ?? '';
   // getContext() in the script makes the route dynamic: the request bag is
   // per-request, so the build must not bake it and the servers must not
-  // answer it from a prerendered file. $store() (Phase 2) earns the same
+ // answer it from a prerendered file. $store earns the same
   // treatment for the same reason: the store is per-process mutable state, so
   // a baked document would freeze one worker's snapshot of it.
   const usesContext = /getContext\s*\(/.test(rawScript) || /\$store\s*\(/.test(rawScript);
@@ -274,10 +274,10 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const hasParams = /(?:^|\n)\s*export\s+(?:(?:const|let|var)\s+|(?:async\s+)?function\s+)params\b/.test(rawScript);
   // an exported `revalidate = N` opts the route into stale-while-revalidate:
   // the baked file is served for up to N seconds, then the preview server
-  // answers stale and rebuilds in the background (ISR, innovation #24)
+ // answers stale and rebuilds in the background (ISR)
   const revalidateMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+revalidate\s*=\s*(\d+)\s*;?/);
   const revalidate = revalidateMatch ? Number(revalidateMatch[1]) : undefined;
-  // P1 (consultant report): an exported `prefetch = '...'` sets the app-global
+  // P1: an exported `prefetch = '...'` sets the app-global
   // link-prefetch strategy - 'off', 'hover', 'viewport' or 'all' (the original
   // behavior: hover/focus/touch + viewport/idle). Validated here like headers:
   // a typo would silently disable prefetching with no other signal.
@@ -286,7 +286,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   if (prefetch && !['off', 'hover', 'viewport', 'all'].includes(prefetch)) {
     throw new Error(`${filePath}: export const prefetch must be 'off', 'hover', 'viewport' or 'all'`);
   }
-  // P0 §1 (consultant report): the bundle mode - the fix for the large-app
+ // The bundle mode - the fix for the large-app
   // architecture gap. 'inline' (the default) is the single-document mode:
   // the whole client bundle rides inside the HTML, one request, zero
   // hydration. 'split' is mode B: every route module becomes its own chunk,
@@ -299,9 +299,9 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   if (bundle && !['inline', 'split'].includes(bundle)) {
     throw new Error(`${filePath}: export const bundle must be 'inline' or 'split'`);
   }
-  // Innovation #29: the compiler decides zero-JS, not the developer. This is
+ // The compiler decides zero-JS, not the developer. This is
   // the same "does anything here need the client bundle" predicate that
-  // innovation #25 used to REFUSE `csr = false`: event wiring in the
+ // Used to REFUSE `csr = false`: event wiring in the
   // template, lifecycle/client APIs in the script, a server action (a form
   // target or $action), or a POST form (its in-place adopt is the
   // enhancement the bundle exists for). A route whose whole chain - the page
@@ -310,14 +310,14 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   // page, a localized page. `csr = true` forces the bundle back in (a
   // content page that still wants client-side navigation FROM itself);
   // `csr = false` asserts the route stays content-only and fails the build
-  // the day it isn't. ponytail: syntactic, like every other check here - a
+  // the day it isn't. trade-off: syntactic, like every other check here - a
   // script that touches the DOM or mutates state outside an event handler is
   // the developer's promise (the same ceiling csr = false always had).
   // (Computed below, after actionNames: the predicate includes server
   // actions, which are only known once the exports are extracted.)
   // csr: explicit true = force the bundle in; explicit false = assert
   // content-only (build fails if it isn't); absent = the compiler decides
-  // from needsClient (innovation #29).
+ // from needsClient .
   const csrMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+csr\s*=\s*(true|false)\s*;?/);
   const csr: boolean | undefined = csrMatch ? csrMatch[1] !== 'false' : undefined;
   if (csr === false) {
@@ -331,7 +331,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   }
 
   // An exported `headers = { ... }` sets this route's response headers
-  // (innovation #26) - the servers merge them OVER the framework defaults
+ // - the servers merge them OVER the framework defaults
   // (the strict CSP), so an app can tighten or relax the policy per route.
   // Flat string map only, validated here: a non-string value would ship
   // verbatim into the server bundle and blow up at request time.
@@ -359,10 +359,10 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const script = scriptNoExports;
   const actionNames = new Set(actions.map((a) => a.name));
 
-  // Innovation #29: does anything in this component need the client bundle?
+ // Does anything in this component need the client bundle?
   // (The predicate documented at the csr flag above - it lives here because
   // it includes server actions, known only after the exports are extracted.)
-  // Innovation #31: every rule that fires records its reason, so the build's
+ // Every rule that fires records its reason, so the build's
   // lint report can tell the developer WHY a route carries the runtime.
   const clientReasons: string[] = [];
   if (/\son:[a-z]+\s*=/.test(source)) clientReasons.push('event wiring (on:)');                       // event wiring in the template
@@ -374,7 +374,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   }
   const needsClient = clientReasons.length > 0;
 
-  // Innovation #31: the predicate is SYNTACTIC, so a component that ships no
+ // The predicate is SYNTACTIC, so a component that ships no
   // runtime is scanned for the shapes that would silently need one - an
   // inline on* attribute or a javascript: URL cannot fire without the bundle,
   // and eval/new Function is client code by definition. The route-level
@@ -481,7 +481,19 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   // Actions ship in the SSR module only; the client bundle gets every other
   // export (params, sync helpers) but never an action body.
   const ssrExports = actions.length > 0 ? `${exportStmts}\n${actions.map((a) => a.stmt).join('\n')}` : exportStmts;
-  const ssr = generateSSR(cleanScript, compiledTemplate, stateDeclsCode, ssrExports, compiledHead);
+  // pages/_middleware.rose is a hook module, not a route: no template, no
+  // state, no head. Its script therefore belongs at MODULE scope, because
+  // `handle` is hoisted there and the things a middleware actually needs -
+  // a database connection, a cache, a client - are declared beside it.
+  // Inside render() those declarations would be unreachable: the server
+  // entry imports middlewareMod.handle and never calls render(). (This is
+  // exactly how a first DB-backed page was written: the page's $data body
+  // ships to the browser, so the query lives in the middleware, which the
+  // compiler keeps server-side.)
+  const isMiddleware = path.basename(filePath) === '_middleware.rose';
+  const ssr = isMiddleware
+    ? `${RUNTIME_IMPORTS}\n\n${ssrExports}\n\n${cleanScript}\n`
+    : generateSSR(cleanScript, compiledTemplate, stateDeclsCode, ssrExports, compiledHead);
   const client = generateClient(cleanScript, compiledTemplate, stateDeclsCode, eventBindings, exportStmts, compiledHead);
 
   return { ssr, client, stateKeys, actionNames: [...actionNames], style: scopedStyle, hasParams, usesContext, revalidate, csr, prefetch, bundle, needsClient, clientReasons, jsWarnings, headers };
@@ -490,7 +502,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
 /**
  * Scope a component's CSS to its own subtree: every selector is prefixed
  * with the component's scope attribute, recursing into @media/@supports.
- * ponytail: no full CSS parser - comma lists only, and @keyframes blocks
+ * Trade-off: no full CSS parser - comma lists only, and @keyframes blocks
  * pass through unscoped (their from/to/to selectors are not selectors).
  * Global element rules (:root/html/body) belong in the shell's STYLES.
  */
@@ -579,7 +591,7 @@ function injectScopeAttr(template: string, key: string): string {
 
 const VOID_TAGS = new Set(['img', 'br', 'hr', 'input', 'meta', 'link', 'source', 'wbr']);
 
-// ponytail: tolerate leading indentation - .rose script blocks are indented
+// Trade-off: tolerate leading indentation - .rose script blocks are indented
 const EXPORT_RE = /^[ \t]*export\s+(?:(const|let|var)|(?:async\s+)?function)\s+(\w+)/gm;
 
 /**
@@ -587,7 +599,7 @@ const EXPORT_RE = /^[ \t]*export\s+(?:(const|let|var)|(?:async\s+)?function)\s+(
  * body. They must be self-contained (no references to state or template
  * scope) - they exist for build-time consumers like dynamic-route `params`.
  *
- * Every exported ASYNC function is a SERVER-ONLY action (Next.js semantics:
+ * Every exported ASYNC function is a SERVER-ONLY action (server-action semantics:
  * `export const params` and sync helpers stay shared, async exports are
  * server code). `action` is the conventional name a <form method="POST">
  * posts to; any other name is reachable from an event handler
@@ -884,7 +896,7 @@ const IMG_MIME: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
 };
-// ponytail: fixed 4 KB cap; make it configurable when a real app cares
+// Trade-off: fixed 4 KB cap; make it configurable when a real app cares
 const INLINE_IMG_MAX = 4096;
 
 function inlineImages(template: string, publicDir: string): string {
@@ -936,6 +948,11 @@ function compileSlot(acc: string): string {
   return `${acc} += String(children);\n`;
 }
 
+// The runtime's public surface, as one import line. Three generators emit it
+// (page SSR, page client, the middleware module) - one constant so the list
+// can never drift between them.
+const RUNTIME_IMPORTS = `import { state, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $t, bestLocale, $cookies, $sessionCookie, $store } from './runtime.js';`;
+
 function generateSSR(script: string, templateFn: string, stateDeclsCode: string, exports = '', headFn = ''): string {
   // The head block renders to a clean html string (no markers) and is wrapped
   // in an h marker pair: renderPage extracts it for <head> injection, the
@@ -948,7 +965,7 @@ closes.push(__head);
 __html += "<!--\u27e6h:" + __hi + "\u27e7-->" + __head() + "<!--\u27e6/h:" + __hi + "\u27e7-->";`
     : '';
   return `
-import { state, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $t, bestLocale, $cookies, $sessionCookie, $store } from './runtime.js';
+${RUNTIME_IMPORTS}
 
 ${exports}
 
@@ -984,7 +1001,7 @@ __html += "<!--\u27e6h:" + __hi + "\u27e7-->" + __head() + "<!--\u27e6/h:" + __h
     : '';
 
   return `
-import { state, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $t, bestLocale, $cookies, $sessionCookie, $store } from './runtime.js';
+${RUNTIME_IMPORTS}
 
 ${exports}
 
@@ -1012,7 +1029,7 @@ const layoutsOf = (infos: RouteInfo[], idx: number): number[] =>
     .map(({ i }) => i);
 
 /**
- * Innovation #29's decision as a pure function: does this route's document
+ * 's decision as a pure function: does this route's document
  * ship without the client bundle? Shared by the route table (csr: false) and
  * the build report (#31), so the report can never disagree with the build.
  */
@@ -1025,7 +1042,7 @@ const routeShipsNoJs = (infos: RouteInfo[], compiled: CompileResult[], i: number
 };
 
 /**
- * The build's zero-JS lint report (innovation #31): one line per route with
+ * The build's zero-JS lint report: one line per route with
  * its verdict and the exact reason - which component in the chain needs the
  * client bundle and why, or that nothing does. Pure: the same inputs the
  * route table is built from.
@@ -1057,14 +1074,14 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
   await Promise.all(stale.map((f) => fs.promises.rm(path.join(outDir, f), { force: true })));
 
   const files = await scanRoseFiles(root);
-  // Phase 0: a build that silently produces nothing is the worst possible
+ // A build that silently produces nothing is the worst possible
   // failure mode (an empty dist/ deploys as a blank site). Say it plainly:
   // this is not a project root, or the pages live somewhere else.
   if (files.length === 0) {
     throw new Error(`no .rose pages found under ${path.join(root, 'src', 'pages')} - run rosefn from a project root, or pass one: rosefn build <dir>`);
   }
   const infos = files.map((f) => ({ ...getRouteInfo(f, root) }));
-  // Plugins (innovation #30): rosefn.config.js at the project root, loaded
+ // Plugins: rosefn.config.js at the project root, loaded
   // fresh per build so the dev server's hot rebuild picks up config edits.
   const plugins = await loadPlugins(root);
   // scope key: the component's path under pages/ (index, _layout, blog/[id])
@@ -1081,7 +1098,7 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
   if (styles) await fs.promises.writeFile(path.join(outDir, 'styles.css'), styles);
   else await fs.promises.rm(path.join(outDir, 'styles.css'), { force: true });
 
-  // i18n (innovation #27): every JSON file in src/locales/ is a language.
+ // i18n: every JSON file in src/locales/ is a language.
   // The dictionaries are baked into BOTH bundles at build time - the client
   // must be able to render any locale without a request (the same one-request
   // bet as the route table). No locales dir -> i18n is simply off. < is
@@ -1151,7 +1168,7 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
     return expr;
   };
 
-  // P0 §1 (consultant report): mode B. `export const bundle = 'split'`
+ // Mode B. `export const bundle = 'split'`
   // (declared once, the root layout) turns every route's client module into
   // its own chunk: the document references /client.js externally instead of
   // inlining the whole app, so it stops growing with the route count.
@@ -1170,7 +1187,7 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
     `load: () => loadChain([${chainOf(idx).map((i) => `() => import('./comp-${i}.client.js')`).join(', ')}])`;
   const loaderOf = (idx: number): string => `{ ${loaderInner(idx)} }`;
 
-  // Innovation #29: the compiler decides zero-JS, not the developer. A route
+ // The compiler decides zero-JS, not the developer. A route
   // ships no client bundle - no runtime, no state script, zero JavaScript -
   // when NOTHING in its chain needs one: no event wiring, no lifecycle or
   // client-only APIs, no server action, no form, in the page OR any of its
@@ -1230,7 +1247,7 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
       // selects which one runs before the render
       const actionMap = compiled[i].actionNames.map((n) => `${n}: ${n}_${i}`).join(', ');
       // csr: false rides on the route so renderPage/renderPageStream can drop
-      // the state script + bundle from the document (innovation #25; the
+ // the state script + bundle from the document (; the
       // decision is the compiler's since #29). An explicit opt-out is also
       // checked against the chain: a layout needing the bundle under a
       // csr = false page would ship dead handlers, so the build fails.
@@ -1252,12 +1269,12 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
 ${serverImports}
 import { setState, clearRequestState, serializeState, resetRequestContext, isLocale, setLocales, localeList, setStoreTransport, applyStorePatch } from './runtime.js';
 
-// i18n (innovation #27): the dictionaries baked at build time from
+// i18n: the dictionaries baked at build time from
 // src/locales/*.json. A route segment named [lang] is the locale: the value
 // must name one of these dictionaries, and $t resolves keys against it.
 setLocales(${localesJson}, '${defaultLocale}');
 
-// Phase 2: the store transport. Under "rosefn serve" every worker is its
+// The store transport. Under "rosefn serve" every worker is its
 // own process with its own dist/server.js module, so a $store write must
 // travel: this worker -> primary -> every other worker. process.send exists
 // only inside cluster workers, so a single-process runner (dev, preview,
@@ -1306,7 +1323,7 @@ export const apiPrerender = {
 // bakes these routes like any other, and the preview server serves the
 // baked file for up to N seconds - after which the next request is answered
 // STALE (instant, from disk) while a background pass re-renders and swaps
-// the file (ISR, innovation #24). Routes that read the request context are
+// the file (ISR). Routes that read the request context are
 // excluded: they render per request and have no baked file to revalidate.
 // The dev server ignores the window (it rebuilds on change), the edge
 // adapter renders live (always fresh), and the Go binary serves the baked
@@ -1323,7 +1340,7 @@ export const revalidate = [
 // and the servers keep their static fast paths.
 export const middleware = ${middlewareIdx >= 0 ? 'middlewareMod.handle ?? null' : 'null'};
 
-// Routes whose DOCUMENTS ship without the client bundle (innovation #25,
+// Routes whose DOCUMENTS ship without the client bundle (
 // decided by the compiler since #29): HTML + CSS only - no runtime, no
 // state script, zero JavaScript for whoever lands on them. The compiler
 // picks these automatically: a route whose whole chain needs nothing from
@@ -1344,7 +1361,7 @@ export function isNoJs(pathname) {
   return noJsRoutes.some((pattern) => matchRoute(pattern, pathname));
 }
 
-// Per-route response headers (innovation #26): a route exporting a headers
+// Per-route response headers: a route exporting a headers
 // map carries them into every response the servers write for it, merged
 // OVER the framework defaults (the strict CSP) - so an app can tighten or
 // relax the policy per route. Absent -> null, and the servers keep sending
@@ -1461,7 +1478,7 @@ export async function renderPage(pathname, form) {
           setState(patternParts[i].slice(1), pathParts[i]);
         }
       }
-      // i18n (innovation #27): a [lang] segment naming no dictionary is a
+ // i18n: a [lang] segment naming no dictionary is a
       // 404 - the URL is the contract, and rendering the page with fallback
       // strings would serve duplicate content under a bogus language
       const langIdx = patternParts.indexOf(':lang');
@@ -1490,7 +1507,7 @@ export async function renderPage(pathname, form) {
       // A static-file server may serve another route's document (SPA fallback);
       // the bootstrap then client-renders instead of adopting mismatched DOM.
       const state = JSON.stringify({ __route: pathname, ...JSON.parse(serializeState()) });
-      // csr (innovation #25, auto since #29): false when the compiler found
+ // csr ( auto since #29): false when the compiler found
       // nothing in the route's chain that needs the client (or the route
       // asserted csr = false) - the document ships no runtime, no state
       // script, zero JavaScript. Every other route keeps the bundle. The
@@ -1509,7 +1526,7 @@ export async function renderPage(pathname, form) {
 export function canStream(pathname) {
   return routes.some((route) => {
     if (!matchRoute(route.pattern, pathname)) return false;
-    // i18n (innovation #27): an unknown locale must answer 404, and a
+ // i18n: an unknown locale must answer 404, and a
     // streamed response cannot change its status - so it takes the buffered
     // path (renderPage returns the real 404), never the streaming one
     const langIdx = route.pattern.split('/').indexOf(':lang');
@@ -1595,7 +1612,7 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
         html = errorPage ? extractHead(await errorPage([], '')).html : '<h1>500</h1><p>Something went wrong rendering this page.</p>';
       }
       write(html);
-      // csr: false (innovation #25, auto since #29): a no-JS route's document
+ // csr: false ( auto since #29): a no-JS route's document
       // ends here - no state script, no inlined bundle. (The servers keep
       // these routes off the streaming path so their <head> is complete;
       // this is the correctness floor if one streams anyway.)
@@ -1636,17 +1653,17 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
       : `{ pattern: '${info.pattern}', render: ${compose(i)} }`))
     .join(',\n  ');
 
-  // P1 (consultant report): the app-global prefetch strategy, declared once
+  // P1: the app-global prefetch strategy, declared once
   // (the root layout) as `export const prefetch = 'off' | 'hover' | 'viewport'
   // | 'all'`. First declaration wins; absent -> 'all' = the original behavior
-  // (hover/focus/touch + viewport/idle). ponytail: app-global, not per-route.
+  // (hover/focus/touch + viewport/idle). trade-off: app-global, not per-route.
   const prefetchMode = compiled.find((c) => c.prefetch)?.prefetch ?? 'all';
 
   const clientEntry = `
 ${clientImports}
 import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, setLocales, isLocale } from './runtime.js';
 
-// i18n (innovation #27): the dictionaries baked at build time - the client
+// i18n: the dictionaries baked at build time - the client
 // renders any locale from the bundle, so switching language costs zero
 // requests (the same bet as the inlined route table).
 setLocales(${localesJson}, '${defaultLocale}');
@@ -1655,7 +1672,7 @@ const routes = [
   ${clientRoutes}
 ];
 
-// === Mode B (P0 §1): lazy route chunks ===
+// === Mode B: lazy route chunks ===
 // Split mode's registry entries arrive without a render function: loadChain
 // loads the route's module graph (the page plus its layouts, one chunk per
 // module, the shared runtime in its own vendor chunk) in parallel and
@@ -1719,17 +1736,17 @@ export function matchRoute(pattern, pathname) {
 // === Link prefetch ===
 // Hover / focus / touch an internal link and the target route renders NOW -
 // $data included - against a throwaway signal map. The click that follows
-// paints from the cached HTML: no await, no request, no spinner. SvelteKit
-// and Qwik prefetch data only; Rosefn prefetches the whole render because
+// paints from the cached HTML: no await, no request, no spinner. Other
+// frameworks prefetch data only; Rosefn prefetches the whole render because
 // the inlined bundle already contains every route.
-// ponytail: the cache holds either a result or the in-flight promise (dedupes
+// Trade-off: the cache holds either a result or the in-flight promise (dedupes
 // hover storms); one isolated render runs at a time so signal-map swapping
 // stays correct without any merging logic. Entries are single-use: a consumed
 // entry disappears from the cache, which is also how tests observe a hit.
-// P1 (consultant report), three guards for link-heavy pages:
+// P1, three guards for link-heavy pages:
 //   1. strategy - the app declares "export const prefetch = 'off' | 'hover' |
 //      'viewport' | 'all'" (root layout); 'all' is the original behavior.
-//      ponytail: app-global, not per-route - per-route would carry the mode
+// Trade-off: app-global, not per-route - per-route would carry the mode
 //      in each document's shell.
 //   2. budget - renders are serialized by the queue, so "concurrency" is 1;
 //      the budget caps the QUEUE: a hover storm past it drops the excess
@@ -1953,12 +1970,12 @@ export async function adopt(container, html, stateJson) {
 }
 // === refresh() implementation ===
 // Re-render the current route in place: the client half of router.refresh()
-// (Next.js) / invalidateAll() (SvelteKit). Same machinery as a client-side
+// (a router refresh) / (a full invalidation). Same machinery as a client-side
 // navigation to the current path - $data re-runs, state re-seeds from the
 // fresh render, wire() patches the marked nodes - but a refresh never lands
 // a prefetch entry: a hover from a minute ago is exactly what it exists to
 // bypass. Zero requests: the render (and its $data) runs in the page.
-// ponytail: state resets like navigation (no per-key retention); add
+// Trade-off: state resets like navigation (no per-key retention); add
 // retention when an app needs refresh-without-losing-input.
 setRefreshHook(async () => {
   prefetchCache.delete(location.pathname);
@@ -1967,7 +1984,7 @@ setRefreshHook(async () => {
 `;
   await fs.promises.writeFile(path.join(buildDir, 'client-entry.js'), clientEntry);
   if (split) {
-    // Mode B (P0 §1): esbuild code splitting. One chunk per route module,
+ // Mode B: esbuild code splitting. One chunk per route module,
     // the shared runtime in its own vendor chunk (both content-hashed, so a
     // deploy that does not touch a route leaves its chunk byte-identical and
     // the browser's cached copy stays valid), and the entry at a STABLE
@@ -2013,7 +2030,7 @@ setRefreshHook(async () => {
     );
   }
 
-  // Innovation #31: the build's zero-JS lint report - every route, its
+ // The build's zero-JS lint report - every route, its
   // verdict, and the reason. Printed on every build (dev rebuilds included)
   // so the decision is auditable instead of silent. The warnings are
   // route-level on purpose: a danger pattern only matters when the document
@@ -2070,7 +2087,7 @@ function getRouteInfo(filePath: string, root: string): RouteInfo {
   const isApi = withoutExt === 'api' || withoutExt.startsWith('api/');
   // pages/_middleware.rose: the request interceptor. It runs before every
   // render and is not a route: it matches nothing and never reaches the
-  // client bundle. ponytail: root only - one chain, no matcher config.
+  // client bundle. trade-off: root only - one chain, no matcher config.
   const isMiddleware = withoutExt === '_middleware';
 
   let parts = withoutExt.split('/').filter((p) => p !== '_layout');

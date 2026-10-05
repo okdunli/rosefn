@@ -17,7 +17,7 @@
 
   // refresh() re-runs this route's render in place: $data re-fetches, the
   // fresh render's state re-seeds, and wire() patches only what changed -
-  // zero requests, no navigation. (Next.js router.refresh() round-trips the
+  // zero requests, no navigation. (a router refresh round-trips the
   // server; rosefn renders in the page because the bundle already has the
   // route - and a real app's $data can hit its API from either side.)
   async function reload() {

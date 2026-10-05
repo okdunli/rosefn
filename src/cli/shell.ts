@@ -3,7 +3,7 @@
  *
  * The client bundle is INLINED into the document, so a full page load costs
  * exactly one request: the HTML itself. No other framework in the comparison
- * set (Next.js, SvelteKit, Qwik City, SolidStart) achieves that - they all
+ * set achieves that - they all
  * ship a separate JS bundle, doubling the round-trips before first paint.
  */
 
@@ -16,7 +16,7 @@ const OUT_DIR = path.join(process.cwd(), 'dist');
 
 let clientCache: { mtimeMs: number; source: string } | null = null;
 
-// P0 §1: the bundle mode the last build decided ('inline' | 'split'). In
+// The bundle mode the last build decided ('inline' | 'split'). In
 // split mode getClientSource() answers null - "nothing to inline" - so
 // every shell caller (documents, headers, the streaming tag) follows the
 // external-bundle path without a parameter threaded through each one.
@@ -86,7 +86,7 @@ document.addEventListener('click', (e) => {
 });
 // Prefetch the target route's full render (including $data) on hover, keyboard
 // focus, or touch - the click that follows paints from cache: no await, no
-// request. SvelteKit/Qwik prefetch data only; Rosefn prefetches the render
+// request. Other frameworks prefetch data only; Rosefn prefetches the render
 // because the inlined bundle already contains every route.
 function __prefetchHandler(e) {
   const a = e.target.closest && e.target.closest('a[href^="/"]');
@@ -95,8 +95,8 @@ function __prefetchHandler(e) {
 document.addEventListener('mouseover', __prefetchHandler);
 document.addEventListener('focusin', __prefetchHandler);
 document.addEventListener('touchstart', __prefetchHandler, { passive: true });
-// Viewport + idle prefetch (Qwik-style): once a link scrolls into view and the
-// browser is idle, its route renders ahead of any interaction. ponytail: both
+// Viewport + idle prefetch (viewport-triggered): once a link scrolls into view and the
+// browser is idle, its route renders ahead of any interaction. trade-off: both
 // APIs are feature-detected; without them the hover/focus/touch path above
 // still covers every link.
 if (prefetch && 'IntersectionObserver' in window && 'requestIdleCallback' in window) {
@@ -147,13 +147,13 @@ if (__state.__route === window.location.pathname) {
 // often dynamically-named bundles force 'unsafe-inline' or nonce plumbing).
 // The policy hashes the exact bytes of the inline module script (bundle +
 // bootstrap), so the page's own code runs and nothing else does
-// (innovation #26). style-src stays 'unsafe-inline' because the scoped
+// . style-src stays 'unsafe-inline' because the scoped
 // component styles are inline <style> blocks: CSS cannot execute, and
 // hashing every route-dependent style block would cost more than it buys.
 // img/font stay data: (assets are inlined), connect/form stay 'self'
 // (a rosefn app is one origin), and object/base/frame are locked down.
 // A route exporting `headers = { ... }` overrides any of this per route.
-// Mode B (P0 §1) and the edge's no-build case share the external shape:
+// Mode B and the edge's no-build case share the external shape:
 // /client.js plus a tiny inline bootstrap. There the hash covers exactly
 // the bootstrap's bytes and 'self' covers the external modules - still no
 // 'unsafe-inline' anywhere.
@@ -275,7 +275,7 @@ export function buildShell(ssrHtml: string, stateJson: string, client: string | 
   const iconTag = /rel=["']?icon/i.test(mergedHead) ? '' : `\n  ${FAVICON}`;
   const headTags = mergedHead ? `\n  ${mergedHead}` : '';
   const styleTag = styles ? `\n  <style>${styles}</style>` : '';
-  // js=false (a route exporting csr = false, innovation #25): the document
+ // js=false (a route exporting csr = false): the document
   // ends at the container - no state script, no inlined bundle, zero
   // JavaScript. The route's render function still rides in the bundle for
   // client-side navigation and the SPA fallback; only this document is

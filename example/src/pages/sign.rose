@@ -1,7 +1,7 @@
 <script>
   // Server-side store. A real app would read/write a database here; $store
   // is what makes it shared across requests AND across cluster workers
-  // (Phase 2): the write broadcasts to every worker, reads stay local, and
+ //: the write broadcasts to every worker, reads stay local, and
   // the action below and the page state see the same box. A plain
   // module-scope object would live in exactly one worker - signatures
   // would appear and vanish depending on which core answered.

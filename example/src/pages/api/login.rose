@@ -35,7 +35,7 @@
     new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json', ...headers } });
 
   // POST user=ada pass=lovelace -> 200 + Set-Cookie: session=1
-  // ponytail: plaintext passwords, one seeded row - a demo, not a vault. A
+  // Trade-off: plaintext passwords, one seeded row - a demo, not a vault. A
   // real login hashes with node:crypto scrypt and compares in constant time;
   // everything around it (this file, the cookie, the middleware) stays.
   export async function POST(req) {

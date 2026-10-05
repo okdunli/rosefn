@@ -10,7 +10,6 @@
   // streaming path - the demo's dynamic INTERACTIVE page, so the streamed
   // document (shell first, state script + bundle after) has a home now
   // that content routes like /blog/:id compile to zero-JS by themselves
-  // (innovation #29).
   async function reload() {
     await refresh();
   }

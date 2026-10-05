@@ -1,8 +1,8 @@
 <script>
-  // ISR (innovation #24): the build bakes this page once, and the preview
+ // ISR: the build bakes this page once, and the preview
   // server keeps it fresh - serving the baked file for up to `revalidate`
   // seconds, then answering the next request STALE (instant, from disk)
-  // while a background pass re-renders and swaps the file. Next.js calls
+  // while a background pass re-renders and swaps the file. The usual name is
   // this ISR; here it is one exported constant and zero configuration.
   export const revalidate = 2;   // seconds
 

@@ -14,7 +14,7 @@
   function addItem() { $setState('items', [...items(), 'Item ' + items().length + 1]); }
   function toggleFeatures() { $setState('showFeatures', !showFeatures()); }
   // Zero-request form: no POST, no fetch - the action runs client-side and
-  // fine-grained reactivity repaints only what changed. (htmx-style stacks
+  // fine-grained reactivity repaints only what changed. (HTML-over-the-wire stacks
   // pay one server round-trip per submit.)
   function signGuestbook(e) {
     e.preventDefault();

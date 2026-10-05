@@ -1,7 +1,7 @@
 <script>
   // The thorn: a page that ships zero JavaScript can also ship a
-  // zero-script policy. `csr = false` (innovation #25) keeps the bundle
-  // and the bootstrap out of this document, and `headers` (innovation #26)
+ // zero-script policy. `csr = false` keeps the bundle
+ // and the bootstrap out of this document, and `headers`
   // replaces the framework defaults with a CSP that says exactly that -
   // stricter than any other page in the framework, and it still renders
   // perfectly, because there is nothing left to allow.

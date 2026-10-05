@@ -16,7 +16,7 @@ type Encoding = 'br' | 'gzip' | 'deflate';
 
 function pickEncoding(req: any): Encoding | null {
   const ae: string = req.headers['accept-encoding'] || '';
-  // ponytail: substring match, no q-value parsing - every browser that sends
+  // Trade-off: substring match, no q-value parsing - every browser that sends
   // br also accepts gzip, and br > gzip > deflate is the quality order.
   if (ae.includes('br')) return 'br';
   if (ae.includes('gzip')) return 'gzip';
@@ -24,14 +24,24 @@ function pickEncoding(req: any): Encoding | null {
   return null;
 }
 
+// Brotli's default quality (11) spends ~108 ms of CPU on a 32 KB document;
+// quality 5 does the same document in ~2.4 ms for 9% more bytes (measured,
+// Node 22). A dynamic response is compressed per request and nobody caches
+// it, so that CPU is pure latency: 45x slower to save 8% of bytes that are
+// already 170x smaller than the same page built the usual way. The static path keeps
+// quality 11 - see the file cache below, where those bytes are paid for once
+// and then served from memory, and they ARE the headline number.
+// Trade-off: one constant, shared by the buffered and the streaming paths.
+const brotliFast = { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 };
+
 function compress(enc: Encoding, data: string | Buffer): Buffer {
-  if (enc === 'br') return zlib.brotliCompressSync(data);
+  if (enc === 'br') return zlib.brotliCompressSync(data, { params: brotliFast });
   if (enc === 'gzip') return zlib.gzipSync(data);
   return zlib.deflateSync(data);
 }
 
 function createCompressor(enc: Encoding): zlib.Gzip | zlib.Deflate | zlib.BrotliCompress {
-  if (enc === 'br') return zlib.createBrotliCompress();
+  if (enc === 'br') return zlib.createBrotliCompress({ params: brotliFast });
   if (enc === 'gzip') return zlib.createGzip();
   return zlib.createDeflate();
 }
@@ -45,7 +55,7 @@ function sendHtml(req: any, res: any, status: number, html: string, extraHeaders
   // A weak ETag over the rendered bytes: revalidation answers a bodiless
   // 304 for dynamic renders too (a middleware makes every page route
   // dynamic, and its repeat visits must not re-transfer the document).
-  // ponytail: FNV-1a in hex - no crypto import for a cache validator.
+  // Trade-off: FNV-1a in hex - no crypto import for a cache validator.
   let hash = 0x811c9dc5;
   for (let i = 0; i < html.length; i++) {
     hash ^= html.charCodeAt(i);
@@ -83,7 +93,7 @@ function writeWebHeaders(web: any, res: any): void {
 
 // A middleware's short-circuit: a Web-standard Response (status, headers,
 // body) written straight to the Node response - a redirect, an auth wall,
-// a rewrite. ponytail: uncompressed, like every framework's middleware
+// a rewrite. trade-off: uncompressed, like every framework's middleware
 // response (they are tiny: a 302 has no body at all).
 async function sendWebResponse(web: any, res: any): Promise<void> {
   writeWebHeaders(web, res);
@@ -92,15 +102,15 @@ async function sendWebResponse(web: any, res: any): Promise<void> {
 }
 
 // Static files: raw + both compressed forms cached per mtime (dev rebuilds
-// change mtime; preview never does). ponytail: unbounded map - fine for a
+// change mtime; preview never does). trade-off: unbounded map - fine for a
 // dev/preview server's handful of files; swap for an LRU if it ever isn't.
 const fileCache = new Map<string, { mtimeMs: number; raw: Buffer; br: Buffer; gzip: Buffer; etag: string }>();
 
-// Phase 0 (the "the framework is real" gate): the CLI builds ANY project,
+// (the "the framework is real" gate): the CLI builds ANY project,
 // not just this repo's demo. `rosefn build [dir]` - the dir defaults to the
 // cwd, so inside a project a bare `rosefn build` is all there is. The
 // project's rosefn.config.js is read from that same dir (plugins).
-// ponytail: the output still lands in ./dist of the directory the command
+// Trade-off: the output still lands in ./dist of the directory the command
 // runs from (the repo's Go binary embeds <repo>/dist, and a project's own
 // dist belongs beside the command you ran) - `cd` into the project, or pass
 // its path and collect dist/ from here.
@@ -135,7 +145,7 @@ async function loadServer(): Promise<any> {
 }
 
 async function build(): Promise<void> {
-  // P0 §1: the build reports the bundle mode ('inline' | 'split') so the
+ // The build reports the bundle mode ('inline' | 'split') so the
   // shell follows it for every document, header and streaming tag it emits
   const { routes, bundle } = await buildProject(SRC_DIR, OUT_DIR);
   // The previous build's prerendered output must not survive: a route that
@@ -153,7 +163,7 @@ async function build(): Promise<void> {
   // cannot change its status). Runtime-only breakage is not in here - it
   // degrades to the error page body under a 200, documented in the README.
   await fs.promises.writeFile(path.join(OUT_DIR, 'broken.json'), JSON.stringify(skipped));
-  // Per-route response headers (innovation #26) for the Go binary, which
+ // Per-route response headers for the Go binary, which
   // has no compiler: it reads this file and merges the entries over its
   // own responses. `default` carries the strict CSP (hashed over the exact
   // inlined bundle + bootstrap bytes - the Go binary cannot recompute it,
@@ -163,7 +173,7 @@ async function build(): Promise<void> {
     default: securityHeaders(getClientSource()),
     routes: ssrModule.routeHeaders ?? [],
   }));
-  // Innovation #28: precompressed brotli siblings (dist/<file>.br) for the
+ // Precompressed brotli siblings (dist/<file>.br) for the
   // Go single binary. The binary embeds dist/ verbatim, so they ride along
   // and are served with zero per-request compression CPU - and the bytes
   // are exactly what the Node server compresses per file in memory, so
@@ -172,7 +182,7 @@ async function build(): Promise<void> {
 }
 
 /**
- * Write dist/<file>.br next to every compressible text file. ponytail:
+ * Write dist/<file>.br next to every compressible text file. trade-off:
  * extension allowlist + zlib's default quality - a 30 KB document
  * compresses in ~10 ms at build time, once, forever.
  */
@@ -194,7 +204,7 @@ async function writeBrotli(dir: string): Promise<void> {
  * baked API bodies, with their brotli siblings. Everything else in dist/
  * (the bundles, styles) was just rewritten by buildProject.
  *
- * ponytail: Windows hands out transient EPERM/EBUSY when an antivirus or
+ * Trade-off: Windows hands out transient EPERM/EBUSY when an antivirus or
  * the search indexer holds a just-written file, so a couple of retries
  * per file - a build that fails because a scanner blinked is the worst
  * kind of flake.
@@ -226,7 +236,7 @@ async function clearPrerendered(dir: string): Promise<void> {
  * enumerated and prerendered per value; params without `params` keep
  * rendering on demand. A route exporting `revalidate = N` is baked like
  * any other and then kept fresh by the preview server's stale-while-
- * revalidate pass (ISR, innovation #24).
+ * revalidate pass (ISR).
  */
 async function prerender(routes: RouteInfo[]): Promise<string[]> {
   const ssrModule = await loadServer();
@@ -254,7 +264,7 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
     }
     const routeDir = routePath === '/' ? OUT_DIR : path.join(OUT_DIR, routePath.slice(1));
     await fs.promises.mkdir(routeDir, { recursive: true });
-    // csr = false routes bake a JS-free document (innovation #25): the file
+ // csr = false routes bake a JS-free document: the file
     // on disk carries no bundle and no state script, so a visitor who lands
     // on it runs zero JavaScript.
     await fs.promises.writeFile(path.join(routeDir, 'index.html'), getHtmlShell(page.html, page.state, page.head, page.csr !== false));
@@ -343,7 +353,7 @@ function enumerateParams(pattern: string, names: string[], raw: Record<string, u
 // pages, not files).
 const ASSET_EXT = new Set(['.js', '.css', '.json', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.webp', '.woff', '.woff2', '.txt', '.xml']);
 
-// Response headers for a page document (innovation #26): the strict CSP
+// Response headers for a page document: the strict CSP
 // (hashed over the exact inlined bundle + bootstrap bytes, so no
 // 'unsafe-inline' is needed for scripts) plus the route's own exported
 // headers, which win. Keys are lower-cased first: HTTP header names are
@@ -358,13 +368,13 @@ function pageHeaders(ssrModule: any, pathname: string): Record<string, string> {
   return headers;
 }
 
-// ISR background pass (innovation #24): re-render a stale baked route and
+// ISR background pass: re-render a stale baked route and
 // swap its file, while the triggering request was already answered from
 // disk (stale-while-revalidate). One pass per file at a time - a burst of
 // requests during staleness must not stampede - and the cached raw +
 // compressed bytes are dropped so the next request reads the new file. A
 // failed revalidation keeps the last good file (the same resilience as the
-// build). ponytail: no queue, no metrics - one render per stale window;
+// build). trade-off: no queue, no metrics - one render per stale window;
 // and the swap is a plain writeFile, not tmp+rename - a request landing in
 // the microsecond of the write could read a partial file, the same race any
 // static-file rewrite has; add the rename dance when it ever matters.
@@ -377,7 +387,7 @@ function revalidateInBackground(routePath: string, filePath: string): void {
       const ssrModule = await loadServer();
       const page = await ssrModule.renderPage(routePath);
       if (page.status === 200) {
-        // the swap must honor the route's csr decision (innovation #29): a
+ // the swap must honor the route's csr decision: a
         // zero-JS route revalidated here stays zero-JS, or the first stale
         // window would silently inline the bundle into its baked file
         await fs.promises.writeFile(filePath, getHtmlShell(page.html, page.state, page.head, page.csr !== false));
@@ -392,7 +402,7 @@ function revalidateInBackground(routePath: string, filePath: string): void {
   })();
 }
 
-// --- Phase 1: production server posture --------------------------------------
+// --- production server posture --------------------------------------
 //
 // "Can run a real app" is a threshold, not a nice-to-have: a body any
 // anonymous client can make you buffer until you die, a request that stalls
@@ -517,8 +527,8 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
       // answers JSON, never the static shell or an HTML page - an API client
       // must never receive the SPA fallback. The handler gets a Web-standard
       // Request (the same object the edge adapter passes), so handler code is
-      // identical on both servers. ponytail: no compression here - JSON API
-      // bodies are small, and Next.js/Express don't compress them either.
+      // identical on both servers. trade-off: no compression here - JSON API
+      // bodies are small, and there is nothing worth compressing.
       const apiPath = pathnameOf(req.url);
       if (ssrModule.isApi(apiPath)) {
         readBody(req, res, async (body) => {
@@ -583,7 +593,7 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
         filePath = path.join(filePath, 'index.html');
       }
 
-      // Build-time precompression siblings (innovation #28: dist/<file>.br,
+ // Build-time precompression siblings (dist/<file>.br,
       // read by the Go binary) are internal artifacts. A direct request for
       // one answers the real file - never raw brotli bytes mislabeled as the
       // page. A real asset that merely ends .br/.gz (no base file) is served
@@ -604,7 +614,7 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
       const isDynamic = !isAsset && (ssrModule.dynamicRoutes as string[] | undefined)?.includes(pathnameOf(req.url));
       if (!isDynamic && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
         const st = fs.statSync(filePath);
-        // ISR (innovation #24): a route exporting `revalidate = N` keeps its
+ // ISR: a route exporting `revalidate = N` keeps its
         // baked file for N seconds. Once stale, THIS request is still served
         // from disk - stale-while-revalidate: instant TTFB, never a wait,
         // never an error page - while a background pass re-renders and swaps
@@ -649,7 +659,7 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
         res.setHeader('Cache-Control', rev ? `public, max-age=0, stale-while-revalidate=${rev.seconds}` : 'public, max-age=3600');
         res.setHeader('ETag', entry.etag);
         res.setHeader('Vary', 'Accept-Encoding');
-        // Per-route response headers (innovation #26): a prerendered
+ // Per-route response headers: a prerendered
         // document carries the same policy the live render would send -
         // the strict CSP plus the route's own exported headers.
         if (ext === '.html') {
@@ -684,7 +694,7 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
       // (headers cannot be unsent). csr = false routes also buffer: a
       // streamed no-JS document would carry the shell's default <title>,
       // because the route head is applied client-side at boot and there is
-      // no client (innovation #25).
+ // no client .
       let broken = new Set<string>();
       try {
         broken = new Set(JSON.parse(fs.readFileSync(path.join(dir, 'broken.json'), 'utf-8')));
@@ -702,7 +712,27 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
           res.setHeader('Content-Encoding', enc);
           const compressor = createCompressor(enc);
           compressor.pipe(res);
-          write = (chunk) => compressor.write(chunk);
+          // The shell must reach the socket NOW. Without a flush zlib emits
+          // nothing until end(), so the "streamed" route's first byte would
+          // arrive after the whole render - measured: 0 bytes before end(),
+          // which made /sign's TTFB its slowest $data instead of ~0.
+          // Z_FULL_FLUSH, not Z_SYNC_FLUSH: on Node 22 a sync flush poisons
+          // the brotli stream (every later write ends in
+          // ERR_BROTLI_COMPRESSION_FAILED - reproduced in isolation), while a
+          // full flush emits the shell at ~10 ms and completes cleanly. The
+          // cost is one empty block boundary, which quality 5 barely notices.
+          let flushed = false;
+          write = (chunk) => {
+            compressor.write(chunk);
+            if (!flushed) {
+              flushed = true;
+              compressor.flush(zlib.constants.Z_FULL_FLUSH);
+            }
+          };
+          // pipe() forwards data but not errors, and an unhandled 'error'
+          // event kills the worker. A compressor fault must cost one socket,
+          // not the process: destroy it and let the client retry.
+          compressor.on('error', () => res.destroy());
           done = () => compressor.end();
         } else {
           write = (chunk) => res.write(chunk);
@@ -713,7 +743,7 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
         return;
       }
       // buffered: POST actions, unmatched routes (404), known-broken routes
-      // (500), and csr = false routes (innovation #25: a no-JS document must
+ // (500), and csr = false routes (a no-JS document must
       // not stream - the route's <head> is only known after the render, and
       // there is no client to apply it at boot)
       const page = await ssrModule.renderPage(safe2);
@@ -783,7 +813,7 @@ async function preview(): Promise<void> {
   await build();
   const http = await import('http');
   // isr=true: routes exporting `revalidate = N` are served stale-then-swapped
-  // from disk (innovation #24). Dev passes nothing (it rebuilds on change).
+ // from disk . Dev passes nothing (it rebuilds on change).
   const server = http.createServer(serveStatic(OUT_DIR, true));
 
   server.listen(PORT, () => {
@@ -792,16 +822,16 @@ async function preview(): Promise<void> {
 }
 
 /**
- * Phase 1: `rosefn serve` runs what `build` produced - no rebuild, no
+ * `rosefn serve` runs what `build` produced - no rebuild, no
  * watcher, production semantics (a preview that re-rendered on the fly
  * could serve a half-written file). Multi-core through the stdlib cluster:
  * the primary supervises and serves no traffic, the workers serve; every
  * request is logged; SIGTERM drains in-flight work and exits.
  *
- * ponytail boundaries, stated plainly:
+ * Boundaries, stated plainly:
  *  - each worker is its own process with its own dist/server.js module.
  *    Module-scope state is therefore per-worker, which is what $store()
- *    (Phase 2) fixes: writes broadcast through the primary, reads stay
+ * fixes: writes broadcast through the primary, reads stay
  *    local-synchronous. ISR revalidation may run in more than one worker
  *    for one route: the guard is per-worker and the cost is one duplicate
  *    render.
@@ -830,7 +860,7 @@ async function serve(): Promise<void> {
   const PORT = Number(process.env.PORT) || 3000;
   if (cluster.isPrimary) {
     for (let i = 0; i < workers; i++) cluster.fork();
-    // Phase 2: the store relay. A worker broadcasts every $store write here;
+ // The store relay. A worker broadcasts every $store write here;
     // the primary forwards each patch to every OTHER worker (the writer
     // already holds the value locally - the patch is for its siblings), so
     // shared state survives the cluster instead of living in one worker.

@@ -11,7 +11,7 @@ type SignalEntry = { value: unknown; subs: Set<Subscriber> };
 
 let currentEffect: (() => void) | null = null;
 
-// ponytail: global signal map, shared across all inlined modules
+// Trade-off: global signal map, shared across all inlined modules
 let signalMap: Map<string, SignalEntry> =
   (globalThis as any).__rosefn_signalMap ?? new Map();
 (globalThis as any).__rosefn_signalMap = signalMap;
@@ -339,7 +339,7 @@ export function resetEffects(): void {
 
 // === Server Data Fetching ($data) ===
 
-// ponytail: cache keyed by function source, cleared per request/navigation.
+// Trade-off: cache keyed by function source, cleared per request/navigation.
 // Upgrade path: explicit keys if two $data calls share identical source.
 let dataCache = new Map<string, Promise<unknown>>();
 
@@ -393,7 +393,7 @@ export function resetRequestContext(): void {
  * the captured disposers so the NEXT resetEffects() disposes them (a prefetch
  * render's cleanups firing early would dispose a route that was never
  * painted, and dropping them would leak the painted route's timers).
- * Concurrent prefetches are queued by the caller (ponytail: hover prefetches
+ * Concurrent prefetches are queued by the caller (trade-off: hover prefetches
  * are rare and cheap).
  */
 export async function isolateStateAsync<T>(
@@ -451,7 +451,7 @@ export function resumeState(json: string): void {
 // === Client-side route refresh ===
 // The client entry registers the re-render here at boot; components import
 // refresh() like state() and call it from any handler - the client half of
-// router.refresh() (Next.js) / invalidateAll() (SvelteKit). No hook (server
+// a router refresh / a full invalidation. No hook (server
 // render, or before the entry loads) -> a resolved no-op.
 let refreshHook: (() => Promise<void>) | null = null;
 
@@ -503,12 +503,12 @@ export function adoptCleanups(fns: Iterable<Cleanup>): void {
   for (const fn of fns) cleanups.add(fn);
 }
 
-// === i18n: localized routes (innovation #27) ===
+// === i18n: localized routes ===
 // Every JSON file in src/locales/ is a language: { "key": "string" }. The
 // bundle entries call setLocales() once at boot - server, edge and client
 // alike - so $t resolves on both sides with no per-request plumbing, and a
 // client-side switch between locales renders from the bundle: zero requests.
-// ponytail: flat keys + {name} interpolation only - no plurals, no ICU.
+// Trade-off: flat keys + {name} interpolation only - no plurals, no ICU.
 // A missing key renders the key itself: loud in dev, greppable in prod.
 let LOCALES: Record<string, Record<string, string>> = {};
 let DEFAULT_LOCALE = 'en';
@@ -557,7 +557,7 @@ export function $t(key: string, vars?: Record<string, string>): string {
   return s;
 }
 
-// --- Phase 2: the shared server store ----------------------------------------
+// --- the shared server store ----------------------------------------
 //
 // Module scope (`export const store = {...}`) is per-PROCESS: under the
 // cluster every worker holds its own copy, so a guestbook signed on worker
@@ -568,7 +568,7 @@ export function $t(key: string, vars?: Record<string, string>): string {
 // full state locally and a patch arrives asynchronously (milliseconds on one
 // machine, and the transport seam is where a redis bus would plug in).
 //
-// ponytail: one driver (memory + cluster IPC) covers every single-machine
+// Trade-off: one driver (memory + cluster IPC) covers every single-machine
 // deploy, which is exactly what `rosefn serve` gives you. A cross-machine
 // driver is the documented next step - it needs a client library, and
 // setStoreTransport() below is the seam it plugs into.
@@ -622,7 +622,7 @@ export function $store<T>(name: string, initial: T): { get(): T; set(v: T): void
   };
 }
 
-// --- Phase 1: cookie helpers -------------------------------------------------
+// --- cookie helpers -------------------------------------------------
 //
 // Sessions are the first thing every real app needs and the easiest thing to
 // get subtly wrong (a missing HttpOnly is an XSS-readable session; a missing

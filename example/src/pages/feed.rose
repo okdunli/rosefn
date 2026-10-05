@@ -1,0 +1,35 @@
+<script>
+  // The dynamic half, measured: a page whose rows come from a database on
+  // EVERY request. Nothing here is baked at build time - getContext() is
+  // what makes a route dynamic by construction (never prerendered, never
+  // answered from a file on disk), so this document is rendered per
+  // request, on demand, on the Node server and the edge adapter alike.
+  //
+  // Where the rows come from is the interesting part. A page's $data body
+  // SHIPS to the browser (it re-runs on client-side navigation), so the
+  // database read cannot live in this file - it would land in the client
+  // bundle. It lives in pages/_middleware.rose instead, the one module the
+  // compiler never sends to the browser, and lands in the request context.
+  //
+  // So: on the server this $data reads the context (zero extra work, the
+  // rows are already in the first response). On a client-side navigation
+  // the context is empty, and it fetches the same rows from /api/posts -
+  // one request, the honest cost of fresh server data after a SPA
+  // navigation (a router round-trip pays an extra payload fetch for the same thing).
+  let viewer = $data(async () => getContext().user ?? null);
+  let posts = $data(async () => getContext().posts ?? (await (await fetch('/api/posts')).json()).posts);
+</script>
+
+<head>
+  <title>Feed - Rosefn</title>
+  <meta name="description" content="A dynamic page that reads the database on every request.">
+</head>
+
+<h1>Feed</h1>
+<p>{viewer() ? 'Signed in as ' + viewer().name : 'Reading as a guest'}</p>
+<ul>
+  {#each posts() as post}
+  <li>#{post.id} {post.title} — {post.author}</li>
+  {/each}
+</ul>
+<p><a href="/api/posts">The same rows as JSON</a></p>

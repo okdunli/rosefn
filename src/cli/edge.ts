@@ -34,7 +34,7 @@ type ServerModule = {
   runMiddleware(rawReq: any, form?: FormData): Promise<Response | null>;
   /** routes whose component reads getContext(): never prerendered, always live */
   dynamicRoutes: string[];
-  /** per-route response headers (innovation #26), [] when no route exports any */
+ /** per-route response headers [] when no route exports any */
   routeHeaders: Array<{ pattern: string; headers: Record<string, string> }>;
   /** the route's own exported headers for a pathname, or null */
   headersFor(pathname: string): Record<string, string> | null;
@@ -66,7 +66,7 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
     broken = new Set(); // no manifest: nothing known-broken
   }
 
-  // Response headers for a page document (innovation #26): the strict CSP
+ // Response headers for a page document: the strict CSP
   // hashed over the exact inlined bytes (the shell code is shared with the
   // Node server, so the hash matches there too) plus the route's own
   // exported headers, which win. Keys are lower-cased first: HTTP header
@@ -101,7 +101,7 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
     // POST: progressive-enhancement form - run the route's server action with
     // the submitted FormData and re-render the page (works without JS).
     const form = request.method === 'POST' ? await request.formData() : undefined;
-    // csr = false routes (innovation #25) buffer too: a streamed no-JS
+ // csr = false routes buffer too: a streamed no-JS
     // document would carry the shell's default <title> - the route head is
     // applied client-side at boot, and there is no client.
     if (!form && !broken.has(pathname) && mod.canStream(pathname) && !mod.isNoJs(pathname)) {
@@ -128,7 +128,7 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
     // below sees its context.
     const page = await mod.renderPage(pathname, form);
     // js = page.csr !== false: a csr = false route ships no bundle, no state
-    // script - the document is HTML + CSS only (innovation #25)
+ // script - the document is HTML + CSS only
     const html = buildShell(page.html, page.state, client, page.head, styles, page.csr !== false);
     return new Response(html, {
       status: page.status ?? 200,

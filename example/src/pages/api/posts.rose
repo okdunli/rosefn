@@ -1,7 +1,7 @@
 <script>
   import { $cookies } from './runtime.js';
 
-  // The blog's backstage skeleton (Phase 2): a real database behind the API.
+ // The blog's backstage skeleton: a real database behind the API.
   // node:sqlite ships inside Node 22+ - zero dependencies, zero native
   // modules, zero build steps. A Postgres deploy swaps this block for a
   // pg.Pool (same shape: prepare/run/all), nothing else in the file moves.
@@ -13,7 +13,7 @@
   //      this route (Node caches the module: one microtask per call).
   //   2. no side effect at build time: `rosefn build` imports the server
   //      bundle (route headers, prerender) and must not create a database.
-  // ponytail: one connection per worker process - that IS the pool; a real
+  // Trade-off: one connection per worker process - that IS the pool; a real
   // deploy replaces it with pg.Pool right here. The file is relative to the
   // working directory you started the server from (your project root), never
   // inside dist/: dist is a build artifact and the Go single binary embeds
