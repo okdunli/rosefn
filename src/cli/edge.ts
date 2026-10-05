@@ -32,6 +32,15 @@ type ServerModule = {
   middleware: ((request: Request) => Promise<Response | void | null>) | null;
   /** run the middleware once per request; returns its short-circuit Response or null */
   runMiddleware(rawReq: any, form?: FormData): Promise<Response | null>;
+ /** The runtime plugin hooks, and whether the project declares any */
+  runRequestHooks(ctx: {
+    request: Request; url: URL; method: string; pathname: string; state: Record<string, unknown>;
+  }): Promise<Response | null>;
+  runResponseHooks(ctx: {
+    request: Request; url: URL; method: string; pathname: string; state: Record<string, unknown>;
+  }, res: Response): Promise<Response>;
+  hasRequestHooks: boolean;
+  hasResponseHooks: boolean;
   /** routes whose component reads getContext(): never prerendered, always live */
   dynamicRoutes: string[];
  /** per-route response headers [] when no route exports any */
@@ -84,19 +93,31 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
 
   return async function handle(request: Request): Promise<Response> {
     const { pathname } = new URL(request.url);
+ // Runtime hooks: onRequest runs before middleware and routing
+    // and may short-circuit with its own Response - an auth wall, a rate
+    // limit. The context is built only when the project declares a hook, so
+    // a hook-less deployment pays nothing.
+    const hookCtx = mod.hasRequestHooks || mod.hasResponseHooks
+      ? { request, url: new URL(request.url), method: request.method, pathname, state: {} as Record<string, unknown> }
+      : null;
+    if (hookCtx) {
+      const short = await mod.runRequestHooks(hookCtx);
+      if (short) return mod.runResponseHooks(hookCtx, short);
+    }
     // Middleware (pages/_middleware.rose) runs exactly once per request,
     // before anything else: a returned Response short-circuits the whole
     // request (a redirect, an auth wall), and its getContext() bag seeds the
     // render that follows.
     if (mod.middleware) {
       const mw = await mod.runMiddleware(request);
-      if (mw) return mw;
+      if (mw) return hookCtx ? mod.runResponseHooks(hookCtx, mw) : mw;
     }
     // API routes (pages/api/*.rose): the /api namespace answers JSON, never
     // the HTML shell - dispatch the method handler with the Web-standard
     // Request this runtime already provides.
     if (mod.isApi(pathname)) {
-      return mod.handleApi(request.method, pathname, request);
+      const apiRes = await mod.handleApi(request.method, pathname, request);
+      return hookCtx ? mod.runResponseHooks(hookCtx, apiRes) : apiRes;
     }
     // POST: progressive-enhancement form - run the route's server action with
     // the submitted FormData and re-render the page (works without JS).
@@ -105,7 +126,16 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
     // document would carry the shell's default <title> - the route head is
     // applied client-side at boot, and there is no client.
     if (!form && !broken.has(pathname) && mod.canStream(pathname) && !mod.isNoJs(pathname)) {
-      // streaming GET: one chunked Response, still exactly one request
+      // streaming GET: one chunked Response, still exactly one request.
+ // onResponse runs before the stream is created, while the
+      // status and headers can still change; a replacement body is ignored,
+      // because the stream produces the body - the honest limit of a
+      // streamed response.
+      const streamed = new Response(null, {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8', ...pageHeaders(pathname) }
+      });
+      const head = hookCtx ? await mod.runResponseHooks(hookCtx, streamed) : streamed;
       const encoder = new TextEncoder();
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
@@ -118,10 +148,7 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
           controller.close();
         }
       });
-      return new Response(stream, {
-        status: 200,
-        headers: { 'content-type': 'text/html; charset=utf-8', ...pageHeaders(pathname) }
-      });
+      return new Response(stream, { status: head.status, headers: head.headers });
     }
     // buffered: POST actions, unmatched routes (404), known-broken routes (500).
     // The middleware already ran at the top of this handler, so the render
@@ -130,9 +157,10 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
     // js = page.csr !== false: a csr = false route ships no bundle, no state
  // script - the document is HTML + CSS only
     const html = buildShell(page.html, page.state, client, page.head, styles, page.csr !== false);
-    return new Response(html, {
+    const buffered = new Response(html, {
       status: page.status ?? 200,
       headers: { 'content-type': 'text/html; charset=utf-8', ...pageHeaders(pathname) }
     });
+    return hookCtx ? mod.runResponseHooks(hookCtx, buffered) : buffered;
   };
 }

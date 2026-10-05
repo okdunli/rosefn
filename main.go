@@ -72,9 +72,15 @@ func readDist(name string) ([]byte, bool) {
 	return b, true
 }
 
+// gzipBytes compresses at level 9, not the default 6: the result is cached
+// forever (see gzipCache), so the extra CPU is paid once per file while every
+// gzip client - the ones that do not send Accept-Encoding: br - gets ~200
+// fewer bytes on the wire. Brotli stays the primary path (the .br sibling
+// written by `rosefn build`); this is the fallback, and it costs nothing
+// per request to make it smaller.
 func gzipBytes(body []byte) []byte {
 	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
+	gz, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	_, _ = gz.Write(body)
 	_ = gz.Close()
 	return buf.Bytes()

@@ -7,7 +7,7 @@ import * as path from 'path';
 import * as zlib from 'zlib';
 import { createRequire } from 'module';
 import { pathToFileURL, fileURLToPath } from 'url';
-import { buildProject, scanRoseFiles, scriptOf, type RouteInfo } from '../compiler/index.js';
+import { buildProject, scanRoseFiles, scriptOf, loadPlugins, type RouteInfo } from '../compiler/index.js';
 import { getHtmlShell, getClientSource, shellOpen, clientScriptTag, securityHeaders, setBundleMode } from './shell.js';
 // Type-only: erased by esbuild/tsx, so the published CLI stays a ~100 KB
 // bundle with no TypeScript dependency. `rosefn check` loads the PROJECT's
@@ -106,6 +106,26 @@ async function sendWebResponse(web: any, res: any): Promise<void> {
   res.end(Buffer.from(await web.arrayBuffer()));
 }
 
+/**
+ * Send a rendered page document - through onResponse first . The
+ * hook sees the status, headers and body exactly as they will go on the
+ * wire and may replace them, so the ETag inside sendHtml is then computed
+ * over the bytes actually sent. One helper for the POST-action path and the
+ * buffered GET path: same hook, same order, no drift between them.
+ */
+async function sendPage(req: any, res: any, ssrModule: any, hookCtx: any, page: any, routePath: string): Promise<void> {
+  let status = page.status ?? 200;
+  let html = getHtmlShell(page.html, page.state, page.head, page.csr !== false);
+  let headers: Record<string, any> = pageHeaders(ssrModule, routePath);
+  if (hookCtx) {
+    const out = await ssrModule.runResponseHooks(hookCtx, new Response(html, { status, headers }));
+    status = out.status;
+    headers = webHeadersToNode(out);
+    html = await out.text();
+  }
+  sendHtml(req, res, status, html, headers);
+}
+
 // Static files: raw + both compressed forms cached per mtime (dev rebuilds
 // change mtime; preview never does). trade-off: unbounded map - fine for a
 // dev/preview server's handful of files; swap for an LRU if it ever isn't.
@@ -120,6 +140,10 @@ const fileCache = new Map<string, { mtimeMs: number; raw: Buffer; br: Buffer; gz
 // dist belongs beside the command you ran) - `cd` into the project, or pass
 // its path and collect dist/ from here.
 const SRC_DIR = process.argv[3] ? path.resolve(process.argv[3]) : process.cwd();
+// The deploy dir is ./dist of the directory the command ran from - a
+// documented contract (test-cli.mjs asserts it): building a project that is
+// not the cwd still drops its output beside the caller, the way every
+// static-site generator does.
 const OUT_DIR = path.join(process.cwd(), 'dist');
 // PORT env override (default 3000): lets a preview server run beside a dev
 // server on the same machine - the e2e ISR test does exactly that.
@@ -496,6 +520,49 @@ function withAccessLog(handler: (req: any, res: any) => void, tag?: string): (re
   };
 }
 
+/**
+ * The context a runtime plugin hook receives. Node's
+ * IncomingMessage is not a Web Request and a hook must not care which server
+ * it runs on, so the CLI builds the same object the edge adapter already
+ * has. Built only when the project declares a runtime hook (the server
+ * bundle exports the flags) - the hot path never pays for the feature.
+ *
+ * The body is deliberately not attached: the servers read it lazily, and
+ * buffering it for every request would cost the fast path. A hook that needs
+ * the submitted form uses pages/_middleware.rose, which already rides with
+ * the parsed FormData.
+ */
+async function hookContext(req: any): Promise<{
+  request: Request;
+  url: URL;
+  method: string;
+  pathname: string;
+  state: Record<string, unknown>;
+}> {
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(req.headers)) {
+    if (v !== undefined) headers[k] = Array.isArray(v) ? v.join(', ') : String(v);
+  }
+  const request = new Request(`http://${req.headers.host || 'localhost'}${req.url}`, {
+    method: req.method || 'GET',
+    headers,
+  });
+  const url = new URL(request.url);
+  return { request, url, method: request.method, pathname: url.pathname, state: {} };
+}
+
+/** A Web Response's headers as a Node header record, set-cookie kept whole. */
+function webHeadersToNode(web: any): Record<string, any> {
+  const out: Record<string, any> = {};
+  const cookies = web.headers.getSetCookie?.() ?? [];
+  web.headers.forEach((v: string, k: string) => {
+    if (cookies.length && k.toLowerCase() === 'set-cookie') return;
+    out[k] = v;
+  });
+  if (cookies.length) out['set-cookie'] = cookies;
+  return out;
+}
+
 function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
   return (req, res) => {
     // The origin guard runs before everything else - middleware, api
@@ -512,6 +579,22 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
     // SSR), so load it once up front: the import is cached until dist/server.js
     // changes on disk, and the promise makes the static path wait for it.
     loadServer().then(async (ssrModule: any) => {
+ // Runtime hooks: onRequest runs after the origin guard and
+      // BEFORE middleware and routing, and may short-circuit the request
+      // with its own Response (an auth wall, a rate limit, a maintenance
+      // page). The context is built only when a hook exists.
+      const hookCtx = ssrModule.hasRequestHooks === true || ssrModule.hasResponseHooks === true
+        ? await hookContext(req)
+        : null;
+      if (hookCtx) {
+        const short = await ssrModule.runRequestHooks(hookCtx);
+        if (short) {
+          // the short-circuit rides through onResponse like every other
+          // response, so a header-adding hook sees it too
+          await sendWebResponse(await ssrModule.runResponseHooks(hookCtx, short), res);
+          return;
+        }
+      }
       // Middleware (pages/_middleware.rose) runs exactly once per request,
       // before anything else: a returned Response short-circuits the whole
       // request (a redirect, an auth wall), and its getContext() bag seeds
@@ -524,7 +607,7 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
       if (!isPagePost && ssrModule.middleware) {
         const mw = await ssrModule.runMiddleware(req);
         if (mw) {
-          await sendWebResponse(mw, res);
+          await sendWebResponse(hookCtx ? await ssrModule.runResponseHooks(hookCtx, mw) : mw, res);
           return;
         }
       }
@@ -547,7 +630,8 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
               headers,
               body: body.length > 0 ? body : undefined,
             });
-            const apiRes = await ssrModule.handleApi(req.method || 'GET', apiPath, request);
+            let apiRes = await ssrModule.handleApi(req.method || 'GET', apiPath, request);
+            if (hookCtx) apiRes = await ssrModule.runResponseHooks(hookCtx, apiRes);
             writeWebHeaders(apiRes, res);
             res.statusCode = apiRes.status;
             res.end(Buffer.from(await apiRes.arrayBuffer()));
@@ -575,12 +659,12 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
             if (ssrModule.middleware) {
               const mw = await ssrModule.runMiddleware(req, form);
               if (mw) {
-                await sendWebResponse(mw, res);
+                await sendWebResponse(hookCtx ? await ssrModule.runResponseHooks(hookCtx, mw) : mw, res);
                 return;
               }
             }
             const page = await ssrModule.renderPage(req.url || '/', form);
-            sendHtml(req, res, page.status ?? 200, getHtmlShell(page.html, page.state, page.head, page.csr !== false), pageHeaders(ssrModule, pathnameOf(req.url || '/')));
+            await sendPage(req, res, ssrModule, hookCtx, page, pathnameOf(req.url || '/'));
           } catch {
             res.statusCode = 400;
             res.end('Bad request');
@@ -639,8 +723,14 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
           entry = {
             mtimeMs: st.mtimeMs,
             raw,
+            // A file's compressed forms are computed ONCE and then served
+            // from this cache forever, so both are spent at max quality:
+            // brotli 11 (the default) and gzip level 9 (not the default 6,
+            // which leaves ~50 bytes on the wire for nothing). The dynamic
+            // path below still compresses per request and keeps the cheap
+            // levels - see compress()/createCompressor().
             br: zlib.brotliCompressSync(raw),
-            gzip: zlib.gzipSync(raw),
+            gzip: zlib.gzipSync(raw, { level: 9 }),
             etag: `W/"${st.size}-${st.mtimeMs}"`,
           };
           fileCache.set(filePath, entry);
@@ -654,21 +744,35 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
           '.png': 'image/png',
           '.svg': 'image/svg+xml',
         };
-        res.setHeader('Content-Type', types[ext] || 'application/octet-stream');
         // An ISR route's file is swapped every `revalidate` seconds, so the
         // cache must not outlive the window: revalidate every visit (a
         // bodiless 304 when nothing changed) while allowing the browser to
         // paint the stale document during that revalidation - the same
         // stale-while-revalidate contract the server keeps, told to the
         // browser. Everything else (assets, non-ISR pages) keeps the hour.
-        res.setHeader('Cache-Control', rev ? `public, max-age=0, stale-while-revalidate=${rev.seconds}` : 'public, max-age=3600');
-        res.setHeader('ETag', entry.etag);
-        res.setHeader('Vary', 'Accept-Encoding');
+        const fileHeaders: Record<string, string> = {
+          'Content-Type': types[ext] || 'application/octet-stream',
+          'Cache-Control': rev ? `public, max-age=0, stale-while-revalidate=${rev.seconds}` : 'public, max-age=3600',
+          'ETag': entry.etag,
+          'Vary': 'Accept-Encoding',
+        };
  // Per-route response headers: a prerendered
         // document carries the same policy the live render would send -
         // the strict CSP plus the route's own exported headers.
-        if (ext === '.html') {
-          for (const [k, v] of Object.entries(pageHeaders(ssrModule, pathnameOf(req.url)))) res.setHeader(k, v);
+        if (ext === '.html') Object.assign(fileHeaders, pageHeaders(ssrModule, pathnameOf(req.url)));
+ // OnResponse on the file path too, so a header-adding
+        // plugin sees EVERY response and not just the rendered ones. Bodyless
+        // like the stream - the bytes are the cached file's, which is what
+        // makes this path fast; the status and headers are the hook's to
+        // change. Runs only when the project declares a hook, so the
+        // zero-hook fast path is byte-for-byte what it was.
+        let status = 200;
+        if (hookCtx) {
+          const out = await ssrModule.runResponseHooks(hookCtx, new Response(null, { status, headers: fileHeaders }));
+          status = out.status;
+          for (const [k, v] of Object.entries(webHeadersToNode(out))) res.setHeader(k, v);
+        } else {
+          for (const [k, v] of Object.entries(fileHeaders)) res.setHeader(k, v);
         }
         if (req.headers['if-none-match'] === entry.etag) {
           res.statusCode = 304;
@@ -676,7 +780,7 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
           return;
         }
         const enc = pickEncoding(req);
-        res.statusCode = 200;
+        res.statusCode = status;
         if (enc) {
           res.setHeader('Content-Encoding', enc);
           res.end(enc === 'br' ? entry.br : enc === 'gzip' ? entry.gzip : compress('deflate', entry.raw));
@@ -707,10 +811,23 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
       const safe2 = req.url || '/';
       if (!broken.has(safe2) && ssrModule.canStream(safe2) && !ssrModule.isNoJs(safe2)) {
         const enc = pickEncoding(req);
-        res.statusCode = 200;
+ // onResponse runs BEFORE the first flush, while the status
+        // and headers can still change: the hook is handed a bodyless Response
+        // carrying them, and whatever it returns is applied. Its body is
+        // ignored - the stream produces the body, and a document already on
+        // the wire cannot be replaced - which is the honest limit of a
+        // streamed response, not a missing feature.
+        let status = 200;
+        let headers: Record<string, any> = pageHeaders(ssrModule, pathnameOf(safe2));
+        if (hookCtx) {
+          const out = await ssrModule.runResponseHooks(hookCtx, new Response(null, { status, headers }));
+          status = out.status;
+          headers = webHeadersToNode(out);
+        }
+        res.statusCode = status;
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         res.setHeader('Vary', 'Accept-Encoding');
-        for (const [k, v] of Object.entries(pageHeaders(ssrModule, pathnameOf(safe2)))) res.setHeader(k, v);
+        for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
         let write: (chunk: string) => void;
         let done: () => void;
         if (enc) {
@@ -752,7 +869,7 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
       // not stream - the route's <head> is only known after the render, and
       // there is no client to apply it at boot)
       const page = await ssrModule.renderPage(safe2);
-      sendHtml(req, res, page.status ?? 200, getHtmlShell(page.html, page.state, page.head, page.csr !== false), pageHeaders(ssrModule, pathnameOf(safe2)));
+      await sendPage(req, res, ssrModule, hookCtx, page, pathnameOf(safe2));
     }).catch(() => {
       res.statusCode = 404;
       res.end('Not found');
@@ -893,6 +1010,18 @@ async function serve(): Promise<void> {
   // worker
   // the primary's death is the worker's death: no orphan holding the port
   process.on('disconnect', () => process.exit(0));
+ // OnServe / onShutdown - the worker's lifecycle. A plugin that
+  // owns a resource (a connection pool, a warm cache) opens it here and
+  // closes it in the drain, instead of leaking one pool per deploy. Node
+  // only: an edge runtime owns the lifecycle and has no worker start to
+  // hook. Loaded from the PROJECT's config (SRC_DIR), not from dist/ - the
+  // config is not deployed.
+  let servicePlugins: any[] = [];
+  try {
+    servicePlugins = (await loadPlugins(SRC_DIR)).filter((p) => p && p.onServe);
+  } catch (err) {
+    console.error('Rosefn: rosefn.config.js failed to load for the serve hooks:', err instanceof Error ? err.message : err);
+  }
   const http = await import('node:http');
   const server = http.createServer(withAccessLog(serveStatic(OUT_DIR, true), `w${process.pid}`));
   // A client that stalls mid-request is dropped instead of holding a worker;
@@ -900,8 +1029,29 @@ async function serve(): Promise<void> {
   server.requestTimeout = 30_000;
   server.headersTimeout = 65_000; // must exceed requestTimeout
   server.keepAliveTimeout = 5_000;
-  server.listen(PORT, () => console.log(`🌹 Rosefn worker ${process.pid} listening on http://localhost:${PORT}`));
+  server.listen(PORT, async () => {
+    console.log(`🌹 Rosefn worker ${process.pid} listening on http://localhost:${PORT}`);
+    for (const p of servicePlugins) {
+      try {
+        await p.onServe({ port: PORT, workers });
+      } catch (err) {
+        console.error('Rosefn: plugin', p.name, 'onServe failed:', err instanceof Error ? err.message : err);
+      }
+    }
+  });
   const stop = () => {
+    // onShutdown first: close what onServe opened, then drain. A throwing
+    // hook must not stop the drain - the process still exits on the timer.
+    for (const p of servicePlugins) {
+      if (!p.onShutdown) continue;
+      try {
+        void Promise.resolve(p.onShutdown()).catch((err: unknown) => {
+          console.error('Rosefn: plugin', p.name, 'onShutdown failed:', err instanceof Error ? err.message : err);
+        });
+      } catch (err) {
+        console.error('Rosefn: plugin', p.name, 'onShutdown failed:', err instanceof Error ? err.message : err);
+      }
+    }
     server.close(() => process.exit(0)); // finish what is in flight
     server.closeIdleConnections?.();      // drop the idle keep-alive sockets
     setTimeout(() => process.exit(0), 5000).unref(); // a stuck one must not hold the worker
