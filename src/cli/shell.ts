@@ -128,13 +128,34 @@ document.addEventListener('submit', (e) => {
   e.preventDefault();
   postForm(new FormData(f));
 });
+// Dev seam: the live signal graph, readable as JSON. Two callers, one
+// implementation: the dev server's reload bridge snapshots it before a
+// rebuild-triggered reload so the edit lands on the state the developer had,
+// and a devtools extension reads it the same way. It is the same
+// serializeState the zero-hydration resume already ships, so the only new
+// bytes are the assignment.
+window.__rosefn = { state: () => serializeState() };
 // initial=true: DOM is SSR output, resume state + wire markers (zero hydration).
 // If the document was rendered for a DIFFERENT route (a static-file server's
 // SPA fallback serves index.html for unknown paths), adopt nothing - let the
 // client router render the requested route from scratch.
 const __st = document.getElementById('__rosefn_state');
-const __state = __st ? JSON.parse(__st.textContent || '{}') : {};
-if (__state.__route === window.location.pathname) {
+let __state = __st ? JSON.parse(__st.textContent || '{}') : {};
+// The dev server's reload bridge hands the pre-reload signal graph back inside
+// the next document (window.__rosefn_resume). The resumed values win over the
+// fresh render's, but the ROUTE stays the one the server just rendered - and
+// the route renders client-side from the bundle rather than adopting the SSR
+// DOM, because a resumed list can be longer than the document's rows and
+// adoption could not add them. Absent in every non-dev document.
+const __resumed = window.__rosefn_resume ? JSON.parse(window.__rosefn_resume) : null;
+if (__resumed) {
+  const __route = __state.__route;
+  __state = Object.assign(__state, __resumed);
+  __state.__route = __route;
+}
+if (__resumed) {
+  start(__app, window.location.pathname);
+} else if (__state.__route === window.location.pathname) {
   start(__app, window.location.pathname, true);
 } else {
   start(__app, window.location.pathname);

@@ -613,6 +613,74 @@ function nodeOnlyImports(importStmts: string): string[] {
 }
 
 /**
+ * `on:event={fn}` -> `data-on-event="fn"`, plus the handler registry entries
+ * the client module needs. One pass, two outputs, so the attribute and the
+ * registry can never disagree.
+ *
+ * Brace-aware on purpose: a flat `on:(\w+)=\{([^}]+)\}` stopped at the FIRST
+ * `}`, so an inline arrow (`on:click={() => $setState('n', n() + 1)}`) was
+ * truncated at its own closing brace - which emitted
+ * `Object.assign(handlers, { () => ... })` (a syntax error in the generated
+ * module) and left a stray `}` in the markup. The scan below balances braces
+ * and skips string and template literals, exactly like templateExprSpans.
+ *
+ * A handler that names a server action becomes `data-on-event="$action:name"`
+ * and never reaches the client registry (the body is server-only). An inline
+ * handler gets a synthetic name (`__hN`) and rides the registry as
+ * `__hN: <expr>`: the registry statement is emitted inside render(), after
+ * the state declarations, so the arrow closes over the same `count()`/`setN`
+ * the rest of the page uses.
+ */
+function wireEventBindings(template: string, actionNames: Set<string>): {
+  template: string;
+  bindings: Array<{ event: string; fn: string }>;
+} {
+  const bindings: Array<{ event: string; fn: string }> = [];
+  let out = '';
+  let rest = template;
+  for (;;) {
+    const m = /\bon:(\w+)\s*=\s*\{/.exec(rest);
+    if (!m) {
+      out += rest;
+      break;
+    }
+    out += rest.slice(0, m.index);
+    let i = m.index + m[0].length;
+    let depth = 1;
+    while (i < rest.length) {
+      const ch = rest[i];
+      if (ch === '"' || ch === "'") {
+        i = skipQuoted(rest, i);
+        continue;
+      }
+      if (ch === '`') {
+        i = skipTemplate(rest, i);
+        continue;
+      }
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) break;
+      }
+      i++;
+    }
+    const expr = rest.slice(m.index + m[0].length, i).trim();
+    if (actionNames.has(expr)) {
+      out += `data-on-${m[1]}="$action:${expr}"`;
+    } else if (/^\w+$/.test(expr)) {
+      out += `data-on-${m[1]}="${expr}"`;
+      bindings.push({ event: m[1], fn: expr });
+    } else {
+      const name = `__h${bindings.length}`;
+      out += `data-on-${m[1]}="${name}"`;
+      bindings.push({ event: m[1], fn: `${name}: ${expr}` });
+    }
+    rest = rest.slice(i + 1);
+  }
+  return { template: out, bindings };
+}
+
+/**
  * Pre-scan a file's template for its slot declarations -
  * `<slot name="row" item={post}>` -> { name: 'row', props: ['item'] }.
  * Cheap regex on purpose: the parent's compiler needs the names the child
@@ -1005,16 +1073,6 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const setterNames = new Map<string, string>();
   stateDecls.forEach((s) => setterNames.set(s.name, `set${capitalize(s.name)}`));
 
-  // Extract event bindings from original template. Handlers bound to a
-  // server action never reach the client registry: they compile to
-  // data-on-*="$action:name" and dispatch through $action instead.
-  const eventBindings: Array<{ event: string; fn: string }> = [];
-  let em: RegExpExecArray | null;
-  EVENT_RE.lastIndex = 0;
-  while ((em = EVENT_RE.exec(template))) {
-    if (!actionNames.has(em[2].trim())) eventBindings.push({ event: em[1], fn: em[2] });
-  }
-
   // Remove declarations from script, rewrite $setState to setters
   let cleanScript = removeRanges(script, decls.map((d) => [d.start, d.end] as [number, number]));
   cleanScript = cleanScript.replace(SETSTATE_RE, (_, key, val) => {
@@ -1036,18 +1094,26 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   // a slot prop that shadows a state name still resolves (the slot rewrite
   // happens on the already-called expression).
   const templateCalled = callifyTemplateExprs(template, stateDecls.map((s) => s.name));
+  // Extract event bindings from the CALLED template (the same string the
+  // markup rewrite below reads, so the two can never disagree). Handlers
+  // bound to a server action never reach the client registry: they compile
+  // to data-on-*="$action:name" and dispatch through $action instead.
+  // An INLINE handler (on:click={() => ...}) is legal too: it gets a
+  // synthetic name here and rides the registry as `__hN: <expr>`, closing
+  // over the render scope the registry statement is emitted inside.
+  const wired = wireEventBindings(templateCalled, actionNames);
+  const eventBindings = wired.bindings;
 
-  // on:event={fn} -> data-on-event="fn"; a handler that names a server
-  // action becomes data-on-event="$action:fn" (dispatched by $action);
-  // <slot /> -> block marker
+  // on:event={fn} -> data-on-event="fn" (wireEventBindings: brace-aware, so
+  // an inline arrow's own braces are part of the expression); a handler that
+  // names a server action becomes data-on-event="$action:fn" (dispatched by
+  // $action); <slot /> -> block marker
  // A NAMED slot (<slot name="row" item={post} />) becomes a call of
   // the per-render __slot() helper the generators emit: array pairs, never an
   // object literal, because the template scanner cannot see nested braces.
-  const ssrTemplate = templateCalled
+  const ssrTemplate = wired.template
     .replace(SLOT_NAMED_RE, (_w, attrs) => `{__slot(${encodeSlotCall(attrs)})}`)
-    .replace(SLOT_RE, '{__slot__}')
-    .replace(/on:(\w+)=\{([^}]+)\}/g, (_, ev, fn) =>
-      actionNames.has(fn.trim()) ? `data-on-${ev}="$action:${fn.trim()}"` : `data-on-${ev}="${fn}"`);
+    .replace(SLOT_RE, '{__slot__}');
 
   // The render body's emission order, and why it is what it is:
   //   props -> script -> $state -> $data -> deltas
@@ -3243,7 +3309,7 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
 
   const clientEntry = `
 ${clientImports}
-import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride } from './runtime.js';
+import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState } from './runtime.js';
 
 // i18n: the dictionaries baked at build time - the client
 // renders any PRELOADED locale from the bundle, so switching language costs
@@ -3482,6 +3548,13 @@ export async function $action(name, e) {
 }
 
 export { postForm };
+
+// The live signal graph as JSON - the same serializeState the zero-hydration
+// resume uses, exported so the bootstrap's dev seam (window.__rosefn.state())
+// can hand it to the dev server's reload bridge and to a devtools extension.
+// A local re-export on purpose: it keeps the binding alive through minification
+// for the bootstrap text appended after the bundle.
+export { serializeState };
 
 // initial=true: adopt the SSR DOM (zero hydration) - wire reactive markers to
 // the existing nodes and bind events. initial=false: client-side navigation -
