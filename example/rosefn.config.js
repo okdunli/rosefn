@@ -4,11 +4,37 @@
 // compiler will parse. trade-off: one hook covers macros, custom syntax,
 // includes and auto-imports - a transform can rewrite anything, including
 // the script block, so the demo replaces a token with the brand mark.
+//
+// The same plugin object may also carry RUNTIME hooks , which run
+// inside the deployed server: onRequest before routing, onResponse once the
+// response exists. The one below is the P0-2 story in nine lines - it can
+// only rewrite a document it can READ, which is exactly what
+// `export const buffer = true` buys a route.
 export default [
   {
     name: 'thorn',
     transform(code) {
       return code.replaceAll('@thorn', '\u{1F339}');
+    },
+  },
+  {
+    name: 'document-marker',
+    async onResponse(ctx, res) {
+      // P0-3: the document's content-type travels WITH the Response, so a
+      // hook never has to guess what it is looking at.
+      const type = res.headers.get('content-type') || '';
+      if (!type.includes('text/html')) return;
+      // P0-2: a STREAMED response hands the hook a bodyless Response - the
+      // body is produced after this point and cannot be replaced, which is
+      // the honest limit of a stream (and the reason TTFB wins). A route
+      // exporting `buffer = true` - and every csr = false route - renders
+      // whole first, so the body is here to read, rewrite and return.
+      if (!res.body) return;
+      const html = await res.text();
+      return new Response(html.replace('<html', '<html data-hooked="1"'), {
+        status: res.status,
+        headers: res.headers,
+      });
     },
   },
 ];

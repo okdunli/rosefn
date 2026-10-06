@@ -48,6 +48,15 @@ declare function $data<T>(fn: () => T | Promise<T>): Getter<T>;
 declare function getContext<T = Record<string, unknown>>(): T;
 
 /**
+ * The parsed query string of the request being rendered (`?page=2&q=x` ->
+ * `{ page: '2', q: 'x' }`). Read it in a `$data` body or in the render:
+ * routing matches the pathname, so `/search?q=cats` renders the `/search`
+ * route with `$query().q === 'cats'`. On a client-side navigation it is the
+ * URL the browser is on. A repeated key keeps its first value.
+ */
+declare function $query(): Record<string, string>;
+
+/**
  * Translate a key from src/locales/<lang>.json.
  *
  * Values are either plain strings with `{name}` holes or ICU MessageFormat:

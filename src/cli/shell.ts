@@ -252,10 +252,26 @@ const STYLES_MIN = STYLES.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"']+/g,
  * Merge the route chain's <head> blocks (document order: page first, then its
  * layouts) into one clean <head> fragment. First occurrence wins per key, so a
  * page overrides its layouts - matching the client's reverse-order applyHead.
+ *
+ * Bug report 2026.9.22 11:46: the keyed whitelist used to be title plus
+ * meta/link/base and NOTHING else, so a `<style>` block, a
+ * `<script type="application/ld+json">` data block and a `<noscript>`
+ * fallback were dropped here in silence - the compiler collected them, the
+ * merge threw them away, and a CMS theme system had no way to ship its
+ * per-request CSS. Every head element now passes through: the keyed
+ * singletons keep their name/property/rel/charset identity, and everything
+ * else is keyed by id when it has one and by tag+position when it does not,
+ * so two layouts' <style> blocks coexist and a page still overrides its
+ * layout's. Passthrough elements carry HEAD_ATTR too (the attribute the
+ * runtime manages) so a client-side navigation replaces or drops them like
+ * any other managed element instead of leaking the previous route's CSS
+ * into every route visited after it.
  */
 function mergeHeadBlocks(blocks: string[]): string {
   const byKey = new Map<string, string>();
   const order: string[] = [];
+  // positional keys: tag -> how many unkeyed elements of that tag came before
+  const positional = new Map<string, number>();
   // first occurrence wins: blocks arrive page-first (a page renders inside its
   // layouts' <slot/>), so the page's title/meta override the layouts'
   const put = (key: string, html: string) => {
@@ -267,14 +283,27 @@ function mergeHeadBlocks(blocks: string[]): string {
   for (const block of blocks) {
     // title carries content, so it needs its own pattern
     for (const m of block.matchAll(/<title[^>]*>[\s\S]*?<\/title>/gi)) put('title', m[0]);
-    for (const m of block.matchAll(/<(meta|link|base)((?:\s+[\w-]+(?:="[^"]*")?)*)\s*\/?>/gi)) {
+    // One pass over every other head element: a void tag (meta/link/base),
+    // a paired one (style/script/noscript, and any tag a route writes), or a
+    // self-closed one. The closing alternative is tried before the bare `>`
+    // so a paired element keeps its content and a void one still matches.
+    for (const m of block.matchAll(/<(\w+)((?:\s+[\w:-]+(?:=(?:"[^"]*"|'[^']*'|[^\s"'>]+))?)*)\s*(?:\/>|>([\s\S]*?)<\/\1\s*>|>)/gi)) {
       const tag = m[1].toLowerCase();
-      const keyMatch = m[2].match(/\s(?:name|property|rel|charset)="([^"]*)"/i);
-      const key = keyMatch ? `${tag}:${keyMatch[1]}` : tag;
+      if (tag === 'title') continue; // handled above, with its own key
+      const attrs = m[2];
+      const keyMatch = attrs.match(/\s(?:name|property|rel|charset)=(?:"([^"]*)"|'([^']*)')/i);
+      const idMatch = attrs.match(/\sid=(?:"([^"]*)"|'([^']*)')/i);
+      let key: string;
+      if (keyMatch) key = `${tag}:${keyMatch[1] ?? keyMatch[2]}`;
+      else if (idMatch) key = `${tag}:${idMatch[1] ?? idMatch[2]}`;
+      else {
+        key = `${tag}:#${positional.get(tag) ?? 0}`;
+        positional.set(tag, (positional.get(tag) ?? 0) + 1);
+      }
       // keyed tags carry their key (must match HEAD_ATTR in the runtime) so
       // the client adopts these SSR-injected elements in place on the first
       // navigation instead of creating duplicates
-      const marked = keyMatch ? m[0].replace(/^<\w+/, (t) => `${t} data-rosefn-head="${key}"`) : m[0];
+      const marked = m[0].replace(/^<\w+/, (t) => `${t} data-rosefn-head="${key}"`);
       put(key, marked);
     }
   }
@@ -337,20 +366,31 @@ export function buildShell(ssrHtml: string, stateJson: string, client: string | 
   // JavaScript. The route's render function still rides in the bundle for
   // client-side navigation and the SPA fallback; only this document is
   // JS-free. Scoped styles stay: CSS is not JavaScript.
+  //
+  // P1-1 (bug report): a JS-free document is also DEMO-FREE. The #app wrapper
+  // and the shell's own stylesheet existed for the client (the bootstrap
+  // renders into #app; STYLES dresses the framework's demo). With no script
+  // in the document they are pure pollution: the wrapper inserts an element
+  // between the page's own CSS selectors and its content (div > p becomes
+  // div > #app > p) and the demo's pink links / body padding outrank the
+  // route's theme.css on equal specificity. So a zero-JS document is exactly
+  // the route's own markup - nothing wrapped, nothing injected.
   const jsTail = js
     ? `\n  <script type="application/json" id="__rosefn_state">${stateJson}</script>\n  ${clientTag}`
     : '';
+  const open = js ? '<div id="app">' : '';
+  const close = js ? '</div>' : '';
+  const shellStyles = js ? `\n  <style>${STYLES_MIN}</style>` : '';
 
   return `<!DOCTYPE html>
 <html lang="${lang}"${dir ? ` dir="${dir}"` : ''}>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">${headTags}${iconTag}
-  ${titleTag}
-  <style>${STYLES_MIN}</style>${styleTag}
+  ${titleTag}${shellStyles}${styleTag}
 </head>
 <body>
-  <div id="app">${ssrHtml}</div>${jsTail}
+  ${open}${ssrHtml}${close}${jsTail}
 </body>
 </html>`;
 }

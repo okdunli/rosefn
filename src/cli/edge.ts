@@ -26,6 +26,8 @@ type ServerModule = {
   renderPageStream(pathname: string, write: (chunk: string) => void, shellOpen: string, clientTag: string): Promise<number>;
   canStream(pathname: string): boolean;
   isNoJs(pathname: string): boolean;
+  /** P0-2: routes that exported `buffer = true` - buffered, never streamed */
+  isBuffered(pathname: string): boolean;
   isApi(pathname: string): boolean;
   handleApi(method: string, pathname: string, request: Request): Promise<Response>;
  /** The document's <html lang>/<dir> for a pathname (streaming needs them before the render) */
@@ -51,6 +53,8 @@ type ServerModule = {
   headersFor(pathname: string): Record<string, string> | null;
  /** Routes that exported `csp = { nonce: true }` - nonce policy, never baked */
   cspNonce(pathname: string): boolean;
+  /** P0-1: the query of the request being rendered, for $query() */
+  setQuery(query: Record<string, string>): void;
 };
 
 /**
@@ -97,7 +101,10 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
   };
 
   return async function handle(request: Request): Promise<Response> {
-    const { pathname } = new URL(request.url);
+    const { pathname, searchParams } = new URL(request.url);
+    // P0-1: the query reaches the render through $query() - routing itself
+    // matches the pathname, exactly as the Node server does.
+    mod.setQuery?.(Object.fromEntries(searchParams));
  // Runtime hooks: onRequest runs before middleware and routing
     // and may short-circuit with its own Response - an auth wall, a rate
     // limit. The context is built only when the project declares a hook, so
@@ -130,7 +137,7 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
  // csr = false routes buffer too: a streamed no-JS
     // document would carry the shell's default <title> - the route head is
     // applied client-side at boot, and there is no client.
-    if (!form && !broken.has(pathname) && mod.canStream(pathname) && !mod.isNoJs(pathname)) {
+    if (!form && !broken.has(pathname) && !mod.isBuffered?.(pathname) && mod.canStream(pathname) && !mod.isNoJs(pathname)) {
  // The nonce is minted before the Response exists, because its
       // headers are fixed from then on - and the document's script tag is
       // written into that same stream, so both halves carry this one value.
