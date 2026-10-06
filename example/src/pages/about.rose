@@ -48,6 +48,14 @@
 <head>
   <title>{title()} - Rosefn</title>
   <meta name="description" content="What Rosefn is and the ideas it is built on.">
+  <!-- A route-level <style> INSIDE <head> (bug report 2026.9.22 11:46). A CMS
+       theme system ships its per-request CSS here - a palette the admin just
+       changed, a per-tenant accent. It used to be dropped in silence by the
+       server's head merge AND by the client's applyHead, so it survived the
+       first paint and vanished on the first navigation. Now it reaches the
+       document (mergeHeadBlocks) and is adopted, replaced and dropped like any
+       other managed head element (applyHead). -->
+  <style>.rfetch { color: #2e7d32; font-variant-numeric: tabular-nums; }</style>
 </head>
 
 <style>
@@ -61,7 +69,7 @@
   <h1>{title()}</h1>
   <div class="rcard">
     <p>Rosefn is a revolutionary web framework designed to be the fastest, simplest, and most performant framework ever created.</p>
-    <p>data fetches: {stats.fetches}</p>
+    <p class="rfetch">data fetches: {stats.fetches}</p>
     <button on:click={reload}>Refresh data</button>
   </div>
   <p>mount ticks (onMount heartbeat, onCleanup stops it): {ticks()}</p>

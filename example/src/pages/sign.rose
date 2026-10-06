@@ -17,6 +17,15 @@
   // more scripts - the usual reason a deployment reaches for a nonce at all.
   export const csp = { nonce: true };
 
+  // P1-3 (bug report): a bare <form method="POST"> no longer forces the
+  // bundle - the compiler now knows the native submit works without one (the
+  // action runs on the server, the response re-renders the page), so a page
+  // whose form is the only interactive thing ships zero JS by default. This
+  // page PROMISES the visitor "with JavaScript it submits without a page
+  // reload", so it opts back in explicitly: csr = true is the statement that
+  // the in-place adopt is wanted here, not an accident of the heuristic.
+  export const csr = true;
+
   // Server-side store. A real app would read/write a database here; $store
   // is what makes it shared across requests AND across cluster workers
  //: the write broadcasts to every worker, reads stay local, and
