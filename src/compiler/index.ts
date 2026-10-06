@@ -590,6 +590,29 @@ function rewriteRoseImports(script: string, kind: 'ssr' | 'client'): string {
 }
 
 /**
+ * The specifiers that can never reach a browser
+ * bundle. Node builtins by prefix, plus the database drivers the docs tell
+ * you to use - the packages a rosefn app reaches for on the server and
+ * nowhere else.
+ *
+ * Trade-off: a specifier list, not a resolver. A package that merely LOOKS
+ * server-side but bundles fine for the browser still builds (nothing is
+ * lost); the list only has to catch what esbuild's browser platform would
+ * refuse anyway, which is what turns a cryptic failure into a clear one.
+ */
+const NODE_ONLY_SPEC = /^(?:node:|(?:fs|path|os|crypto|http|https|net|tls|stream|child_process|worker_threads|dns|cluster|better-sqlite3|sqlite3|pg|mysql2|mongodb|redis|ioredis)$)/;
+
+/** The node-only specifiers among a module's hoisted imports (type imports excluded: esbuild erases them). */
+function nodeOnlyImports(importStmts: string): string[] {
+  const out: string[] = [];
+  for (const m of importStmts.matchAll(/import\s+(type\s+)?[\s\S]*?from\s*['"]([^'"]+)['"]/g)) {
+    if (m[1]) continue; // `import type` never ships, so it cannot break the client bundle
+    if (NODE_ONLY_SPEC.test(m[2])) out.push(m[2]);
+  }
+  return out;
+}
+
+/**
  * Pre-scan a file's template for its slot declarations -
  * `<slot name="row" item={post}>` -> { name: 'row', props: ['item'] }.
  * Cheap regex on purpose: the parent's compiler needs the names the child
@@ -731,6 +754,26 @@ export async function compileComponent(filePath: string, publicDir: string, scop
  // The imports (a component import above all) belong at module scope,
   // not inside render() - hoisted here, emitted by the generators.
   const { imports: importStmts, rest: scriptNoImports } = hoistImports(rawScript);
+ // The npm interop boundary, enforced instead of
+  // documented and hoped for. A page's or a component's script ships to the
+  // browser - the $data bodies included, so they re-run on a client-side
+  // navigation - which makes a node-only import in one a bug the developer
+  // must meet NOW, as a message naming this file, not twenty seconds later as
+  // esbuild's "Could not resolve node:fs" pointing at a generated
+  // comp-7.client.js in a temp dir. _middleware.rose never ships (it is the
+  // one module the compiler keeps server-side), and pages/api/*.rose returned
+  // above, so both may import anything - that is exactly where a database
+  // driver lives.
+  if (path.basename(filePath) !== '_middleware.rose') {
+    for (const spec of nodeOnlyImports(importStmts)) {
+      throw new Error(
+        `${filePath}: cannot import '${spec}' in a page or component - it never reaches the browser. ` +
+        `This module's script ships to the client (its $data bodies included), so move the import to ` +
+        `src/pages/_middleware.rose or a pages/api/*.rose handler: those are server-only, and the rows ` +
+        `travel to the page through getContext() / $data.`
+      );
+    }
+  }
   // A component (src/components/*.rose) is not a route: the build marks it in
   // the registry with a `components/...` scope key, which is also the cheapest
   // reliable way to tell the two apart here.
