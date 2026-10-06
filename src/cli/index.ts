@@ -125,10 +125,21 @@ async function sendPage(req: any, res: any, ssrModule: any, hookCtx: any, page: 
   let html = getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, nonce);
   let headers: Record<string, any> = pageHeaders(ssrModule, routePath, nonce);
   if (hookCtx) {
-    const out = await ssrModule.runResponseHooks(hookCtx, new Response(html, { status, headers }));
+    // P0-3: the document's content-type travels WITH the Response. The WHATWG
+    // constructor fills in text/plain when it is missing, and a hook that
+    // bails on non-HTML responses (the standard shape) then skips every
+    // page - so it is stated here, before the hook ever sees the object.
+    const out = await ssrModule.runResponseHooks(hookCtx, new Response(html, {
+      status,
+      headers: { 'content-type': 'text/html; charset=utf-8', ...headers },
+    }));
     status = out.status;
     headers = webHeadersToNode(out);
-    html = await out.text();
+    // P0-4: a hook that READ the body and returned the same Response cannot
+    // have it read again (TypeError: body already used) - and that throw
+    // used to surface as a 9-byte 404 from the outer catch. The bytes the
+    // hook consumed are the ones it chose to keep, so send those.
+    html = out.bodyUsed ? html : await out.text();
   }
   sendHtml(req, res, status, html, headers);
 }
@@ -138,6 +149,17 @@ async function sendPage(req: any, res: any, ssrModule: any, hookCtx: any, page: 
 // dev/preview server's handful of files; swap for an LRU if it ever isn't.
 const fileCache = new Map<string, { mtimeMs: number; raw: Buffer; br: Buffer; gzip: Buffer; etag: string }>();
 
+// P0-0 (bug report): `--port N` (or `--port=N`), the same override the PORT
+// env gives, as an argument - "rosefn dev --port 4000" is what a developer
+// with two projects open actually types. Parsed BEFORE the constants below
+// read the env, and BEFORE SRC_DIR, so a flag is never mistaken for the
+// project directory.
+const __portArg = process.argv.find((a) => a === '--port' || a.startsWith('--port='));
+if (__portArg) {
+  const __v = __portArg.includes('=') ? __portArg.slice('--port='.length) : process.argv[process.argv.indexOf(__portArg) + 1];
+  if (__v && Number(__v) > 0) process.env.PORT = __v;
+}
+
 // (the "the framework is real" gate): the CLI builds ANY project,
 // not just this repo's demo. `rosefn build [dir]` - the dir defaults to the
 // cwd, so inside a project a bare `rosefn build` is all there is. The
@@ -146,7 +168,8 @@ const fileCache = new Map<string, { mtimeMs: number; raw: Buffer; br: Buffer; gz
 // runs from (the repo's Go binary embeds <repo>/dist, and a project's own
 // dist belongs beside the command you ran) - `cd` into the project, or pass
 // its path and collect dist/ from here.
-const SRC_DIR = process.argv[3] ? path.resolve(process.argv[3]) : process.cwd();
+// A leading `-` is a flag (--port), not a directory.
+const SRC_DIR = process.argv[3] && !process.argv[3].startsWith('-') ? path.resolve(process.argv[3]) : process.cwd();
 // The deploy dir is ./dist of the directory the command ran from - a
 // documented contract (test-cli.mjs asserts it): building a project that is
 // not the cwd still drops its output beside the caller, the way every
@@ -296,6 +319,9 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
       skipped.push(routePath);
       return;
     }
+    // P0-1: a baked document has no request and therefore no query - say so
+    // explicitly, so a query from the previous render can never leak in.
+    ssrModule.setQuery?.({});
     const page = await ssrModule.renderPage(routePath);
     if (page.status === 500) {
       // The route's render failed and the error page rendered instead. Do
@@ -439,6 +465,9 @@ function revalidateInBackground(routePath: string, filePath: string): void {
   void (async () => {
     try {
       const ssrModule = await loadServer();
+      // P0-1: the background pass has no request either - an empty query, so
+      // the swapped file never carries another visitor's search terms.
+      ssrModule.setQuery?.({});
       const page = await ssrModule.renderPage(routePath);
       if (page.status === 200) {
  // the swap must honor the route's csr decision: a
@@ -655,6 +684,10 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
               headers,
               body: body.length > 0 ? body : undefined,
             });
+            // P0-1: an api handler reads the query from its Request's URL
+            // (the full one, query included) - and through $query() for the
+            // same uniform access a page render has.
+            ssrModule.setQuery?.(queryOf(req.url));
             let apiRes = await ssrModule.handleApi(req.method || 'GET', apiPath, request);
             if (hookCtx) apiRes = await ssrModule.runResponseHooks(hookCtx, apiRes);
             writeWebHeaders(apiRes, res);
@@ -688,17 +721,33 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
                 return;
               }
             }
-            const page = await ssrModule.renderPage(req.url || '/', form);
+            // P0-1: the POST is routed by pathname too, and its query (if the
+            // form was posted to /search?ref=x) reaches the render through
+            // $query() like every other path.
+            ssrModule.setQuery?.(queryOf(req.url));
+            const page = await ssrModule.renderPage(pathnameOf(req.url || '/'), form);
             await sendPage(req, res, ssrModule, hookCtx, page, pathnameOf(req.url || '/'));
-          } catch {
-            res.statusCode = 400;
-            res.end('Bad request');
+          } catch (err) {
+            // A silent "Bad request" is how a framework bug hides: the stack
+            // goes to stderr (the same rule the GET path follows), and the
+            // response stays a 400 for a malformed body - the one cause a
+            // client can act on.
+            console.error(`Rosefn: POST ${pathnameOf(req.url || '/')} failed:`, err instanceof Error ? err.stack : err);
+            if (!res.headersSent) {
+              res.statusCode = 400;
+              res.end('Bad request');
+            }
           }
         });
         return;
       }
 
-      let safe = path.normalize(req.url || '/').replace(/^(\.\.(\/)?)+/, '');
+      // P0-1: routing matches the PATHNAME. The query string rides along to
+      // the handlers ($query(), the api Request) but never into a route
+      // pattern - `/blog?page=2` is the route `/blog` with a query, not a
+      // route literally named "blog?page=2" (which matched nothing and
+      // answered 404).
+      let safe = path.normalize(pathnameOf(req.url || '/')).replace(/^(\.\.(\/)?)+/, '');
       if (safe === '\\' || safe === '/') safe = '/';
       let filePath = path.join(dir, safe);
 
@@ -833,8 +882,17 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
       try {
         broken = new Set(JSON.parse(fs.readFileSync(path.join(dir, 'broken.json'), 'utf-8')));
       } catch { /* no manifest: nothing known-broken */ }
-      const safe2 = req.url || '/';
-      if (!broken.has(safe2) && ssrModule.canStream(safe2) && !ssrModule.isNoJs(safe2)) {
+      // P0-1: the pathname, never the raw url - see the static branch above.
+      // The query reaches the render through $query() (setQuery below), which
+      // is what a search or a paginated list reads.
+      const safe2 = pathnameOf(req.url || '/');
+      // P0-1: the query is per request and belongs to the render, not the
+      // route - set once, before either path below reads $query().
+      ssrModule.setQuery?.(queryOf(req.url));
+      // P0-2: `buffer = true` routes take the buffered path even when they
+      // could stream - the response hooks then see the whole document and a
+      // failed render keeps its real status. The app decides, per route.
+      if (!broken.has(safe2) && !ssrModule.isBuffered?.(safe2) && ssrModule.canStream(safe2) && !ssrModule.isNoJs(safe2)) {
         const enc = pickEncoding(req);
  // onResponse runs BEFORE the first flush, while the status
         // and headers can still change: the hook is handed a bodyless Response
@@ -847,8 +905,8 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
         // streamed response cannot change its headers afterwards - and the
         // document's script tag is written into that same stream, so both
         // halves carry this one value.
-        const nonce = nonceFor(ssrModule, pathnameOf(safe2));
-        let headers: Record<string, any> = pageHeaders(ssrModule, pathnameOf(safe2), nonce);
+        const nonce = nonceFor(ssrModule, safe2);
+        let headers: Record<string, any> = pageHeaders(ssrModule, safe2, nonce);
         if (hookCtx) {
           const out = await ssrModule.runResponseHooks(hookCtx, new Response(null, { status, headers }));
           status = out.status;
@@ -902,10 +960,23 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
       // not stream - the route's <head> is only known after the render, and
       // there is no client to apply it at boot)
       const page = await ssrModule.renderPage(safe2);
-      await sendPage(req, res, ssrModule, hookCtx, page, pathnameOf(safe2));
-    }).catch(() => {
-      res.statusCode = 404;
-      res.end('Not found');
+      await sendPage(req, res, ssrModule, hookCtx, page, safe2);
+    }).catch((err: unknown) => {
+      // P0-4: a failure in the pipeline is a 500 with the reason on stderr,
+      // never a 9-byte 404 - "Not found" for a route that exists and threw
+      // is the single hardest bug to diagnose in production. The stack goes
+      // to stderr (the access log owns stdout) and the client gets a real
+      // status it can alert on.
+      console.error(`Rosefn: ${req.method} ${req.url} failed:`, err instanceof Error ? err.stack ?? err.message : err);
+      if (res.headersSent) {
+        // a stream already left: the status is committed, so the only honest
+        // move is to drop the socket and let the client retry
+        res.destroy();
+        return;
+      }
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end('<h1>500</h1><p>Something went wrong rendering this page.</p>');
     });
   };
 }
@@ -917,6 +988,71 @@ function pathnameOf(url: string | undefined): string {
   } catch {
     return (url || '/').split('?')[0];
   }
+}
+
+/**
+ * The parsed query string of a URL (?page=2&q=x -> {page:'2',q:'x'}), for
+ * $query() (P0-1). First value wins per key, the way every server-side
+ * framework reads a repeated parameter.
+ */
+function queryOf(url: string | undefined): Record<string, string> {
+  const q: Record<string, string> = {};
+  try {
+    new URL(url || '/', 'http://localhost').searchParams.forEach((v, k) => { if (!(k in q)) q[k] = v; });
+  } catch { /* an unparsable url carries no query */ }
+  return q;
+}
+
+/**
+ * P0-0 (bug report): listen on `port`, hopping to the next free one when it
+ * is taken instead of crashing with EADDRINUSE. Two projects on one machine
+ * (or a dev server that did not exit cleanly) is the everyday case, and a
+ * stack trace plus a dead process is the worst possible answer to it: the
+ * banner names the port actually used, so the URL is never a guess.
+ *
+ * The hop is bounded (20 tries) and every other error is fatal - silently
+ * retrying a real fault would hide it.
+ */
+function listenFree(server: any, port: number, onReady: (port: number) => void): void {
+  const attempt = (p: number): void => {
+    const onError = (err: any) => {
+      server.removeListener('error', onError);
+      if (err && err.code === 'EADDRINUSE' && p - port < 20) {
+        console.log(`🌹 port ${p} is in use - trying ${p + 1}`);
+        attempt(p + 1);
+        return;
+      }
+      console.error(`Rosefn: cannot listen on port ${p}:`, err instanceof Error ? err.message : err);
+      process.exit(1);
+    };
+    server.once('error', onError);
+    server.listen(p, () => {
+      server.removeListener('error', onError);
+      onReady(p);
+    });
+  };
+  attempt(port);
+}
+
+/**
+ * P0-0 (bug report): the first free port at or after `from`, probed with a
+ * throwaway socket. The cluster's primary needs this because the workers must
+ * all land on the SAME port - letting each of them hop on its own would put
+ * them on different ports and split the traffic between them. Racy by nature
+ * (a port can be taken between the probe and the workers' listen); the
+ * workers' own listenFree fallback covers that last step.
+ */
+async function freePort(from: number): Promise<number> {
+  const net = await import('node:net');
+  for (let p = from; p < from + 20; p++) {
+    const free = await new Promise<boolean>((resolve) => {
+      const probe = net.createServer();
+      probe.once('error', () => resolve(false));
+      probe.listen(p, () => probe.close(() => resolve(true)));
+    });
+    if (free) return p;
+  }
+  return from;
 }
 
 /**
@@ -963,8 +1099,10 @@ async function dev(): Promise<void> {
   const http = await import('http');
   const server = http.createServer(serveStatic(OUT_DIR));
 
-  server.listen(PORT, () => {
-    console.log('🌹 http://localhost:' + PORT);
+  // P0-0: an occupied port hops to the next free one (and says so) instead of
+  // killing the server with EADDRINUSE.
+  listenFree(server, PORT, (port) => {
+    console.log('🌹 http://localhost:' + port);
   });
 }
 
@@ -975,8 +1113,10 @@ async function preview(): Promise<void> {
  // from disk . Dev passes nothing (it rebuilds on change).
   const server = http.createServer(serveStatic(OUT_DIR, true));
 
-  server.listen(PORT, () => {
-    console.log(`🌹 Rosefn v${version()} preview at http://localhost:` + PORT);
+  // P0-0: same hop as the dev server - a preview that cannot bind its port
+  // moves to the next one and prints it.
+  listenFree(server, PORT, (port) => {
+    console.log(`🌹 Rosefn v${version()} preview at http://localhost:` + port);
   });
 }
 
@@ -1016,9 +1156,15 @@ async function serve(): Promise<void> {
   cluster.schedulingPolicy = cluster.SCHED_RR;
   const os = await import('node:os');
   const workers = Math.max(1, Number(process.env.ROSEFN_WORKERS) || os.cpus().length);
-  const PORT = Number(process.env.PORT) || 3000;
   if (cluster.isPrimary) {
-    for (let i = 0; i < workers; i++) cluster.fork();
+    // P0-0 (bug report): ONE port for the whole cluster, chosen once by the
+    // primary and handed to every worker through the environment. A worker
+    // that cannot bind its port hops on its own (listenFree below), but if
+    // each of them hopped independently the cluster would end up spread over
+    // several ports with the traffic split between them - so the decision
+    // belongs here, and the banner names the port actually used.
+    const port = await freePort(Number(process.env.PORT) || 3000);
+    for (let i = 0; i < workers; i++) cluster.fork({ PORT: String(port) });
  // The store relay. A worker broadcasts every $store write here;
     // the primary forwards each patch to every OTHER worker (the writer
     // already holds the value locally - the patch is for its siblings), so
@@ -1037,7 +1183,7 @@ async function serve(): Promise<void> {
     process.on('SIGTERM', stop);
     process.on('SIGINT', stop);
     cluster.on('exit', () => { if (--live <= 0) process.exit(0); });
-    console.log(`🌹 Rosefn v${version()} serve: ${workers} worker${workers > 1 ? 's' : ''} on http://localhost:${PORT} (cluster, bounded bodies, graceful shutdown, access log on stdout)`);
+    console.log(`🌹 Rosefn v${version()} serve: ${workers} worker${workers > 1 ? 's' : ''} on http://localhost:${port} (cluster, bounded bodies, graceful shutdown, access log on stdout)`);
     return;
   }
   // worker
@@ -1062,11 +1208,14 @@ async function serve(): Promise<void> {
   server.requestTimeout = 30_000;
   server.headersTimeout = 65_000; // must exceed requestTimeout
   server.keepAliveTimeout = 5_000;
-  server.listen(PORT, async () => {
-    console.log(`🌹 Rosefn worker ${process.pid} listening on http://localhost:${PORT}`);
+  // P0-0: the worker binds the port the primary chose; if that one was taken
+  // in the meantime it hops instead of dying with an unhandled 'error' (the
+  // cluster's failure mode before this existed).
+  listenFree(server, PORT, async (port) => {
+    console.log(`🌹 Rosefn worker ${process.pid} listening on http://localhost:${port}`);
     for (const p of servicePlugins) {
       try {
-        await p.onServe({ port: PORT, workers });
+        await p.onServe({ port, workers });
       } catch (err) {
         console.error('Rosefn: plugin', p.name, 'onServe failed:', err instanceof Error ? err.message : err);
       }

@@ -1,0 +1,17 @@
+<script>
+  // P0-2: `export const buffer = true` renders this route BUFFERED - the whole
+  // document is assembled before the first byte goes out. The default streams:
+  // the shell flushes immediately and the rest follows, which is the fastest
+  // possible TTFB but hands an onResponse hook a Response whose body is
+  // already consumed. A route that a plugin must rewrite (a CSP nonce a CDN
+  // can see, an injected banner, an A/B variant) opts into buffering here.
+  // Everything else about the route is identical: same render, same head,
+  // same zero-JS document.
+  export const buffer = true;
+
+  let body = $data(async () => 'buffered body');
+</script>
+
+<h1>Buffered</h1>
+<p>{body()} - rendered whole, then sent, so a hook can read and replace it.</p>
+<p><a href="/">Back to the gate</a></p>

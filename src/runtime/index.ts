@@ -159,6 +159,28 @@ export function headMark(closes: Close[], fn: Close): string {
   return `<!--\u27e6h:${i}\u27e7-->` + fn() + `<!--\u27e6/h:${i}\u27e7-->`;
 }
 
+/**
+ * P1-2 (bug report): TRUSTED HTML - the explicit reverse of esc(). `{@html x}`
+ * emits the value verbatim, so a CMS's rich text renders as markup instead of
+ * as escaped source.
+ *
+ * The markers are an {#if} block's on purpose: wire() already knows how to
+ * adopt the server's nodes in place (identity preserved - an embedded iframe
+ * does not reload) and to swap the range for a fresh parse when the value
+ * changes. Reusing that machinery costs this function and nothing else: no
+ * new marker kind, no new wire branch, no bytes in a document that never
+ * uses it. The close returns the same {html, closes} shape an {#if} block
+ * does, with an EMPTY closes array - trusted HTML is opaque markup, the
+ * compiler never scans inside it, so there are no inner markers to wire.
+ * `arg` is the enclosing block's scope value, exactly as textMark takes it:
+ * a `{@html row.body}` inside an {#each} resolves against the row.
+ */
+export function rawMark(closes: Close[], fn: Close, arg?: unknown): string {
+  const i = closes.push((s?: unknown) => ({ html: String((fn as (a?: unknown) => unknown)(s) ?? ''), closes: [] })) - 1;
+  const r = closes[i](arg) as { html: string };
+  return `<!--\u27e6i:${i}\u27e7-->` + r.html + `<!--\u27e6/i:${i}\u27e7-->`;
+}
+
 // === Reactive DOM wiring (client) ===
 
 const MARK_RE = /^\u27e6([milh]):(\d+)\u27e7$/;
@@ -211,6 +233,9 @@ export const handlers: Record<string, (e: Event) => void> =
  */
 export function applyHead(html: string): void {
   const seen = new Set<string>();
+  // tag -> how many unkeyed elements of that tag came before (the server's
+  // mergeHeadBlocks counts the same way over the same block order)
+  const positional = new Map<string, number>();
   const frag = tpl(html);
   const title = frag.querySelector('title');
   if (title) {
@@ -227,12 +252,26 @@ export function applyHead(html: string): void {
   for (const el of Array.from(document.head.querySelectorAll(`[${HEAD_ATTR}]`))) el.remove();
   for (const el of Array.from(frag.children)) {
     if (el.tagName === 'TITLE') continue;
-    const key = el.getAttribute('name')
+    const tag = el.tagName.toLowerCase();
+    // Bug report 2026.9.22 11:46: a head element with no name/property/rel/
+    // charset attribute used to be dropped here in silence, so a route's own
+    // <style> block or JSON-LD <script> survived the server render and then
+    // vanished on the first client-side navigation. Everything passes through
+    // now: the keyed singletons keep their identity attribute, and the rest
+    // are keyed by id or by tag+position - the same scheme (and the same
+    // block order) mergeHeadBlocks uses on the server, so both sides agree.
+    const identity = el.getAttribute('name')
       ?? el.getAttribute('property')
       ?? el.getAttribute('rel')
       ?? el.getAttribute('charset');
-    if (!key) continue;
-    const managed = `${el.tagName.toLowerCase()}:${key}`;
+    let managed: string;
+    if (identity) managed = `${tag}:${identity}`;
+    else if (el.id) managed = `${tag}:${el.id}`;
+    else {
+      const n = positional.get(tag) ?? 0;
+      positional.set(tag, n + 1);
+      managed = `${tag}:#${n}`;
+    }
     if (seen.has(managed)) continue; // first block wins: page over layout
     seen.add(managed);
     el.setAttribute(HEAD_ATTR, managed);
@@ -511,6 +550,36 @@ export function clearRequestState(): void {
   signalMap.clear();
   dataCache.clear();
   pendingDeltas.clear();
+}
+
+// === Request query (P0-1) ===
+// The parsed query string of the request being rendered (?page=2&q=x ->
+// {page:'2',q:'x'}) - the other half of the query-404 fix: routing matches
+// the pathname, so a page that wants the query reads it here instead of
+// parsing the URL itself. Server: the CLI sets it once per request before
+// the render. Client: the browser's own URL is the request there, read live
+// so every navigation sees its own query - except during a hover prefetch,
+// which renders a DIFFERENT route than the one on screen, so the client
+// entry overrides it for the duration of that render (prefetchOverride).
+let requestQuery: Record<string, string> = {};
+let prefetchOverride: Record<string, string> | null = null;
+
+export function $query(): Record<string, string> {
+  if (prefetchOverride) return prefetchOverride;
+  if (typeof location === 'undefined') return requestQuery;
+  const q: Record<string, string> = {};
+  new URLSearchParams(location.search).forEach((v, k) => { q[k] = v; });
+  return q;
+}
+
+/** The per-request query object - the servers call this before every render. */
+export function setRequestQuery(q: Record<string, string>): void {
+  requestQuery = q;
+}
+
+/** The query of the route a prefetch is rendering, or null outside one. */
+export function setPrefetchOverride(q: Record<string, string> | null): void {
+  prefetchOverride = q;
 }
 
 // === Request context ===
