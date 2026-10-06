@@ -238,6 +238,9 @@ async function build(): Promise<void> {
   // are exactly what the Node server compresses per file in memory, so
   // both servers deliver the same wire size.
   await writeBrotli(OUT_DIR);
+ // What this build actually costs on the wire, per route. Runs
+  // after writeBrotli so the br column is the file the Go binary serves.
+  await analyze(OUT_DIR, (ssrModule.dynamicRoutes as string[] | undefined) ?? []);
 }
 
 /**
@@ -256,6 +259,55 @@ async function writeBrotli(dir: string): Promise<void> {
     if (!BROTLI_EXT.has(path.extname(e.name).toLowerCase())) continue;
     await fs.promises.writeFile(p + '.br', zlib.brotliCompressSync(await fs.promises.readFile(p)));
   }
+}
+
+/**
+ * The build analysis. The zero-JS report says
+ * WHICH routes ship no runtime; this says what every route costs on the
+ * wire, measured from the files this build just wrote - never from a number
+ * quoted from memory. Brotli is the `.br` sibling the build already wrote
+ * (the exact bytes the Go binary serves); gzip is computed here because the
+ * Node server compresses per request and gzip is the fallback every proxy
+ * eventually falls back to. Dynamic routes are not baked, so they are
+ * LISTED, not measured: their numbers come from `npm run benchmark`, which
+ * renders them live against `rosefn serve`.
+ */
+async function analyze(outDir: string, dynamic: string[]): Promise<void> {
+  const rows: Array<{ route: string; raw: number; gzip: number; br: number; js: boolean }> = [];
+  const walk = async (dir: string, prefix: string): Promise<void> => {
+    for (const e of await fs.promises.readdir(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) {
+        await walk(path.join(dir, e.name), `${prefix}/${e.name}`);
+        continue;
+      }
+      if (!e.name.endsWith('.html')) continue;
+      const file = path.join(dir, e.name);
+      const raw = await fs.promises.readFile(file);
+      const brFile = `${file}.br`;
+      rows.push({
+        route: prefix || '/',
+        raw: raw.length,
+        gzip: zlib.gzipSync(raw, { level: 9 }).length,
+        br: fs.existsSync(brFile) ? (await fs.promises.stat(brFile)).size : 0,
+        js: /<script type="module"/.test(raw.toString('utf8')),
+      });
+    }
+  };
+  await walk(outDir, '');
+  const kb = (n: number) => `${(n / 1024).toFixed(1)} KB`;
+  const lines = ['Rosefn build analysis (measured from dist/; br = the precompressed bytes the Go binary serves):'];
+  for (const r of rows.sort((a, b) => (a.route < b.route ? -1 : 1))) {
+    lines.push(`  ${r.route.padEnd(16)}${kb(r.raw).padStart(9)} raw ${kb(r.gzip).padStart(8)} gzip ${kb(r.br).padStart(8)} br   ${r.js ? 'bundle inlined' : 'zero-JS'}`);
+  }
+  const client = path.join(outDir, 'client.js');
+  if (fs.existsSync(client)) {
+    const raw = await fs.promises.readFile(client);
+    lines.push(`  shared bundle  ${kb(raw.length).padStart(9)} raw ${kb(zlib.gzipSync(raw, { level: 9 }).length).padStart(8)} gzip ${kb(fs.existsSync(`${client}.br`) ? (await fs.promises.stat(`${client}.br`)).size : 0).padStart(8)} br   inlined into every interactive document`);
+  }
+  if (dynamic.length > 0) {
+    lines.push(`  dynamic (rendered per request, measured live by \`npm run benchmark\`): ${dynamic.join(' ')}`);
+  }
+  for (const l of lines) console.log(l);
 }
 
 /**
