@@ -1125,3 +1125,58 @@ export function $sessionCookie(
     secure || sameSite === 'None' ? 'Secure' : '',
   ].filter(Boolean).join('; ');
 }
+
+// === Client observability: the web-vitals hook ===
+//
+// A framework that sells TTFB, one request and zero hydration owes the app a
+// way to prove it in production. `export const vitals = true` (root layout,
+// like `prefetch`) makes the compiler import and call this once at boot, so
+// an app that does not ask pays nothing - esbuild drops the whole block from
+// a bundle that never references it.
+//
+// What it reports, and why this shape:
+// - `ttfb`, `fcp`: one-shot paints, dispatched as soon as the browser has
+//   them (the navigation and paint entries, already in the timeline).
+// - `lcp`: dispatched on every new largest paint; the app keeps the last.
+// - `cls`, `inp`: accumulated, dispatched when the page is hidden - the only
+//   moment their value is final, which is exactly when a RUM backend wants
+//   them. The running values stay readable on window.__rosefn_vitals for a
+//   devtools extension.
+// Every entry is one CustomEvent('rosefn:vitals') on window, so the app owns
+// the transport (fetch, sendBeacon, a third-party RUM): the framework ships
+// the measurement, not a pipeline.
+// Trade-off: no percentile math, no session ids, no batching. INP is the worst
+// interaction duration (the shape the spec uses) without the 98th-percentile
+// session aggregation - a real app sends the events and lets its RUM do that.
+export function reportVitals(): void {
+  if (typeof window === 'undefined' || typeof performance === 'undefined') return;
+  const live: Record<string, number> = {};
+  (window as unknown as { __rosefn_vitals?: Record<string, number> }).__rosefn_vitals = live;
+  const send = (name: string, value: number) => {
+    live[name] = value;
+    window.dispatchEvent(new CustomEvent('rosefn:vitals', { detail: { name, value, route: location.pathname } }));
+  };
+  const nav = performance.getEntriesByType?.('navigation')?.[0] as PerformanceNavigationTiming | undefined;
+  if (nav) send('ttfb', Math.round(nav.responseStart));
+  const paints = performance.getEntriesByType?.('paint') ?? [];
+  const fcp = paints.find((p) => p.name === 'first-contentful-paint');
+  if (fcp) send('fcp', Math.round(fcp.startTime));
+  const PO = (window as unknown as { PerformanceObserver?: typeof PerformanceObserver }).PerformanceObserver;
+  if (!PO) return; // a browser without observers still gets ttfb/fcp above
+  let cls = 0;
+  let inp = 0;
+  const flush = () => {
+    if (cls) send('cls', Math.round(cls * 1000) / 1000);
+    if (inp) send('inp', Math.round(inp));
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flush();
+  });
+  new PO((list) => {
+    for (const e of list.getEntries() as Array<PerformanceEntry & { value?: number; duration?: number; interactionId?: number }>) {
+      if (e.entryType === 'layout-shift' && !(e as unknown as { hadRecentInput?: boolean }).hadRecentInput) cls += e.value ?? 0;
+      if (e.entryType === 'event' && e.interactionId) inp = Math.max(inp, e.duration ?? 0);
+      if (e.entryType === 'largest-contentful-paint') send('lcp', Math.round(e.startTime));
+    }
+  }).observe({ entryTypes: ['layout-shift', 'event', 'largest-contentful-paint'] });
+}

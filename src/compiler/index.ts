@@ -110,6 +110,8 @@ export interface CompileResult {
   buffer?: boolean;
   /** the component exports `prefetch = 'off' | 'hover' | 'viewport' | 'all'` (app-global link-prefetch strategy) */
   prefetch?: string;
+ /** The component exports `vitals = true` (app-global web-vitals reporting) */
+  vitals?: boolean;
  /** the component exports `bundle = 'inline' | 'split'` (app-global client bundle mode) */
   bundle?: string;
  /** The static analysis says this component needs the client bundle */
@@ -882,6 +884,16 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   if (prefetch && !['off', 'hover', 'viewport', 'all'].includes(prefetch)) {
     throw new Error(`${filePath}: export const prefetch must be 'off', 'hover', 'viewport' or 'all'`);
   }
+ // `export const vitals = true` turns on the
+  // client-side web-vitals hook (runtime reportVitals). App-global like
+  // prefetch, declared once (the root layout). A boolean export, so the only
+  // typo that matters is a non-boolean value - which JS would coerce, so the
+  // value is validated here instead.
+  const vitalsMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+vitals\s*=\s*([^;\n]+)\s*;?/);
+  const vitals = vitalsMatch ? vitalsMatch[1].trim() === 'true' : undefined;
+  if (vitalsMatch && !vitals) {
+    throw new Error(`${filePath}: export const vitals must be true (or be absent - the hook ships only when an app asks for it)`);
+  }
  // The bundle mode - the fix for the large-app
   // architecture gap. 'inline' (the default) is the single-document mode:
   // the whole client bundle rides inside the HTML, one request, zero
@@ -1205,6 +1217,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
     csr,
     buffer,
     prefetch,
+    vitals,
     bundle,
     needsClient,
     clientReasons,
@@ -3285,6 +3298,14 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
   // | 'all'`. First declaration wins; absent -> 'all' = the original behavior
   // (hover/focus/touch + viewport/idle). trade-off: app-global, not per-route.
   const prefetchMode = compiled.find((c) => c.prefetch)?.prefetch ?? 'all';
+ // The client-side web-vitals hook, declared once
+  // (the root layout) as `export const vitals = true`. First declaration wins,
+  // app-global like prefetch. Absent -> the runtime's reportVitals is never
+  // imported, so esbuild drops it and a bundle that does not ask pays nothing.
+  const vitalsOn = compiled.some((c) => c.vitals === true);
+  const vitalsBlock = vitalsOn
+ ? `\n// the app asked for web-vitals - measure once, at boot, and let the\n// app decide where the numbers go (one 'rosefn:vitals' CustomEvent per metric).\nreportVitals;\n`
+    : '';
 
  // The <html lang dir> tracker only exists when the app actually has
   // a [lang] route - an app without i18n pays nothing for it (and the whole
@@ -3324,11 +3345,13 @@ setLocalePacks(${JSON.stringify(packed)});
 ${hasLang ? `// the default locale, kept beside setLocales' own copy so <html lang> can
 // follow a route that carries no [lang] segment (a non-i18n page)
 const __defLocale = '${defaultLocale}';` : ''}
+${vitalsOn ? `// the app asked for web-vitals. The import is what keeps\n// reportVitals alive through minification and tree-shaking; the call is one\n// statement at boot, before the first render.\nimport { reportVitals } from './runtime.js';`: ''}
 // The two pack doors, re-exported for an app that wants to warm a language
 // before its visitor asks for it (ensureLocale) or to feed a dictionary it
 // fetched itself (loadLocale). Both are already in the bundle - ensureLocale
 // is what applyParams calls - so the re-export costs the statement alone.
 export { ensureLocale, loadLocale } from './runtime.js';
+${vitalsBlock}
 
 const routes = [
   ${clientRoutes}
