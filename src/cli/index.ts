@@ -73,7 +73,7 @@ function sendHtml(req: any, res: any, status: number, html: string, extraHeaders
     return;
   }
   res.setHeader('ETag', etag);
-  const enc = pickEncoding(req);
+  const enc = devMode ? null : pickEncoding(req);
   if (enc) {
     res.setHeader('Content-Encoding', enc);
     res.end(compress(enc, html));
@@ -187,6 +187,15 @@ const PORT = Number(process.env.PORT) || 3000;
  * import must NOT be per-request: server state (stores mutated by server
  * actions) lives in that module, and a fresh import per request would
  * reset it on every hit, so an action's effect would vanish immediately.
+ *
+ * The dev re-import needs a NEW PATH, not a new `?v=` query: tsx's ESM
+ * loader (which `npm run dev` runs the CLI through) caches by resolved
+ * path and ignores the search string, so the query trick silently handed
+ * back the previous module - a rebuild that served the OLD code until the
+ * NEXT rebuild landed, which is exactly the "hot reload" a developer
+ * cannot trust. A copied file under dist/.build/ (which every build
+ * deletes, and which never ships) is a new module under any loader.
+ * Preview and serve never rebuild, so they import dist/server.js itself.
  */
 let serverModule: any = null;
 let serverMtime = -1;
@@ -198,7 +207,13 @@ async function loadServer(): Promise<any> {
   if (!serverModule || mtimeMs !== serverMtime) {
     serverMtime = mtimeMs;
     serverVersion++;
-    serverModule = await import(pathToFileURL(file).href + '?v=' + serverVersion);
+    let target = file;
+    if (devMode) {
+      target = path.join(OUT_DIR, '.build', `server-${serverVersion}.mjs`);
+      await fs.promises.mkdir(path.dirname(target), { recursive: true });
+      await fs.promises.copyFile(file, target);
+    }
+    serverModule = await import(pathToFileURL(target).href);
   }
   return serverModule;
 }
@@ -669,7 +684,107 @@ function webHeadersToNode(web: any): Record<string, any> {
   return out;
 }
 
-function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
+// --- dev-only live reload + state bridge ---
+// The dev server rebuilds on change; without a signal the browser keeps
+// showing the previous document until the developer thinks to refresh. The
+// bridge closes that loop at ZERO production cost: the injected script exists
+// only in dev-served documents, so the shipped bundle, the strict CSP and the
+// streamed/compressed paths are untouched. On a rebuild the bridge snapshots
+// the live signal graph (window.__rosefn.state()), posts it to the dev server
+// and reloads; the server hands the snapshot back inside the next document, so
+// the edit lands on the state the developer had instead of a fresh render's.
+const DEV_BRIDGE = `<script>(function(){var es=new EventSource('/__rosefn_reload');es.onmessage=function(m){if(m.data!=='rebuild')return;es.close();var s=window.__rosefn?window.__rosefn.state():null;if(s)fetch('/__rosefn_state',{method:'POST',body:s,headers:{'content-type':'application/json'}}).catch(function(){});setTimeout(function(){location.reload()},40)}})()</script>`;
+// One slot: the next document a dev client asks for carries it back. trade-off:
+// a single browser tab is the dev case; two tabs racing for the seed simply
+// means one of them renders from the server's fresh state.
+let devResume: string | null = null;
+const devClients = new Set<any>();
+// Set once, when the dev server wraps its handler: this process serves dev
+// documents, so sendHtml answers them buffered and uncompressed (the bridge
+// injects into the body, and a compressed or already-flushed body cannot be
+// injected into). Preview and serve never set it.
+let devMode = false;
+
+function devReload(req: any, res: any): void {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+  });
+  res.write(': ok\n\n');
+  devClients.add(res);
+  req.on('close', () => devClients.delete(res));
+}
+
+function devSaveState(req: any, res: any): void {
+  let body = '';
+  req.on('data', (c: any) => {
+    body += c;
+    if (body.length > 1e6) req.destroy(); // a state snapshot is kilobytes; refuse a runaway
+  });
+  req.on('end', () => {
+    try {
+      JSON.parse(body);
+      devResume = body;
+    } catch { /* a corrupt snapshot is dropped: the next render is simply fresh */ }
+    res.writeHead(204).end();
+  });
+}
+
+/** Push the rebuild signal to every open dev tab. */
+function devNotify(): void {
+  for (const res of devClients) {
+    try {
+      res.write('data: rebuild\n\n');
+    } catch {
+      devClients.delete(res);
+    }
+  }
+}
+
+/**
+ * Wrap a dev response so every HTML document carries the bridge (and the
+ * resumed state, once). Wrapping res is the one choke point that covers the
+ * buffered and the streamed paths alike - the alternative is a flag threaded
+ * through five call sites plus the generated server bundle's own shell writer.
+ * The bridge script is not hashed, so dev also drops the CSP header: the hash
+ * policy is a production guarantee and dev documents are localhost-only.
+ */
+function devWrap(inner: (req: any, res: any) => void): (req: any, res: any) => void {
+  devMode = true;
+  return (req, res) => {
+    const url = req.url || '/';
+    if (url.startsWith('/__rosefn_reload')) return devReload(req, res);
+    if (url.startsWith('/__rosefn_state') && req.method === 'POST') return devSaveState(req, res);
+    let injected = false;
+    // The resumed snapshot belongs to the NEXT request, whatever it turns out
+    // to be: a document that answers 304 (nothing changed) consumes it too,
+    // and the browser keeps its cached copy - which already carries the state.
+    const seed = devResume;
+    devResume = null;
+    const isHtml = () => String(res.getHeader('content-type') || '').includes('text/html');
+    const inject = (chunk: any): any => {
+      if (injected || !isHtml()) return chunk;
+      const s = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+      const at = s.indexOf('<head>');
+      if (at < 0) return chunk; // not a document (an asset, a JSON body): leave it alone
+      injected = true;
+      const resume = seed ? `<script>window.__rosefn_resume=${seed.replace(/<\//g, '<\\/')}</script>` : '';
+      const out = s.slice(0, at + 6) + resume + DEV_BRIDGE + s.slice(at + 6);
+      return Buffer.isBuffer(chunk) ? Buffer.from(out, 'utf8') : out;
+    };
+    const write = res.write.bind(res);
+    res.write = (chunk: any, ...rest: any[]) => write(inject(chunk), ...rest);
+    const end = res.end.bind(res);
+    res.end = (chunk: any, ...rest: any[]) => {
+      if (!res.headersSent && isHtml()) res.removeHeader('Content-Security-Policy');
+      end(chunk === undefined || chunk === null ? chunk : inject(chunk), ...rest);
+    };
+    inner(req, res);
+  };
+}
+
+function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any) => void {
   return (req, res) => {
     // The origin guard runs before everything else - middleware, api
     // dispatch, the static lookup - because a cross-site write must not
@@ -905,7 +1020,11 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
           res.end();
           return;
         }
-        const enc = pickEncoding(req);
+        // Dev answers the file uncompressed: the reload bridge injects into
+        // the body, and a compressed body has no `<head>` left to find. The
+        // compression here is a production optimization whose only effect -
+        // fewer bytes on the wire - is invisible on localhost.
+        const enc = devMode ? null : pickEncoding(req);
         res.statusCode = status;
         if (enc) {
           res.setHeader('Content-Encoding', enc);
@@ -944,7 +1063,12 @@ function serveStatic(dir: string, isr = false): (req: any, res: any) => void {
       // P0-2: `buffer = true` routes take the buffered path even when they
       // could stream - the response hooks then see the whole document and a
       // failed render keeps its real status. The app decides, per route.
-      if (!broken.has(safe2) && !ssrModule.isBuffered?.(safe2) && ssrModule.canStream(safe2) && !ssrModule.isNoJs(safe2)) {
+      // Dev takes the buffered path too: the reload bridge has to inject into
+      // the document, and a stream's bytes are already on the wire (and
+      // possibly compressed) by the time the render finishes. The stream is a
+      // production optimization whose whole point - TTFB - is invisible on
+      // localhost.
+      if (!dev && !broken.has(safe2) && !ssrModule.isBuffered?.(safe2) && ssrModule.canStream(safe2) && !ssrModule.isNoJs(safe2)) {
         const enc = pickEncoding(req);
  // onResponse runs BEFORE the first flush, while the status
         // and headers can still change: the hook is handed a bodyless Response
@@ -1141,15 +1265,19 @@ async function dev(): Promise<void> {
       try {
         console.log('Rebuilding...');
         await build();
+ // Tell the open tabs. Without this the rebuild lands on disk
+        // and the browser keeps showing the previous document until the
+        // developer thinks to refresh - the "hot rebuild" was only half true.
+        devNotify();
       } catch (err) {
         // Never let a user-code error kill the dev server.
-        console.error('Build failed (server still running):', err instanceof Error ? err.message : err);
+        console.error('Build failed (server still running):', err instanceof Error ? err.message : String(err));
       }
     }, 200);
   });
 
   const http = await import('http');
-  const server = http.createServer(serveStatic(OUT_DIR));
+  const server = http.createServer(devWrap(serveStatic(OUT_DIR, false, true)));
 
   // P0-0: an occupied port hops to the next free one (and says so) instead of
   // killing the server with EADDRINUSE.
