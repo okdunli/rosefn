@@ -3875,12 +3875,12 @@ setRefreshHook(async () => {
 
   const publicDir = path.join(root, 'public');
   if (fs.existsSync(publicDir)) {
-    const outPublic = path.join(outDir, 'public');
-    await fs.promises.mkdir(outPublic, { recursive: true });
-    const assets = await fs.promises.readdir(publicDir);
-    await Promise.all(
-      assets.map((a) => fs.promises.copyFile(path.join(publicDir, a), path.join(outPublic, a)))
-    );
+    // P0 (BUG.md 2026.9.22): public/ is copied RECURSIVELY. The flat version -
+    // readdir once, copyFile per entry - failed on the first subdirectory it
+    // met (EPERM on Windows, EISDIR on Linux), so a project that organizes
+    // its assets the way every real project does (public/icons/*.svg,
+    // public/fonts/*.woff2, public/uploads/...) could not build at all.
+    await fs.promises.cp(publicDir, path.join(outDir, 'public'), { recursive: true });
   }
 
  // The build's zero-JS lint report - every route, its
