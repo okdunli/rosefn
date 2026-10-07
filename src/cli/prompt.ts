@@ -56,6 +56,10 @@ Rules the compiler enforces (breaking one fails the build):
   type arguments ($state<Post[]>([])) are all erased from the shipped bundles.
 - $state / $data declarations are top-level statements. The declared name IS the
   getter: write count() in the template and the script, never bare count.
+- A route param (pages/blog/[id].rose) is read as state too: declare it
+  (\`let id = $state('1')\`) and read id() - the server overwrites the default
+  with the URL's value, and export const params = { id: [...] } bakes those
+  values at build time.
 - $data() is banned in components (src/components/**) - a component renders
   synchronously inside its parent. Fetch in the page or the middleware and pass
   the value down as a prop.
