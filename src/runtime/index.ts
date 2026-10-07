@@ -24,6 +24,9 @@ function entry(key: string, initial: unknown): { value: unknown; subs: Set<Subsc
 }
 
 export function state<T>(key: string, initial: T): [() => T, (v: T) => void] {
+ // The key belongs to whoever is rendering, so a mount's navigation
+  // can drop exactly its own keys (see resetContainerFx).
+  ownerKeys()?.add(key);
   const e = entry(key, initial);
 
   const getter = () => {
@@ -53,6 +56,57 @@ export function setState<T>(key: string, value: T): void {
 // Each cleanup removes itself, so locally disposed effects do not leak.
 const cleanups = new Set<Cleanup>();
 
+// Per-container ownership. A mount (dist/mount.js) renders a rosefn
+// app inside a FOREIGN page, and a page can host several mounts - so the
+// effect/cleanup/key bookkeeping cannot be one global set: one mount's
+// navigation must not dispose another's reactivity, and the signal map is
+// shared by design. While an owner is set, everything a render creates is
+// attributed to it; the document path (no owner) keeps the global set and
+// the global resetEffects()/clearRequestState() exactly as they were.
+let fxOwner: object | null = null;
+const fxByOwner = new WeakMap<object, Set<Cleanup>>();
+const keysByOwner = new WeakMap<object, Set<string>>();
+const fxSet = (): Set<Cleanup> => {
+  if (!fxOwner) return cleanups;
+  let s = fxByOwner.get(fxOwner);
+  if (!s) { s = new Set(); fxByOwner.set(fxOwner, s); }
+  return s;
+};
+const ownerKeys = (): Set<string> | null => {
+  if (!fxOwner) return null;
+  let s = keysByOwner.get(fxOwner);
+  if (!s) { s = new Set(); keysByOwner.set(fxOwner, s); }
+  return s;
+};
+
+/** Attribute everything the current render creates to `container` (null = the
+ *  document's global bookkeeping). The client entry sets this around every
+ *  mount render and clears it after. */
+export function setFxOwner(container: object | null): void {
+  fxOwner = container;
+}
+
+/**
+ * Dispose everything ONE container created - its effects, its onCleanups, the
+ * state keys its render seeded, and the render caches - leaving every other
+ * container (and the document) untouched. A mount's navigation calls this
+ * instead of the global reset; the document path keeps the global pair.
+ */
+export function resetContainerFx(container: object): void {
+  const set = fxByOwner.get(container);
+  if (set) {
+    set.forEach((fn: Cleanup) => fn());
+    fxByOwner.delete(container);
+  }
+  const keys = keysByOwner.get(container);
+  if (keys) {
+    keys.forEach((k: string) => signalMap.delete(k));
+    keysByOwner.delete(container);
+  }
+  dataCache.clear();
+  pendingDeltas.clear();
+}
+
 export function effect(fn: () => void): Cleanup {
   const wrapped: Subscriber = () => {
     try {
@@ -67,9 +121,9 @@ export function effect(fn: () => void): Cleanup {
   currentEffect = prev;
   const cleanup: Cleanup = () => {
     signalMap.forEach((e: { subs: Set<Subscriber> }) => e.subs.delete(wrapped));
-    cleanups.delete(cleanup);
+    fxSet().delete(cleanup);
   };
-  cleanups.add(cleanup);
+  fxSet().add(cleanup);
   return cleanup;
 }
 
@@ -484,19 +538,26 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
   // body. A top-level wire with no head blocks (route without <head>) clears
   // the previous route's managed head; nested wires (if/each blocks) never
   // contain head blocks.
-  if (headBlocks.length > 0) {
-    const blocks = headBlocks;
-    weff(() => {
-      let html = '';
-      for (const b of blocks) html += String((closes[b.idx] as (s?: unknown) => unknown)(scope));
-      applyHead(html);
-    });
-    for (const b of blocks) {
-      b.nodes.forEach((nd) => nd.remove());
-      b.start.remove();
-      b.end.remove();
-    }
-  } else if (root.nodeType !== 11) clearHead();
+ // Only the DOCUMENT's app root owns <head>. A mount (dist/mount.js)
+  // wires a container inside a FOREIGN page: the host's title and meta are
+  // the host's, so a mounted route's head content stays in the container as
+  // inert body nodes (its <style> still applies, which is the point) and is
+  // never applied to - or cleared from - the host document.
+  if (root === document.getElementById('app')) {
+    if (headBlocks.length > 0) {
+      const blocks = headBlocks;
+      weff(() => {
+        let html = '';
+        for (const b of blocks) html += String((closes[b.idx] as (s?: unknown) => unknown)(scope));
+        applyHead(html);
+      });
+      for (const b of blocks) {
+        b.nodes.forEach((nd) => nd.remove());
+        b.start.remove();
+        b.end.remove();
+      }
+    } else if (root.nodeType !== 11) clearHead();
+  }
 
   // Attributes: data-b="K:attrName"
   const els = (holder as Element).querySelectorAll('[data-b]');
@@ -713,7 +774,7 @@ export function flushMounts(): void {
 
 /** Register a disposer for the current render (the effects' cleanup channel). */
 export function onCleanup(fn: Cleanup): void {
-  cleanups.add(fn);
+  fxSet().add(fn);
 }
 
 /**

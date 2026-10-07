@@ -2471,6 +2471,16 @@ function generateClient(
   const handlerRegistry = eventBindings.length > 0
     ? `Object.assign(handlers, { ${eventBindings.map((b) => b.fn).join(', ')} });`
     : '';
+  // The same $setState helper the SSR module defines for its actions - the
+  // client bundle needs it too, and for the same reason: an INLINE handler's
+  // body (`on:click={() => $setState('n', n() + 1)}`) is the one place the
+  // call survives verbatim (the script's own calls were rewritten to their
+  // setters long before), so without this a click threw ReferenceError in
+  // the browser - on a standalone page as much as in a mount. Emitted only
+  // when something can bind, so esbuild drops it everywhere else.
+  const clientSetState = eventBindings.length > 0
+    ? `const $setState = (key, value) => setState(key, value);`
+    : '';
   const headCode = headFn
     ? `
 const __head = () => { let __hd = ''; ${headFn} return __hd; };
@@ -2483,7 +2493,7 @@ ${RUNTIME_IMPORTS}
 ${imports}
 
 ${exports}
-
+${clientSetState ? `\n${clientSetState}\n` : ''}
 ${namedSlots ? SLOT_HELPER : ''}
 
 export ${isComponent ? 'function' : 'async function'} render(closes, children, __props, __slots) {
@@ -2546,6 +2556,81 @@ export function buildReport(infos: RouteInfo[], compiled: CompileResult[]): stri
       return `${info.routePath}  client JS  ${why}${forced}`;
     });
 }
+
+/**
+ * The mount entry - the migration door. A foreign
+ * page (the legacy half of a micro-frontend, or an old app adopting rosefn
+ * one route at a time) marks containers and includes this one file:
+ *
+ *   <div data-rosefn="/checkout"></div>
+ *   <script type="module" src="/mount.js"></script>
+ *
+ * Each container fetches its route's own document - the same one-request,
+ * zero-hydration shape a standalone page gets - adopts the server's DOM in
+ * place, and navigates inside itself: the host page keeps its URL, its
+ * history, its <head> and every node outside the container. It imports the
+ * same /client.js the documents use (mode B's entry, or the inline build's
+ * bundle), so there is no second runtime and no hydration.
+ *
+ * Written verbatim, not minified: it ships once per app (not once per
+ * document) and the servers compress it like any other asset. The cost to a
+ * normal rosefn document is zero bytes - nothing references it unless the
+ * host page does.
+ */
+const MOUNT_ENTRY = `// Rosefn mount: embed this app inside a foreign page.
+// <div data-rosefn="/route"></div> + <script type="module" src="/mount.js"></script>
+// One fetch per container (the route's own document), zero hydration, and
+// navigation that never touches the host page's URL, history or <head>.
+import { start, postForm } from '/client.js';
+
+for (const el of document.querySelectorAll('[data-rosefn]')) {
+  const route = el.getAttribute('data-rosefn');
+  const doc = await fetch(route).then((r) => (r.ok ? r.text() : ''));
+  const parsed = new DOMParser().parseFromString(doc, 'text/html');
+  // A JS-shipping document wraps its content in #app; a zero-JS route's
+  // content is the body's own (no wrapper). Either way: the server's DOM,
+  // minus the scripts it inlined.
+  const app = parsed.getElementById('app');
+  if (app) {
+    el.innerHTML = app.innerHTML;
+  } else {
+    for (const node of Array.from(parsed.body.children)) {
+      if (!/^(?:SCRIPT|LINK|STYLE)$/.test(node.tagName)) el.appendChild(node);
+    }
+  }
+  // start() resumes from #__rosefn_state (zero hydration), so the state
+  // script rides along inside the container - and is dropped once adopted.
+  const state = parsed.getElementById('__rosefn_state');
+  if (state) el.appendChild(state);
+  // A static-file server's SPA fallback answers the shell for an unknown
+  // path, and its #app holds a DIFFERENT route: adopt only a document the
+  // server really rendered for this route, else render it from the bundle.
+  const rendered = state ? JSON.parse(state.textContent || '{}').__route : null;
+  await start(el, route, rendered === route);
+  if (state) state.remove();
+  // Navigation stays inside the mount: the listener bails for anything
+  // outside the container, so the host page's own links keep working. The
+  // attribute is kept in step with what is mounted - it is how a server
+  // action inside the mount finds its route (and its container).
+  el.addEventListener('click', (e) => {
+    const a = e.target.closest && e.target.closest('a[href^="/"]');
+    if (!a || !el.contains(a)) return;
+    e.preventDefault();
+    el.setAttribute('data-rosefn', a.getAttribute('href'));
+    start(el, a.getAttribute('href'), false);
+  });
+  // Progressive-enhancement forms work inside a mount too: the native POST
+  // would replace the HOST page, so the submit is intercepted and adopted
+  // in place - the same one-request, in-place contract as a standalone page.
+  el.addEventListener('submit', (e) => {
+    const f = e.target;
+    if (!f || f.tagName !== 'FORM' || f.hasAttribute('data-on-submit')) return;
+    if ((f.getAttribute('method') || '').toLowerCase() !== 'post') return;
+    e.preventDefault();
+    postForm(new FormData(f), el, el.getAttribute('data-rosefn'));
+  });
+}
+`;
 
 export async function buildProject(root: string, outDir: string): Promise<{ routes: RouteInfo[]; bundle: string }> {
   await fs.promises.mkdir(outDir, { recursive: true });
@@ -3458,19 +3543,24 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
       // logical properties both read it). A route with no [lang] segment
       // returns to the default locale, and a bogus segment falls back to it
       // too, exactly like the server's docAttrs.
+ // Only when this container IS the document's app root. A mount
+      // (dist/mount.js) renders into a foreign page, whose language and
+      // direction belong to the host, not to the mounted route.
       const seg = langIdx >= 0 ? pathname.split('/')[langIdx] : '';
       const known = !seg || isLocale(seg);
-      const docLang = known && seg ? seg : __defLocale;
-      document.documentElement.lang = docLang;
-      const docDir = localeDir(docLang);
-      if (docDir) document.documentElement.setAttribute('dir', docDir);
-      else document.documentElement.removeAttribute('dir');
+      if (container === document.getElementById('app')) {
+        const docLang = known && seg ? seg : __defLocale;
+        document.documentElement.lang = docLang;
+        const docDir = localeDir(docLang);
+        if (docDir) document.documentElement.setAttribute('dir', docDir);
+        else document.documentElement.removeAttribute('dir');
+      }
       if (!known) {`
     : `      if (langIdx >= 0 && !isLocale(pathname.split('/')[langIdx])) {`;
 
   const clientEntry = `
 ${clientImports}
-import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState } from './runtime.js';
+import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState, setFxOwner, resetContainerFx } from './runtime.js';
 
 // i18n: the dictionaries baked at build time - the client
 // renders any PRELOADED locale from the bundle, so switching language costs
@@ -3530,18 +3620,19 @@ const errorPage = ${errorRender};
 
 // Paint a fallback page (404/500) into the container, wired like any render.
 async function paintFallback(container, page, builtin) {
-  resetEffects();
-  clearRequestState();
+  __navReset(container);
   clearMounts(); // a failed render leaves stale mounts behind
   // inline mode passes the render itself; split mode passes a loader
   const render = page ? await getRender(page) : null;
   if (render) {
     const closes = [];
-    const html = await render(closes, '');
-    container.innerHTML = html;
-    wire(container, closes);
-    bindEvents(container);
-    flushMounts();
+    await __withOwner(container, async () => {
+      const html = await render(closes, '');
+      container.innerHTML = html;
+      wire(container, closes);
+      bindEvents(container);
+      flushMounts();
+    });
     return;
   }
   container.innerHTML = builtin;
@@ -3603,10 +3694,24 @@ async function applyParams(route, pathname) {
   if (langIdx >= 0) await ensureLocale(pathParts[langIdx]);
 }
 
+// The network decides too. Prefetch spends bytes BEFORE the click -
+// the one thing a data-saver (navigator.connection.saveData) or a 2g link
+// explicitly refuses. NetworkInformation is Chromium-only and feature-
+// detected; read live per call, so a connection that upgrades mid-session is
+// picked up on the next hover. Everywhere else the app's strategy stands.
+function __netOk() {
+  const c = navigator.connection;
+  if (!c) return true;
+  if (c.saveData) return false;
+  const t = c.effectiveType;
+  return t !== 'slow-2g' && t !== '2g';
+}
+
 export function prefetch(pathname, source = 'hover') {
   if (prefetchMode === 'off') return;
   if (prefetchMode === 'hover' && source !== 'hover') return;
   if (prefetchMode === 'viewport' && source !== 'viewport') return;
+  if (!__netOk()) return; // save-data / 2g: no bytes before the click
   if (prefetchCache.has(pathname)) return;
   if (pathname === location.pathname) return; // already here: nothing to prefetch
   const route = routes.find((r) => matchRoute(r.pattern, pathname));
@@ -3657,7 +3762,7 @@ export function prefetch(pathname, source = 'hover') {
 }
 
 export function prefetchStats() {
-  return { cached: prefetchCache.size, pending: prefetchPending, mode: prefetchMode };
+  return { cached: prefetchCache.size, pending: prefetchPending, mode: prefetchMode, network: __netOk() };
 }
 
 // One delegated listener per event type on the app container: survives DOM
@@ -3686,15 +3791,20 @@ function bindEvents(container) {
 // the swapped DOM is the page as it looks AFTER the action - one request, no
 // reload, and wire() patches only the marked nodes (no re-render). The
 // bootstrap's <form method="POST"> interception goes through the same door.
-async function postForm(body) {
-  const res = await fetch(location.pathname, { method: 'POST', body });
+async function postForm(body, container, pathname) {
+ // A mount passes its own container and route - without them the
+  // POST would target the host page's URL and adopt into a #app the host
+  // page does not have. The document path passes neither and gets both
+  // defaults, which is exactly what it always used.
+  const box = container || document.getElementById('app');
+  const route = pathname || location.pathname;
+  const res = await fetch(route, { method: 'POST', body });
   const html = await res.text();
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const next = doc.getElementById('app');
   const st = doc.getElementById('__rosefn_state');
   const paint = () => {
-    const container = document.getElementById('app');
-    adopt(container, next ? next.innerHTML : '', st ? st.textContent : '{}');
+    adopt(box, next ? next.innerHTML : '', st ? st.textContent : '{}', route);
   };
   if (document.startViewTransition) document.startViewTransition(paint);
   else paint();
@@ -3707,7 +3817,12 @@ export async function $action(name, e) {
   if (e && e.preventDefault) e.preventDefault();
   const body = new FormData();
   body.append('__action', name);
-  return postForm(body);
+ // An event inside a mount belongs to that mount - the attribute is
+  // kept in step with what is currently mounted, so the POST targets the
+  // mounted route and the response lands in the mounted container. Outside a
+  // mount, closest() is null and the document defaults apply.
+  const box = e && e.target && e.target.closest ? e.target.closest('[data-rosefn]') : null;
+  return postForm(body, box || undefined, box ? box.getAttribute('data-rosefn') : undefined);
 }
 
 export { postForm };
@@ -3722,6 +3837,35 @@ export { serializeState };
 // initial=true: adopt the SSR DOM (zero hydration) - wire reactive markers to
 // the existing nodes and bind events. initial=false: client-side navigation -
 // re-render the route chain from scratch and wire the fresh DOM.
+
+// One gate for the two ownership models, so they can never drift. The
+// DOCUMENT's app root owns the global bookkeeping - every effect, every
+// cleanup, every state key, exactly as before mounts existed. A mount
+// container owns its own slice: its navigation disposes and re-seeds only
+// what IT created, so a page hosting several mounts keeps them all live.
+function __ownsDoc(container) {
+  return container === document.getElementById('app');
+}
+function __navReset(container) {
+  if (__ownsDoc(container)) {
+    resetEffects();
+    clearRequestState();
+  } else {
+    resetContainerFx(container);
+  }
+}
+// Attribute everything a render creates (state keys, effects, onCleanups) to
+// its container. The document path sets no owner and keeps the global sets.
+async function __withOwner(container, fn) {
+  if (__ownsDoc(container)) return fn();
+  setFxOwner(container);
+  try {
+    return await fn();
+  } finally {
+    setFxOwner(null);
+  }
+}
+
 export async function start(container, pathname, initial) {
   clearMounts(); // stale mounts from a failed render never fire
   if (initial) {
@@ -3745,43 +3889,52 @@ ${langDirBlock}
       if (hit && typeof hit.then === 'function') hit = await hit; // in-flight: land it first
       if (hit) {
         prefetchCache.delete(pathname); // single-use: the next hover refetches
-        resetEffects();
+        __navReset(container);
         restoreState(hit.state);
         container.innerHTML = hit.html;
-        wire(container, hit.closes);
+        await __withOwner(container, () => {
+          wire(container, hit.closes);
+          bindEvents(container);
+          hit.mounts.forEach((fn) => fn()); // the prefetched route's mounts
+          adoptCleanups(hit.cleanups); // and its cleanups, for the next reset
+        });
+        return;
+      }
+      if (!initial) __navReset(container);
+      let broken = false;
+      await __withOwner(container, async () => {
+        await applyParams(route, pathname);
+        const closes = [];
+        let html;
+        try {
+          const render = await getRender(route); // split mode: loads the route's chunk here
+          html = await render(closes, '');
+        } catch {
+          // the route itself is broken: degrade to pages/500.rose (or the
+          // built-in plain 500) instead of leaving the container empty
+          broken = true;
+          return;
+        }
+        if (!initial) container.innerHTML = html;
+        wire(container, closes);
         bindEvents(container);
-        hit.mounts.forEach((fn) => fn()); // the prefetched route's mounts
-        adoptCleanups(hit.cleanups); // and its cleanups, for the next resetEffects
-        return;
-      }
-      if (!initial) {
-        resetEffects();
-        clearRequestState();
-      }
-      await applyParams(route, pathname);
-      const closes = [];
-      let html;
-      try {
-        const render = await getRender(route); // split mode: loads the route's chunk here
-        html = await render(closes, '');
-      } catch {
-        // the route itself is broken: degrade to pages/500.rose (or the
-        // built-in plain 500) instead of leaving the container empty
+        flushMounts();
+      });
+      if (broken) {
         await paintFallback(container, errorPage, '<h1>500</h1><p>Something went wrong rendering this page.</p>');
-        return;
       }
-      if (!initial) container.innerHTML = html;
-      wire(container, closes);
-      bindEvents(container);
-      flushMounts();
       return;
     }
   }
   // unmatched route: pages/404.rose renders (with its head + interactivity),
   // else the built-in plain 404 - and an i18n app's document returns to the
   // default locale, the same one the server stamps on its 404
-${hasLang ? `  document.documentElement.lang = __defLocale;
-  document.documentElement.removeAttribute('dir');` : ''}
+${hasLang ? ` // the same app-root gate as above - a mount never touches the
+  // host document's language or direction.
+  if (container === document.getElementById('app')) {
+    document.documentElement.lang = __defLocale;
+    document.documentElement.removeAttribute('dir');
+  }` : ''}
   await paintFallback(container, notFound, '<h1>404</h1><p>Page not found</p>');
 }
 
@@ -3791,9 +3944,11 @@ ${hasLang ? `  document.documentElement.lang = __defLocale;
 // the same zero-render trick as boot: re-run the route's render to rebuild
 // the marker closures, wire them against the adopted nodes. The page never
 // re-renders visibly, no hydration payload, no second request beyond the POST.
-export async function adopt(container, html, stateJson) {
-  resetEffects();
-  clearRequestState();
+export async function adopt(container, html, stateJson, pathname) {
+ // The route the response belongs to. A mount passes its own; the
+  // document path passes nothing and keeps location.pathname.
+  const route0 = pathname || location.pathname;
+  __navReset(container);
   clearMounts(); // stale mounts from a failed render never fire
   resumeState(stateJson);
   container.innerHTML = html;
@@ -3801,20 +3956,22 @@ export async function adopt(container, html, stateJson) {
   const st = document.getElementById('__rosefn_state');
   if (st) st.textContent = stateJson;
   for (const route of routes) {
-    if (matchRoute(route.pattern, location.pathname)) {
-      await applyParams(route, location.pathname);
-      const closes = [];
-      try {
-        const render = await getRender(route); // split mode: loads the route's chunk here
-        await render(closes, '');
-      } catch {
-        // the adopted response's route is broken (e.g. the action's page
-        // throws): keep the swapped DOM but skip wiring it
-        return;
-      }
-      wire(container, closes);
-      bindEvents(container);
-      flushMounts();
+    if (matchRoute(route.pattern, route0)) {
+      await __withOwner(container, async () => {
+        await applyParams(route, route0);
+        const closes = [];
+        try {
+          const render = await getRender(route); // split mode: loads the route's chunk here
+          await render(closes, '');
+        } catch {
+          // the adopted response's route is broken (e.g. the action's page
+          // throws): keep the swapped DOM but skip wiring it
+          return;
+        }
+        wire(container, closes);
+        bindEvents(container);
+        flushMounts();
+      });
       return;
     }
   }
@@ -3869,6 +4026,11 @@ setRefreshHook(async () => {
       ...TS_LOADER,
     });
   }
+
+ // The mount entry. Both modes produce a stable /client.js, so one
+  // verbatim file serves either - the host page includes it, the containers
+  // declare their routes, and everything else above is unchanged.
+  await fs.promises.writeFile(path.join(outDir, 'mount.js'), MOUNT_ENTRY);
 
   // the deploy dir now holds only real artifacts
   await fs.promises.rm(buildDir, { recursive: true, force: true });
