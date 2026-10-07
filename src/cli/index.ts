@@ -7,8 +7,9 @@ import * as path from 'path';
 import * as zlib from 'zlib';
 import { createRequire } from 'module';
 import { pathToFileURL, fileURLToPath } from 'url';
-import { buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadPlugins, type RouteInfo } from '../compiler/index.js';
+import { buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadPlugins, RoseError, errorInfo, type RouteInfo } from '../compiler/index.js';
 import { getHtmlShell, getClientSource, getStyles, shellOpen, clientScriptTag, securityHeaders, mintNonce, setBundleMode } from './shell.js';
+import { AI_PROMPT } from './prompt.js';
 // Type-only: erased by esbuild/tsx, so the published CLI stays a ~100 KB
 // bundle with no TypeScript dependency. `rosefn check` loads the PROJECT's
 // own typescript at runtime instead.
@@ -1724,11 +1725,36 @@ async function check(): Promise<void> {
   process.exit(1);
 }
 
-const cmd = process.argv[2];
-if (cmd === 'dev') dev();
-else if (cmd === 'build') build();
-else if (cmd === 'preview') preview();
-else if (cmd === 'serve') serve();
-else if (cmd === 'new') scaffold();
-else if (cmd === 'check') check();
-else console.log('Usage: rosefn dev|build|preview|serve|new|check [dir]   (dir defaults to the current directory; dist/ is written there)');
+const argv = process.argv.slice(2);
+const cmd = argv[0];
+// --json: failures print as a machine-readable envelope on stdout - the code,
+// the file, the line and the hint, one JSON object an agent can parse and act
+// on. The human output stays the default (message + hint + location).
+const asJson = argv.includes('--json');
+
+/** Print a failure the way its reader needs it. A RoseError is the
+ *  developer's (or the agent's) to fix from its code alone; anything else
+ *  keeps its stack, because it is not. Always exits non-zero: a build that
+ *  says nothing and succeeds is the worst failure mode there is. */
+function reportFailure(err: unknown): never {
+  if (asJson) {
+    process.stdout.write(`${JSON.stringify({ ok: false, errors: [errorInfo(err)] })}\n`);
+  } else if (err instanceof RoseError) {
+    console.error(`Rosefn: ${err.message}`);
+    if (err.hint) console.error(`  hint: ${err.hint}`);
+    const at = err.file ? `${err.file}${err.line ? `:${err.line}` : ''}` : null;
+    if (at) console.error(`  at ${at}`);
+  } else {
+    console.error(err instanceof Error ? err.stack ?? err.message : String(err));
+  }
+  process.exit(1);
+}
+
+if (cmd === 'dev') void dev().catch(reportFailure);
+else if (cmd === 'build') void build().catch(reportFailure);
+else if (cmd === 'preview') void preview().catch(reportFailure);
+else if (cmd === 'serve') void serve().catch(reportFailure);
+else if (cmd === 'new') void scaffold().catch(reportFailure);
+else if (cmd === 'check') void check().catch(reportFailure);
+else if (cmd === 'prompt') console.log(AI_PROMPT);
+else console.log('Usage: rosefn dev|build|preview|serve|new|check|prompt [dir] [--json]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON)');

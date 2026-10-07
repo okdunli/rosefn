@@ -9,6 +9,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { pathToFileURL, fileURLToPath } from 'url';
 import * as esbuild from 'esbuild';
+// The error contract every compiler failure speaks: a stable code, the file,
+// the line when known, and the fix - so `rosefn build --json` can hand a
+// machine-readable failure to whoever (or whatever) is fixing the code.
+import { RoseError, lineOf, lineAt } from './errors.js';
+export { RoseError, lineOf, lineAt, errorInfo } from './errors.js';
+export type { RoseErrorInfo } from './errors.js';
 
 const COMPONENT_RE = /<script>([\s\S]*?)<\/script>/;
 const TEMPLATE_RE = /<template>([\s\S]*?)<\/template>/;
@@ -44,7 +50,7 @@ const SLOT_NAMED_RE = /<slot\s+((?=[^>]*\bname\s*=)[^>]*?)\/?>/g;
  */
 function encodeSlotCall(attrs: string): string {
   const name = /\bname\s*=\s*["'](\w+)["']/.exec(attrs)?.[1];
-  if (!name) throw new Error('<slot> with attributes must declare a name: <slot name="row" ... />');
+  if (!name) throw new RoseError('E-TEMPLATE', '<slot> with attributes must declare a name: <slot name="row" ... />', { hint: 'a slot carrying attributes is a NAMED slot - it must declare which one: <slot name="row" item={post} />' });
   const pairs = [...attrs.matchAll(/\b(\w+)\s*=\s*\{([^}]*)\}/g)]
     .filter((m) => m[1] !== 'name')
     .map((m) => `['${m[1]}', (${m[2].trim()})]`);
@@ -555,25 +561,33 @@ export type RoseRegistry = Map<string, { index: number; scopeKey: string; slots:
  */
 function resolveRoseImports(script: string, fromFile: string, registry: RoseRegistry): { script: string; imports: Array<{ name: string; specifier: string; index: number }> } {
   const imports: Array<{ name: string; specifier: string; index: number }> = [];
-  const resolve = (spec: string): { index: number; scopeKey: string } => {
+  const resolve = (spec: string, at: number): { index: number; scopeKey: string } => {
     const abs = path.resolve(path.dirname(fromFile), spec);
     const hit = registry.get(abs);
     if (!hit) {
-      throw new Error(`${path.basename(fromFile)}: cannot import '${spec}' - no .rose file at ${abs}. A component lives under src/components/ (or src/pages/) and is imported by relative path.`);
+      throw new RoseError(
+        'E-IMPORT',
+        `${path.basename(fromFile)}: cannot import '${spec}' - no .rose file at ${abs}. A component lives under src/components/ (or src/pages/) and is imported by relative path.`,
+        {
+          file: fromFile,
+          line: lineOf(script, at),
+          hint: `create ${abs} (a .rose component) or fix the import path - a .rose import resolves to a file, never to a package`,
+        },
+      );
     }
     return hit;
   };
   // A default import becomes a named one: the compiled module exports
   // `render`, and the parent's `<Card>` tag calls exactly that.
-  let rewritten = script.replace(/import\s+(\w+)\s+from\s*(['"])([^'"]+\.rose)\2/g, (whole, name, q, spec) => {
-    const hit = resolve(spec);
+  let rewritten = script.replace(/import\s+(\w+)\s+from\s*(['"])([^'"]+\.rose)\2/g, (whole, name, q, spec, at: number) => {
+    const hit = resolve(spec, at);
     imports.push({ name, specifier: spec, index: hit.index });
     return `import { render as ${name} } from ${q}__rose_${hit.index}__${q}`;
   });
   // A named import (`import { render as Card }`) keeps its clause; only the
   // specifier becomes the placeholder.
-  rewritten = rewritten.replace(/import\s*(\{[^}]*\})\s*from\s*(['"])([^'"]+\.rose)\2/g, (whole, clause, q, spec) => {
-    const hit = resolve(spec);
+  rewritten = rewritten.replace(/import\s*(\{[^}]*\})\s+from\s*(['"])([^'"]+\.rose)\2/g, (whole, clause, q, spec, at: number) => {
+    const hit = resolve(spec, at);
     const alias = /\bas\s+(\w+)/.exec(clause)?.[1] ?? 'render';
     imports.push({ name: alias, specifier: spec, index: hit.index });
     return `import ${clause} from ${q}__rose_${hit.index}__${q}`;
@@ -766,7 +780,11 @@ export async function compileComponent(filePath: string, publicDir: string, scop
     try {
       source = await p.transform(source, filePath);
     } catch (err) {
-      throw new Error(`plugin ${p.name} failed on ${path.basename(filePath)}: ${err instanceof Error ? err.message : String(err)}`);
+      throw new RoseError(
+        'E-PLUGIN',
+        `plugin ${p.name} failed on ${path.basename(filePath)}: ${err instanceof Error ? err.message : String(err)}`,
+        { file: filePath, hint: 'the error above came from inside the plugin - fix its transform() (or remove the plugin from rosefn.config.js)' },
+      );
     }
   }
 
@@ -836,11 +854,18 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   // driver lives.
   if (path.basename(filePath) !== '_middleware.rose') {
     for (const spec of nodeOnlyImports(importStmts)) {
-      throw new Error(
+      const at = importStmts.indexOf(spec);
+      throw new RoseError(
+        'E-NODE-ONLY',
         `${filePath}: cannot import '${spec}' in a page or component - it never reaches the browser. ` +
         `This module's script ships to the client (its $data bodies included), so move the import to ` +
         `src/pages/_middleware.rose or a pages/api/*.rose handler: those are server-only, and the rows ` +
-        `travel to the page through getContext() / $data.`
+        `travel to the page through getContext() / $data.`,
+        {
+          file: filePath,
+          line: at >= 0 ? lineOf(importStmts, at) : undefined,
+          hint: `'${spec}' is a server-only module: import it inside src/pages/_middleware.rose (or a pages/api/*.rose handler) instead - a page/component script ships to the browser`,
+        },
       );
     }
   }
@@ -855,9 +880,11 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   // layout chain already uses: the route (or the middleware) fetches, and the
   // value rides down as a prop.
   if (isComponent && /\$data\s*\(/.test(rawScript)) {
-    throw new Error(
+    throw new RoseError(
+      'E-EXPORT',
       `${filePath}: $data() is not allowed in a component - an imported component renders synchronously inside its parent. ` +
-      `Fetch in the page's $data (or pages/_middleware.rose) and pass the value down as a prop: <Card user={user()}>.`
+      `Fetch in the page's $data (or pages/_middleware.rose) and pass the value down as a prop: <Card user={user()}>.`,
+      { file: filePath, hint: 'move the fetch to the page (or the middleware) and pass the value down as a prop' },
     );
   }
   // getContext() in the script makes the route dynamic: the request bag is
@@ -882,7 +909,11 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const prefetchMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+prefetch\s*=\s*['"`](\w+)['"`]\s*;?/);
   const prefetch = prefetchMatch ? prefetchMatch[1] : undefined;
   if (prefetch && !['off', 'hover', 'viewport', 'all'].includes(prefetch)) {
-    throw new Error(`${filePath}: export const prefetch must be 'off', 'hover', 'viewport' or 'all'`);
+    throw new RoseError(
+      'E-EXPORT',
+      `${filePath}: export const prefetch must be 'off', 'hover', 'viewport' or 'all'`,
+      { file: filePath, line: lineAt(rawScript, prefetchMatch), hint: "prefetch is the app-global link strategy, declared once in the root _layout.rose: 'off' | 'hover' (default) | 'viewport' | 'all'" },
+    );
   }
  // `export const vitals = true` turns on the
   // client-side web-vitals hook (runtime reportVitals). App-global like
@@ -892,7 +923,11 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const vitalsMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+vitals\s*=\s*([^;\n]+)\s*;?/);
   const vitals = vitalsMatch ? vitalsMatch[1].trim() === 'true' : undefined;
   if (vitalsMatch && !vitals) {
-    throw new Error(`${filePath}: export const vitals must be true (or be absent - the hook ships only when an app asks for it)`);
+    throw new RoseError(
+      'E-EXPORT',
+      `${filePath}: export const vitals must be true (or be absent - the hook ships only when an app asks for it)`,
+      { file: filePath, line: lineAt(rawScript, vitalsMatch), hint: 'omit the export entirely, or set it to exactly true - the web-vitals hook is opt-in per app' },
+    );
   }
  // The bundle mode - the fix for the large-app
   // architecture gap. 'inline' (the default) is the single-document mode:
@@ -905,7 +940,11 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const bundleMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+bundle\s*=\s*['"`](\w+)['"`]\s*;?/);
   const bundle = bundleMatch ? bundleMatch[1] : undefined;
   if (bundle && !['inline', 'split'].includes(bundle)) {
-    throw new Error(`${filePath}: export const bundle must be 'inline' or 'split'`);
+    throw new RoseError(
+      'E-EXPORT',
+      `${filePath}: export const bundle must be 'inline' or 'split'`,
+      { file: filePath, line: lineAt(rawScript, bundleMatch), hint: "'inline' (default) is the single-document mode; 'split' is mode B for large apps - route-level chunks, loaded on demand" },
+    );
   }
  // The compiler decides zero-JS, not the developer. This is
   // the same "does anything here need the client bundle" predicate that
@@ -936,9 +975,16 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   if (csr === false) {
     const dead = /\son:[a-z]+\s*=/.exec(source) ?? /\b(?:onMount|onCleanup|refresh)\s*\(/.exec(rawScript);
     if (dead) {
-      throw new Error(
+      const deadSrc = dead === (/\son:[a-z]+\s*=/.exec(source) ?? undefined) ? source : rawScript;
+      throw new RoseError(
+        'E-EXPORT',
         `${filePath}: csr = false cannot ship ${dead[0].trim()} - event wiring, onMount/onCleanup and refresh() all need the client bundle. ` +
-        `(Forms still work without JS: a native POST runs the server action.)`
+        `(Forms still work without JS: a native POST runs the server action.)`,
+        {
+          file: filePath,
+          line: lineAt(deadSrc, dead),
+          hint: 'drop csr = false (let the compiler decide), or remove the client-only code - a native <form method="POST"> server action works without the bundle',
+        },
       );
     }
   }
@@ -955,10 +1001,18 @@ export async function compileComponent(filePath: string, publicDir: string, scop
     try {
       value = new Function(`return ${headersLiteral}`)();
     } catch {
-      throw new Error(`${filePath}: export const headers must be an object literal`);
+      throw new RoseError(
+        'E-EXPORT',
+        `${filePath}: export const headers must be an object literal`,
+        { file: filePath, hint: "write it as one literal: export const headers = { 'x-robots-tag': 'noindex' }" },
+      );
     }
     if (!value || typeof value !== 'object' || Array.isArray(value) || Object.values(value as object).some((v) => typeof v !== 'string')) {
-      throw new Error(`${filePath}: export const headers must be a flat map of string -> string`);
+      throw new RoseError(
+        'E-EXPORT',
+        `${filePath}: export const headers must be a flat map of string -> string`,
+        { file: filePath, hint: 'every value must be a string literal (a number or an array fails here instead of shipping verbatim)' },
+      );
     }
     headers = value as Record<string, string>;
   }
@@ -981,11 +1035,19 @@ export async function compileComponent(filePath: string, publicDir: string, scop
     try {
       value = new Function(`return ${cspLiteral}`)();
     } catch {
-      throw new Error(`${filePath}: export const csp must be an object literal`);
+      throw new RoseError(
+        'E-EXPORT',
+        `${filePath}: export const csp must be an object literal`,
+        { file: filePath, hint: 'write it as one literal: export const csp = { nonce: true }' },
+      );
     }
     const nonce = (value as { nonce?: unknown } | null)?.nonce;
     if (nonce !== undefined && typeof nonce !== 'boolean') {
-      throw new Error(`${filePath}: csp.nonce must be a boolean`);
+      throw new RoseError(
+        'E-EXPORT',
+        `${filePath}: csp.nonce must be a boolean`,
+        { file: filePath, hint: 'csp.nonce is a switch: true (per-request nonce, the route becomes dynamic) or absent (the default hashed policy)' },
+      );
     }
     cspNonce = nonce === true;
   }
@@ -1875,7 +1937,7 @@ function compileTemplate(
         rest = remaining.substring(tag.end);
       } else {
         const closeIdx = findClose(remaining, tag.end, tag.name);
-        if (closeIdx < 0) throw new Error(`unclosed <${tag.name}> - every component tag needs its matching close tag`);
+        if (closeIdx < 0) throw new RoseError('E-TEMPLATE', `unclosed <${tag.name}> - every component tag needs its matching close tag`, { hint: `add the matching </${tag.name}> (or close the tag with /> when it takes no children)` });
         childrenSrc = remaining.substring(tag.end, closeIdx);
         rest = remaining.substring(closeIdx + tag.name.length + 3);
       }
@@ -2120,7 +2182,7 @@ function rejectNestedSlot(src: string, outer: string): void {
     if (end < 0) return;
     const hit = /\bslot\s*=\s*["'](\w+)["']/.exec(src.slice(lt, end));
     if (hit && nm[1] !== '/') {
-      throw new Error(`slot="${hit[1]}" on <${nm[2]}> is nested inside slot="${outer}" - a slot must be a direct child of the component`);
+      throw new RoseError('E-TEMPLATE', `slot="${hit[1]}" on <${nm[2]}> is nested inside slot="${outer}" - a slot must be a direct child of the component`, { hint: 'move the inner <slot> out of the outer one - a slot is a direct child of the component tag, never nested in another slot' });
     }
     i = end;
   }
@@ -2182,7 +2244,7 @@ function splitSlots(src: string): { def: string; named: Array<[string, string]> 
     if (!selfClosing && !isVoid) elemDepth++;
     const slotName = /\bslot\s*=\s*["'](\w+)["']/.exec(tagText)?.[1];
     if (slotName && (elemDepth !== 1 || blockDepth !== 0)) {
-      throw new Error(`slot="${slotName}" on <${nm[2]}> must be a direct child of the component - it is nested inside another element or an {#if}/{#each} block`);
+      throw new RoseError('E-TEMPLATE', `slot="${slotName}" on <${nm[2]}> must be a direct child of the component - it is nested inside another element or an {#if}/{#each} block`, { hint: 'place <slot name="..."> directly inside the component tag - wrap the ELEMENTS around the slot, not the slot inside them' });
     }
     if (slotName) {
       const stripped = tagText.replace(/\s*slot\s*=\s*["']\w+["']/, '');
@@ -2190,7 +2252,7 @@ function splitSlots(src: string): { def: string; named: Array<[string, string]> 
         named.set(slotName, (named.get(slotName) ?? '') + stripped);
       } else {
         const closeIdx = findClose(src, end, nm[2]);
-        if (closeIdx < 0) throw new Error(`unclosed <${nm[2]}> inside slot="${slotName}"`);
+        if (closeIdx < 0) throw new RoseError('E-TEMPLATE', `unclosed <${nm[2]}> inside slot="${slotName}"`, { hint: `add the matching </${nm[2]}> inside the slot content` });
         const tail = `</${nm[2]}>`;
         const inner = src.slice(end, closeIdx);
         // The same rule one level down: a slot= INSIDE a named slot's
@@ -2501,7 +2563,11 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
   // failure mode (an empty dist/ deploys as a blank site). Say it plainly:
   // this is not a project root, or the pages live somewhere else.
   if (pageFiles.length === 0) {
-    throw new Error(`no .rose pages found under ${path.join(root, 'src', 'pages')} - run rosefn from a project root, or pass one: rosefn build <dir>`);
+    throw new RoseError(
+      'E-ROUTE',
+      `no .rose pages found under ${path.join(root, 'src', 'pages')} - run rosefn from a project root, or pass one: rosefn build <dir>`,
+      { file: path.join(root, 'src', 'pages'), hint: 'create src/pages/index.rose in that directory (or run the command from the project root)' },
+    );
   }
   const infos = files.map((f) => ({ ...getRouteInfo(f, root) }));
  // rosefn.config.js: the plugins and the i18n options
@@ -2675,7 +2741,7 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
   const runtimeEntry = ['../runtime/index.ts', '../src/runtime/index.ts']
     .map((rel) => fileURLToPath(new URL(rel, import.meta.url)))
     .find((p) => fs.existsSync(p));
-  if (!runtimeEntry) throw new Error('Rosefn: the runtime source (src/runtime/index.ts) was not found next to the compiler');
+  if (!runtimeEntry) throw new RoseError('E-INTERNAL', 'Rosefn: the runtime source (src/runtime/index.ts) was not found next to the compiler', { hint: 'the published package ships src/ beside dist-cli/ - reinstall it, or run from a checkout' });
   await esbuild.build({
     entryPoints: [runtimeEntry],
     bundle: true,
@@ -2804,17 +2870,21 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
       // checked against the chain: a layout needing the bundle under a
       // csr = false page would ship dead handlers, so the build fails.
       if (compiled[i].csr === false && compiled[i].needsClient) {
-        throw new Error(
+        throw new RoseError(
+          'E-EXPORT',
           `${info.filePath}: csr = false but this route needs the client bundle ` +
-          `(${(compiled[i].clientReasons ?? ['needs the client']).join(' + ')}).`
+          `(${(compiled[i].clientReasons ?? ['needs the client']).join(' + ')}).`,
+          { file: info.filePath, hint: 'remove csr = false (the compiler decides zero-JS by itself), or remove the client-only code listed above' },
         );
       }
       if (compiled[i].csr === false) {
         const needy = layoutsOf(infos, i).find((li) => compiled[li].needsClient);
         if (needy !== undefined) {
-          throw new Error(
+          throw new RoseError(
+            'E-EXPORT',
             `${info.filePath}: csr = false cannot ship under ${infos[needy].filePath} - the layout needs the client bundle ` +
-            `(event wiring, onMount/onCleanup, refresh() or a server action).`
+            `(event wiring, onMount/onCleanup, refresh() or a server action).`,
+            { file: info.filePath, hint: 'a layout needing the runtime bundles every route under it - drop csr = false here, or make the layout content-only' },
           );
         }
       }
