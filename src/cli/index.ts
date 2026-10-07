@@ -257,6 +257,33 @@ async function build(): Promise<void> {
  // What this build actually costs on the wire, per route. Runs
   // after writeBrotli so the br column is the file the Go binary serves.
   await analyze(OUT_DIR, (ssrModule.dynamicRoutes as string[] | undefined) ?? []);
+
+ // `--static` is the pure-static-export gate. A normal build is
+  // allowed to leave dynamic routes (they render on demand on Node/edge);
+  // this mode PROMISES the dist is deployable to a static host with no
+  // server at all - so it verifies the promise and fails loudly, naming
+  // every route that breaks it, instead of shipping a dist whose dynamic
+  // half 404s on the host that was told it was static.
+  if (argv.includes('--static')) {
+    const dyn = (ssrModule.dynamicRoutes as string[] | undefined) ?? [];
+    const unbakedApi = Object.entries((ssrModule.apiPrerender ?? {}) as Record<string, boolean>)
+      .filter(([, baked]) => !baked)
+      .map(([routePath]) => routePath);
+    // a param route with no `export const params` has nothing to bake, so it
+    // renders on demand - fine for a server, fatal for a static export
+    const paramless = routes
+      .filter((r) => r.paramNames.length > 0 && !((ssrModule.routeParams ?? {}) as Record<string, unknown>)[r.routePath])
+      .map((r) => r.routePath);
+    const problems = [...new Set([...dyn, ...unbakedApi, ...paramless, ...skipped])];
+    if (problems.length > 0) {
+      console.error('Rosefn: --static export refused - these routes need a server:');
+      for (const p of problems) console.error(`  ${p}`);
+      console.error('(getContext()/$store()/$query(), csp.nonce, buffer = true, an unbaked /api route, a param route with no export const params, or a route the middleware walled)');
+      console.error('drop --static to build the normal dist (the dynamic half renders on demand on Node/edge)');
+      process.exit(1);
+    }
+    console.log('Rosefn: static export verified - every route is a baked file, no server needed');
+  }
 }
 
 /**
@@ -1757,4 +1784,4 @@ else if (cmd === 'serve') void serve().catch(reportFailure);
 else if (cmd === 'new') void scaffold().catch(reportFailure);
 else if (cmd === 'check') void check().catch(reportFailure);
 else if (cmd === 'prompt') console.log(AI_PROMPT);
-else console.log('Usage: rosefn dev|build|preview|serve|new|check|prompt [dir] [--json]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON)');
+else console.log('Usage: rosefn dev|build|preview|serve|new|check|prompt [dir] [--json] [--static]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all)');

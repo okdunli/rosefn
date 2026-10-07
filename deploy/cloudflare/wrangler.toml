@@ -1,0 +1,14 @@
+# Cloudflare Pages - rosefn. `pages_build_output_dir` makes this file the
+# source of truth for the project, so it lives in the repo next to the app.
+name = "rosefn"
+pages_build_output_dir = "./dist"
+
+# The build writes dist/ exactly like every other target; Pages then serves
+# it as static assets and deploys ./functions alongside it.
+[build]
+command = "npm run build"
+
+# workerd has no Node filesystem: the function imports the adapter, which
+# imports node:url / node:path. nodejs_compat provides both.
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]

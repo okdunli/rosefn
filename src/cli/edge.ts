@@ -58,29 +58,81 @@ type ServerModule = {
 };
 
 /**
+ * CSRF: the edge twin of the Node server's guard. A state-changing request
+ * that did not come from this site is refused before anything else runs -
+ * middleware, hooks and routing never see it. Browsers stamp every
+ * cross-origin POST with an Origin header, so the check is free for real
+ * browsers; a client that sends neither Origin nor Sec-Fetch-Site (curl, a
+ * health check, the test suites) is not attackable by CSRF - the attack
+ * rides the victim's cookies in a browser - so it passes. Returns the
+ * refusal, or null.
+ */
+function crossSiteWrite(request: Request): Response | null {
+  const m = request.method;
+  if (m !== 'POST' && m !== 'PUT' && m !== 'PATCH' && m !== 'DELETE') return null;
+  const origin = request.headers.get('origin');
+  if (origin) {
+    let host: string;
+    try {
+      host = new URL(origin).host;
+    } catch {
+      return new Response('Cross-site request blocked (unparsable Origin header)', { status: 403 });
+    }
+    return host === new URL(request.url).host
+      ? null
+      : new Response('Cross-site request blocked (Origin does not match Host)', { status: 403 });
+  }
+  const site = request.headers.get('sec-fetch-site');
+  if (site && site !== 'same-origin' && site !== 'same-site' && site !== 'none') {
+    return new Response(`Cross-site request blocked (sec-fetch-site: ${site})`, { status: 403 });
+  }
+  return null;
+}
+
+/**
  * Create a fetch handler from a built rosefn project.
  * @param outDir directory containing server.js and client.js
+ * @param preloaded for runtimes with NO filesystem (Cloudflare Workers /
+ *   Pages): the caller statically imports the server bundle (so the deploy
+ *   compiler bundles it in) and fetches the site's own static assets once
+ *   per isolate. Anything provided here is used verbatim; anything absent
+ *   falls back to reading it from outDir, exactly as before.
  */
-export async function createEdgeHandler(outDir: string): Promise<(request: Request) => Promise<Response>> {
-  const mod: ServerModule = await import(pathToFileURL(join(outDir, 'server.js')).href);
+export async function createEdgeHandler(
+  outDir: string,
+  preloaded?: { server?: ServerModule; client?: string; styles?: string; broken?: string[] },
+): Promise<(request: Request) => Promise<Response>> {
+  const mod: ServerModule = preloaded?.server ?? await import(pathToFileURL(join(outDir, 'server.js')).href);
   let client: string | null = null;
   let styles = '';
-  try {
-    client = await (await import('fs/promises')).readFile(join(outDir, 'client.js'), 'utf-8');
-  } catch {
-    client = null; // no fs (Workers): platform should inline the bundle at deploy time
+  if (preloaded && 'client' in preloaded) {
+    client = preloaded.client ?? null;
+  } else {
+    try {
+      client = await (await import('fs/promises')).readFile(join(outDir, 'client.js'), 'utf-8');
+    } catch {
+      client = null; // no fs (Workers): platform should inline the bundle at deploy time
+    }
   }
-  try {
-    styles = await (await import('fs/promises')).readFile(join(outDir, 'styles.css'), 'utf-8');
-  } catch {
-    styles = ''; // no component styles (or no fs): shell STYLES only
+  if (preloaded && 'styles' in preloaded) {
+    styles = preloaded.styles ?? '';
+  } else {
+    try {
+      styles = await (await import('fs/promises')).readFile(join(outDir, 'styles.css'), 'utf-8');
+    } catch {
+      styles = ''; // no component styles (or no fs): shell STYLES only
+    }
   }
   // routes whose render failed at build time: buffered, so the 500 survives
   let broken = new Set<string>();
-  try {
-    broken = new Set(JSON.parse(await (await import('fs/promises')).readFile(join(outDir, 'broken.json'), 'utf-8')));
-  } catch {
-    broken = new Set(); // no manifest: nothing known-broken
+  if (preloaded && 'broken' in preloaded) {
+    broken = new Set(preloaded.broken);
+  } else {
+    try {
+      broken = new Set(JSON.parse(await (await import('fs/promises')).readFile(join(outDir, 'broken.json'), 'utf-8')));
+    } catch {
+      broken = new Set(); // no manifest: nothing known-broken
+    }
   }
 
  // Response headers for a page document: the strict CSP
@@ -101,6 +153,11 @@ export async function createEdgeHandler(outDir: string): Promise<(request: Reque
   };
 
   return async function handle(request: Request): Promise<Response> {
+    // CSRF: the same guard the Node server runs first - a state-changing
+    // request that did not come from this site is refused before anything
+    // else (middleware, hooks, routing) ever sees it.
+    const refused = crossSiteWrite(request);
+    if (refused) return refused;
     const { pathname, searchParams } = new URL(request.url);
     // P0-1: the query reaches the render through $query() - routing itself
     // matches the pathname, exactly as the Node server does.
