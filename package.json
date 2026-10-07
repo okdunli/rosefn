@@ -1,6 +1,6 @@
 {
   "name": "rosefn",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "The next-century web framework: zero-hydration, compile-time reactivity, single binary deploy",
   "type": "module",
   "scripts": {
