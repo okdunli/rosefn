@@ -1085,19 +1085,81 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const setterNames = new Map<string, string>();
   stateDecls.forEach((s) => setterNames.set(s.name, `set${capitalize(s.name)}`));
 
-  // Remove declarations from script, rewrite $setState to setters
-  let cleanScript = removeRanges(script, decls.map((d) => [d.start, d.end] as [number, number]));
-  cleanScript = cleanScript.replace(SETSTATE_RE, (_, key, val) => {
+  // The render body's emission order, and why it is what it is:
+  //   props -> script (every top-level declaration left where the developer
+  //   wrote it) -> hoisted nested declarations -> deltas
+  // Declarations used to be hoisted into one block AFTER the whole script,
+  // which broke the natural reading order: `let st = $data(...)` followed by
+  // a top-level `const counts = st().counts` compiled to a read BEFORE the
+  // declaration - a TDZ crash ("Cannot access 'st' before initialization",
+  // the whole route 500s; BUG.md 2026.9.22). In-place replacement fixes that
+  // and keeps what the hoisting was for: a $state initializer may reference a
+  // script value declared ABOVE it (`let items = $state(corpus)`), because
+  // both keep their source order. The $data resolvers stay lazy for the same
+  // reason as always: their bodies run while the render is still
+  // initializing, so they may read both the script's values and the state
+  // keys - a resolver reading a value declared after it is the one order
+  // that cannot work, in any arrangement. (The deltas ride at the very end
+  // so they patch what the declarations seeded, never a value that is about
+  // to be overwritten.)
+  // A declaration inside a nested scope (an onMount body) cannot move
+  // without changing its meaning - and its `await` is only legal in
+  // render()'s async body - so those keep the hoisted block after the script.
+  const declCode = (d: (typeof decls)[number]): string => {
+ // A component's state keys are namespaced by its file, so two
+    // components that both declare `let open = $state(false)` no longer
+    // share one signal (the signal map is global per document). The prefix
+    // is identical on both sides of the wire - it is generated code.
+    const key = isComponent ? `${scopeKey}:${d.name}` : d.name;
+    if (d.kind === 'state') {
+      return `const [${d.name}, ${setterNames.get(d.name)!}] = state(${JSON.stringify(key)}, ${d.expr});`;
+    }
+    // $data: fetch only when this key has no value yet (server: always after
+    // clearRequestState; client: only on first visit or client-side nav)
+    const isFn = d.expr.includes('=>') || d.expr.startsWith('function');
+    const fn = isFn ? d.expr : `() => (${d.expr})`;
+    return `const __had_${d.name} = hasState(${JSON.stringify(key)});
+const [${d.name}, set${capitalize(d.name)}] = state(${JSON.stringify(key)}, null);
+if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
+  };
+
+  // Splice every top-level declaration back where it was written. The
+  // placeholder is a string literal: both rewrites below (the $setState
+  // rewrite and the bare-read callify) copy strings verbatim, so a
+  // declaration is substituted only after they have run - and can never be
+  // mangled by them (`const [st, setSt]` must not become `const [st(), …]`).
+  const nestedDecls: (typeof decls)[number][] = [];
+  let spliced = '';
+  let pos = 0;
+  decls.forEach((d, i) => {
+    // A top-level declaration is replaced by its placeholder (its generated
+    // code comes back after the rewrites); a nested one is dropped here and
+    // rides the hoisted block below - either way the original text goes.
+    const top = braceDepthAt(script, d.start) === 0;
+    if (!top) nestedDecls.push(d);
+    spliced += script.slice(pos, d.start) + (top ? `'__rvdecl${i}__';` : '');
+    pos = d.end;
+  });
+  spliced += script.slice(pos);
+
+  // Rewrite $setState to setters, then replace bare state reads with getter
+  // calls. A plain regex would also rewrite state names inside string
+  // literals - 'name' in new FormData(f).get('name') becoming 'name()' - so
+  // the scan skips strings, comments, and template-literal text (${} still
+  // rewrites).
+  let cleanScript = spliced.replace(SETSTATE_RE, (_, key, val) => {
     const trimmedKey = key.trim().replace(/^['"`]|['"`]$/g, '');
     const setter = setterNames.get(trimmedKey) || `set${capitalize(trimmedKey)}`;
     return `${setter}(${val})`;
   });
-
-  // Replace bare state reads with getter calls (after decl removal). A plain
-  // regex would also rewrite state names inside string literals - 'name' in
-  // new FormData(f).get('name') becoming 'name()' - so scan the script and
-  // skip strings, comments, and template-literal text (${} still rewrites).
   cleanScript = callifyStateReads(cleanScript, stateDecls.map((s) => s.name));
+  // ...and put each top-level declaration back, exactly where it was written.
+  cleanScript = cleanScript.replace(/'__rvdecl(\d+)__';/g, (_m, i) => declCode(decls[Number(i)]));
+
+  // Only the nested declarations still ride the hoisted block (after the
+  // script, before the deltas - the position they have always had).
+  const stateDeclsCode = nestedDecls.filter((d) => d.kind === 'state').map(declCode).join('\n');
+  const dataDeclsCode = nestedDecls.filter((d) => d.kind === 'data').map(declCode).join('\n');
 
   // The template gets the same treatment: the script auto-calls a bare state
   // read, so `{liked}` must not silently render the getter's source text.
@@ -1126,36 +1188,6 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const ssrTemplate = wired.template
     .replace(SLOT_NAMED_RE, (_w, attrs) => `{__slot(${encodeSlotCall(attrs)})}`)
     .replace(SLOT_RE, '{__slot__}');
-
-  // The render body's emission order, and why it is what it is:
-  //   props -> script -> $state -> $data -> deltas
-  // The script comes FIRST so a top-level `const corpus = [...]` exists by
-  // the time anything can read it, and a $state initializer may reference it
-  // (`let items = $state(corpus)`). The $data resolvers come LAST: their
-  // bodies run while the render is still initializing, so they may read both
-  // the script's values and the state keys - and a resolver reading a value
-  // declared after it is the one order that cannot work, in any arrangement.
-  // (The deltas ride at the very end so they patch what the resolvers just
-  // seeded, never a value that is about to be overwritten.)
-  const declCode = (d: (typeof decls)[number]): string => {
- // A component's state keys are namespaced by its file, so two
-    // components that both declare `let open = $state(false)` no longer
-    // share one signal (the signal map is global per document). The prefix
-    // is identical on both sides of the wire - it is generated code.
-    const key = isComponent ? `${scopeKey}:${d.name}` : d.name;
-    if (d.kind === 'state') {
-      return `const [${d.name}, ${setterNames.get(d.name)!}] = state(${JSON.stringify(key)}, ${d.expr});`;
-    }
-    // $data: fetch only when this key has no value yet (server: always after
-    // clearRequestState; client: only on first visit or client-side nav)
-    const isFn = d.expr.includes('=>') || d.expr.startsWith('function');
-    const fn = isFn ? d.expr : `() => (${d.expr})`;
-    return `const __had_${d.name} = hasState(${JSON.stringify(key)});
-const [${d.name}, set${capitalize(d.name)}] = state(${JSON.stringify(key)}, null);
-if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
-  };
-  const stateDeclsCode = decls.filter((d) => d.kind === 'state').map(declCode).join('\n');
-  const dataDeclsCode = decls.filter((d) => d.kind === 'data').map(declCode).join('\n');
 
   const stateKeys = decls.map((d) => d.name);
 
@@ -1518,16 +1550,54 @@ function extractDecls(script: string): Decl[] {
   return decls;
 }
 
-function removeRanges(text: string, ranges: Array<[number, number]>): string {
-  const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
-  let out = '';
-  let pos = 0;
-  for (const [start, end] of sorted) {
-    out += text.slice(pos, start);
-    pos = end;
+/**
+ * Brace depth at `index`, with strings, template literals and comments
+ * skipped so their braces never count. A declaration at depth 0 is a
+ * top-level statement of the script: it may be replaced where it stands
+ * (BUG.md 2026.9.22 - the TDZ fix). Anything deeper lives inside a function
+ * body (an onMount callback) and must keep its scope.
+ */
+function braceDepthAt(src: string, index: number): number {
+  let depth = 0;
+  let i = 0;
+  while (i < index) {
+    const ch = src[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const quote = ch;
+      i++;
+      while (i < index) {
+        if (src[i] === '\\') { i += 2; continue; }
+        if (src[i] === quote) { i++; break; }
+        // a ${...} inside a template literal is code again
+        if (quote === '`' && src[i] === '$' && src[i + 1] === '{') {
+          let d = 1;
+          i += 2;
+          while (i < index && d > 0) {
+            if (src[i] === '{') d++;
+            else if (src[i] === '}') d--;
+            i++;
+          }
+          continue;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (ch === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i);
+      i = nl === -1 ? src.length : nl;
+      continue;
+    }
+    if (ch === '/' && src[i + 1] === '*') {
+      const close = src.indexOf('*/', i + 2);
+      i = close === -1 ? src.length : close + 2;
+      continue;
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+    i++;
   }
-  out += text.slice(pos);
-  return out;
+  return depth;
 }
 
 /**
