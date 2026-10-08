@@ -1,0 +1,40 @@
+<script>
+  // The layout wraps every page: the <head>, the nav and the footer live
+  // here once. `links` is ordinary state - the nav is one {#each} over it.
+  let links = $state([
+    { href: '/', label: 'Home' },
+    { href: '/pricing', label: 'Pricing' },
+    { href: '/about', label: 'About' },
+  ]);
+</script>
+
+<style>
+  /* Scoped to this file: the build rewrites every selector with this
+     component's scope key, and the CSS is inlined into the document -
+     zero stylesheet requests. */
+  .shell { max-width: 46rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; font-family: system-ui, sans-serif; }
+  .nav a { margin-right: 1rem; }
+  .foot { margin-top: 3rem; color: #888; font-size: 0.85rem; }
+</style>
+
+<head>
+  <title>Rosevine — the site template</title>
+  <meta name="description" content="A content site built with rosefn: every page ships zero JavaScript.">
+</head>
+
+<div class="shell">
+  <header class="nav">
+    <strong>🌹 Rosevine</strong>
+    <nav>
+      {#each links() as link}
+        <a href={link.href}>{link.label}</a>
+      {/each}
+    </nav>
+  </header>
+  <main>
+    <slot />
+  </main>
+  <footer class="foot">
+    Built with rosefn — every page on this site ships zero JavaScript.
+  </footer>
+</div>

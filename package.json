@@ -25,6 +25,7 @@
     "dist-cli",
     "src",
     "deploy",
+    "templates",
     "pack.mjs",
     "README.md",
     "PLUGINS.md",

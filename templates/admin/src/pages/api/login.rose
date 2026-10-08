@@ -1,0 +1,25 @@
+<script>
+  // Login for the template's one demo account. trade-off: plaintext, one
+  // seeded account - a demo, not a vault. A real backoffice hashes with
+  // node:crypto scrypt and compares in constant time; the cookie and the
+  // wall around it stay exactly as they are.
+  const json = (obj: unknown, status = 200, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json', ...headers } });
+
+  export async function POST(req: Request) {
+    const form = await req.formData();
+    const user = String(form.get('user') ?? '').trim();
+    const pass = String(form.get('pass') ?? '').trim();
+    // Validation before the credential check: a malformed request is a 400
+    // whether or not the account exists.
+    if (!user || !pass) return json({ error: 'user and pass are required' }, 400);
+    if (user !== 'admin' || pass !== 'admin') return json({ error: 'bad credentials' }, 401);
+    return json({ ok: true }, 200, { 'set-cookie': $sessionCookie('session', '1') });
+  }
+
+  // Logout: expire the cookie (Max-Age=0). The dashboard's Sign out button
+  // calls this with fetch - a native form cannot send DELETE.
+  export function DELETE() {
+    return json({ ok: true }, 200, { 'set-cookie': $sessionCookie('session', '', { maxAge: 0 }) });
+  }
+</script>

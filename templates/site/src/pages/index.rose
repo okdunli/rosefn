@@ -1,0 +1,13 @@
+<h1>Ship the site, not the runtime.</h1>
+<p>
+  Every page in this template is pure HTML: no bundle, no state script, zero
+  script tags. The compiler decides that per route — nothing is exported, and
+  nothing is shipped. A content site's whole JavaScript budget is zero bytes.
+</p>
+<h2>What you get</h2>
+<ul>
+  <li>One request per page — the document is the whole answer</li>
+  <li>Scoped styles inlined into the document — zero stylesheet requests</li>
+  <li>A build that bakes every route, so any static host can serve it</li>
+</ul>
+<p><a href="/pricing">See the pricing</a> or <a href="/about">read the story</a>.</p>

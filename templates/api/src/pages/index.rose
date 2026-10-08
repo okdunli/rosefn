@@ -1,0 +1,25 @@
+<script>
+  // The landing page. It exists so `rosefn dev` has something to open, and
+  // it doubles as the endpoint list. No events, no forms, no lifecycle: the
+  // compiler ships it as pure HTML - zero JavaScript, zero requests beyond
+  // the document.
+  let endpoints = $state([
+    { method: 'GET', path: '/api/health', note: 'liveness - always public' },
+    { method: 'GET', path: '/api/items', note: 'the list - public read' },
+    { method: 'POST', path: '/api/login', note: 'admin / admin -> the session cookie' },
+    { method: 'POST', path: '/api/items', note: 'create - needs the session' },
+    { method: 'DELETE', path: '/api/items?id=1', note: 'delete - needs the session' },
+  ]);
+</script>
+
+<h1>🌹 rosefn API service</h1>
+<p>A JSON backend: five endpoints, one in-memory store, no database to set up.</p>
+<ul>
+  {#each endpoints() as e}
+    <li><code>{e.method} {e.path}</code> — {e.note}</li>
+  {/each}
+</ul>
+<p>
+  Try it: <code>curl localhost:3000/api/items</code>, then
+  <code>curl -X POST localhost:3000/api/login -d 'user=admin&amp;pass=admin'</code>.
+</p>

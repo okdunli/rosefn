@@ -1,0 +1,7 @@
+<script>
+  // Liveness. The one endpoint that must never need a database, a session
+  // or a config value: if this answers, the process is up.
+  export function GET() {
+    return { ok: true, uptime: Math.round(process.uptime()) };
+  }
+</script>

@@ -1078,19 +1078,94 @@ async function serve(): Promise<void> {
 }
 
 /**
+ * The templates directory, in the two layouts the CLI ships in: the repo
+ * checkout (src/cli -> two up) and the installed package (dist-cli -> one
+ * up). The same two candidates `version()` tries for package.json.
+ */
+function templatesDir(): string | null {
+  for (const rel of ['../../templates', '../templates']) {
+    const p = fileURLToPath(new URL(rel, import.meta.url));
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+/** The TypeScript-ready files every scaffolded project gets: the ambient
+ *  globals (editors and tsc both see them) and a strict tsconfig. */
+function writeTypeScriptReady(dir: string): void {
+  fs.writeFileSync(path.join(dir, 'rosefn-env.d.ts'), `/// <reference types="rosefn" />\n`);
+  fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: {
+      target: 'ES2022',
+      module: 'ESNext',
+      moduleResolution: 'bundler',
+      lib: ['ES2022', 'DOM', 'DOM.Iterable'],
+      strict: true,
+      noEmit: true,
+      skipLibCheck: true,
+    },
+    include: ['rosefn-env.d.ts', 'src/**/*.ts'],
+  }, null, 2) + '\n');
+}
+
+/**
+ * Copy a template into the new project and make it the developer's own:
+ * the name, the published-package dependency (the template source points at
+ * this checkout so it runs in-repo), the TypeScript-ready files. A
+ * template's own build output and node_modules never ride along.
+ */
+function copyTemplate(dir: string, name: string, display: string): void {
+  const base = templatesDir();
+  const shipped = base ? path.resolve(base, name) : '';
+  const src = fs.existsSync(shipped) ? shipped : path.resolve(name);
+  if (!fs.existsSync(src) || !fs.statSync(src).isDirectory()) {
+    const available = base ? fs.readdirSync(base).join(', ') : '(none found)';
+    console.error(`Rosefn: no template '${name}' - available: ${available} (or pass a path to any project directory)`);
+    process.exit(1);
+  }
+  fs.cpSync(src, dir, {
+    recursive: true,
+    filter: (s) => !/(^|[\\/])(node_modules|dist|\.git)([\\/]|$)/.test(s),
+  });
+  const pkgFile = path.join(dir, 'package.json');
+  if (fs.existsSync(pkgFile)) {
+    const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
+    pkg.name = path.basename(dir);
+    if (pkg.dependencies?.rosefn) pkg.dependencies.rosefn = `^${version()}`;
+    pkg.devDependencies = { ...pkg.devDependencies, typescript: '^5.6.0' };
+    fs.writeFileSync(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
+  }
+  writeTypeScriptReady(dir);
+  console.log(`🌹 rosefn new: ${display}/ from the '${path.basename(src)}' template`);
+  console.log(`\n   cd ${display}`);
+  console.log(`   npm install && npm run dev`);
+  console.log(`   npm run build    # then deploy dist/`);
+}
+
+/**
  * `rosefn new <name>` - a starting project. The smallest thing that builds
  * and runs and shows the syntax: one page (state, {#if}, {#each}, a scoped
  * style), one README naming the three commands. Not a second demo app - the
  * point is that a new developer's first `rosefn build` works in seconds.
+ *
+ * `rosefn new <name> --template <t>` - the
+ * official templates (blog, api, admin, site) copied verbatim, with the
+ * dependency rewritten to the published package. A name that is not a
+ * shipped template is resolved as a PATH, so any project directory works as
+ * a template (a team's own starter, a checkout's examples/).
  *
  * Trade-off: three files, written from strings. No template engine, no
  * dependency, no `npm install` run on the developer's behalf (they may use
  * pnpm/yarn/bun, and a surprise install is worse than a printed command).
  */
 async function scaffold(): Promise<void> {
-  const name = process.argv[3];
-  if (!name || name.startsWith('-')) {
-    console.log('Usage: rosefn new <name>   (creates <name>/ with a page that builds)');
+  const args = argv.slice(1);
+  const tplIdx = args.indexOf('--template');
+  const template = tplIdx >= 0 ? args[tplIdx + 1] : null;
+  const name = args.find((a, i) => !a.startsWith('-') && i !== (tplIdx >= 0 ? tplIdx + 1 : -1));
+  if (!name || (tplIdx >= 0 && !template)) {
+    const available = templatesDir() ? fs.readdirSync(templatesDir()!).join(', ') : 'blog, api, admin, site';
+    console.log(`Usage: rosefn new <name> [--template <name>]   (creates <name>/ with a page that builds; --template copies an official template - ${available} - or any project directory)`);
     return;
   }
   const dir = path.resolve(name);
@@ -1098,6 +1173,12 @@ async function scaffold(): Promise<void> {
     console.error(`Rosefn: ${dir} already exists - pick another name`);
     process.exit(1);
   }
+
+  if (template) {
+    copyTemplate(dir, template, name);
+    return;
+  }
+
   const pages = path.join(dir, 'src', 'pages');
   fs.mkdirSync(pages, { recursive: true });
 
@@ -1116,19 +1197,7 @@ async function scaffold(): Promise<void> {
     devDependencies: { typescript: '^5.6.0' },
   }, null, 2) + '\n');
 
-  fs.writeFileSync(path.join(dir, 'rosefn-env.d.ts'), `/// <reference types="rosefn" />\n`);
-  fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({
-    compilerOptions: {
-      target: 'ES2022',
-      module: 'ESNext',
-      moduleResolution: 'bundler',
-      lib: ['ES2022', 'DOM', 'DOM.Iterable'],
-      strict: true,
-      noEmit: true,
-      skipLibCheck: true,
-    },
-    include: ['rosefn-env.d.ts', 'src/**/*.ts'],
-  }, null, 2) + '\n');
+  writeTypeScriptReady(dir);
 
   fs.writeFileSync(path.join(pages, 'index.rose'), `<script>
   // One file per route: markup, script and styles together.
@@ -1181,7 +1250,6 @@ npm run check   # type-checks every .rose script
 Add a route by adding a file: \`src/pages/about.rose\` serves \`/about\`.
 \`src/pages/_layout.rose\` wraps every route, \`src/pages/_middleware.rose\`
 runs before every request, \`src/pages/api/*.rose\` answers JSON.
-Full syntax: the README of the rosefn package.
 `);
 
   fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/\ndist/\n');
@@ -1352,4 +1420,4 @@ else if (cmd === 'serve') void serve().catch(reportFailure);
 else if (cmd === 'new') void scaffold().catch(reportFailure);
 else if (cmd === 'check') void check().catch(reportFailure);
 else if (cmd === 'prompt') console.log(AI_PROMPT);
-else console.log('Usage: rosefn dev|build|preview|serve|new|check|prompt [dir] [--json] [--static]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all)');
+else console.log('Usage: rosefn dev|build|preview|serve|new|check|prompt [dir] [--json] [--static]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; `new <name> [--template blog|api|admin|site]` scaffolds a project)');

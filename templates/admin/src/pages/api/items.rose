@@ -1,0 +1,37 @@
+<script>
+  // The resource. The store itself lives in the middleware (one owner per
+  // app); this route borrows it from the request context, exactly like the
+  // blog-pg example borrows its pool. Writes are session-walled; reads are
+  // public so the landing page and a health check can share the shape.
+  const json = (obj: unknown, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
+
+  const signedIn = (req: Request) => $cookies(req).session === '1';
+
+  export function GET() {
+    return { items: getContext().store.get() };
+  }
+
+  // Create: 401 without a session, 400 without a label, 201 with the row.
+  export async function POST(req: Request) {
+    if (!signedIn(req)) return json({ error: 'sign in first' }, 401);
+    const form = await req.formData();
+    const label = String(form.get('label') ?? '').trim();
+    if (!label) return json({ error: 'label is required' }, 400);
+    const store = getContext().store;
+    const items = store.get();
+    const id = items.reduce((max, it) => Math.max(max, it.id), 0) + 1;
+    store.set([...items, { id, label }]);
+    return json({ id, label }, 201);
+  }
+
+  // Delete by ?id=. Same wall as POST.
+  export async function DELETE(req: Request) {
+    if (!signedIn(req)) return json({ error: 'sign in first' }, 401);
+    const id = Number(new URL(req.url).searchParams.get('id'));
+    if (!id) return json({ error: 'id is required' }, 400);
+    const store = getContext().store;
+    store.set(store.get().filter((it) => it.id !== id));
+    return json({ deleted: id });
+  }
+</script>

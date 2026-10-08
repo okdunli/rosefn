@@ -1,0 +1,33 @@
+<script>
+  // The middleware runs before every request and does two jobs here:
+  //
+  //   1. own the store - $store's box is shared by every request in the
+  //      process and broadcast to the other cluster workers on a write,
+  //      and the middleware is the one module the compiler never ships,
+  //   2. read the session cookie and put the user (and, for a signed-in
+  //      visitor, the rows) in the request context.
+  //
+  // The api routes borrow the store from the context instead of opening
+  // their own: one box, one owner, no module global to drift.
+  //
+  // The wall is DATA ABSENCE, not a redirect: with no session the context
+  // carries no user, so the dashboard renders its login form and the
+  // manager never exists in the response - the same document a static
+  // deploy would serve. A context-reading route is dynamic by
+  // construction, so nothing gated can leak into a prerendered file.
+  interface Item { id: number; label: string }
+
+  // Not exported: nothing imports this module - the api routes borrow the
+  // store from the request context below, which is the whole point.
+  const store = $store<Item[]>('items', [
+    { id: 1, label: 'first' },
+    { id: 2, label: 'second' },
+  ]);
+
+  export async function handle(request: Request) {
+    const signedIn = $cookies(request).session === '1';
+    getContext().store = store;
+    getContext().user = signedIn ? { name: 'admin' } : null;
+    if (signedIn) getContext().items = store.get();
+  }
+</script>
