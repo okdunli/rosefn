@@ -1,0 +1,15 @@
+{
+  "name": "rosefn-blog-pg",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "rosefn dev",
+    "build": "rosefn build",
+    "preview": "rosefn preview",
+    "serve": "rosefn serve"
+  },
+  "dependencies": {
+    "pg": "^8.13.0",
+    "rosefn": "file:../.."
+  }
+}

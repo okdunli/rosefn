@@ -1,0 +1,54 @@
+<script>
+  import { $cookies } from './runtime.js';
+
+  // The blog's JSON api. GET is public; POST and DELETE need the session
+  // cookie the login route sets. The api namespace answers JSON only -
+  // never an HTML page - so a browser and a script get the same contract.
+  //
+  // The pool is NOT opened here: the middleware put its accessor in the
+  // request context (`getContext().db`), and the middleware runs before
+  // every api call too. One pool per worker process, shared by every
+  // handler - the standard integration pattern, no second connection.
+  interface PostRow { id: number; title: string; body: string; author: string }
+
+  const json = (obj: unknown, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
+
+  const signedIn = (req: Request) => $cookies(req).session === '1';
+
+  // The list, newest first. The pages read the same rows through the
+  // middleware on a server render, and through this endpoint on a
+  // client-side navigation.
+  export async function GET() {
+    const db = await getContext().db();
+    const posts = await db.all<PostRow>('SELECT id, title, body, author FROM posts ORDER BY id DESC');
+    return { posts };
+  }
+
+  // Create. 401 without a session, 400 without both fields, 201 with the
+  // new id. The CSRF guard on `rosefn serve` has already refused
+  // cross-site writes before this handler runs.
+  export async function POST(req: Request) {
+    if (!signedIn(req)) return json({ error: 'sign in first' }, 401);
+    const form = await req.formData();
+    const title = String(form.get('title') ?? '').trim();
+    const body = String(form.get('body') ?? '').trim();
+    if (!title || !body) return json({ error: 'title and body are required' }, 400);
+    const db = await getContext().db();
+    const row = await db.get<{ id: number }>(
+      'INSERT INTO posts (title, body, author) VALUES ($1, $2, $3) RETURNING id',
+      [title, body, 'ada'],
+    );
+    return json({ id: row!.id }, 201);
+  }
+
+  // Delete by ?id=. Same wall as POST.
+  export async function DELETE(req: Request) {
+    if (!signedIn(req)) return json({ error: 'sign in first' }, 401);
+    const id = Number(new URL(req.url).searchParams.get('id'));
+    if (!id) return json({ error: 'id is required' }, 400);
+    const db = await getContext().db();
+    await db.run('DELETE FROM posts WHERE id = $1', [id]);
+    return json({ deleted: id });
+  }
+</script>

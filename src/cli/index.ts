@@ -1407,7 +1407,27 @@ async function serve(): Promise<void> {
   try {
     servicePlugins = (await loadPlugins(SRC_DIR)).filter((p) => p && p.onServe);
   } catch (err) {
-    console.error('Rosefn: rosefn.config.js failed to load for the serve hooks:', err instanceof Error ? err.message : err);
+    console.error('Rosefn: rosefn.config.js failed to load for the serve hooks:', err instanceof Error ? err.message : String(err));
+  }
+ // The store bridge. A cross-machine driver (redis pub/sub) lives
+  // in the project's config - its client library is imported there - and
+  // onServe runs HERE, in the worker, next to the server module but not
+  // inside it. So the worker loads the server module (the same import the
+  // first request performs) and hands the plugin the two functions that
+  // reach ITS store map. A dist without the bridge exports (built before
+  // this existed) gets no-op calls - optional chaining, not a crash.
+  const storeBridge = {
+    install: (send: ((name: string, value: unknown) => void) | null) => {
+      try { serverModule?.__installStoreTransport?.(send); } catch { /* a stale dist: no bridge, no crash */ }
+    },
+    deliver: (name: string, value: unknown) => {
+      try { serverModule?.__deliverStorePatch?.(name, value); } catch { /* ditto */ }
+    },
+  };
+  try {
+    await loadServer();
+  } catch (err) {
+    console.error('Rosefn: dist/server.js failed to load for the serve hooks:', err instanceof Error ? err.message : String(err));
   }
   const http = await import('node:http');
   const server = http.createServer(withAccessLog(serveStatic(OUT_DIR, true), `w${process.pid}`));
@@ -1423,9 +1443,9 @@ async function serve(): Promise<void> {
     console.log(`🌹 Rosefn worker ${process.pid} listening on http://localhost:${port}`);
     for (const p of servicePlugins) {
       try {
-        await p.onServe({ port, workers });
+        await p.onServe({ port, workers, store: storeBridge });
       } catch (err) {
-        console.error('Rosefn: plugin', p.name, 'onServe failed:', err instanceof Error ? err.message : err);
+        console.error('Rosefn: plugin', p.name, 'onServe failed:', err instanceof Error ? err.message : String(err));
       }
     }
   });

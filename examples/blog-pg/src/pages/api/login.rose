@@ -1,0 +1,37 @@
+<script>
+  import { $sessionCookie } from './runtime.js';
+
+  // Login: POST user=ada pass=lovelace -> 200 + Set-Cookie: session=1.
+  // The cookie is what $sessionCookie() builds: HttpOnly, SameSite=Lax,
+  // Path=/, 7 days - the middleware and every write endpoint read it back
+  // with $cookies(request).
+  //
+  // Validation runs BEFORE the database: a malformed login is a 400 the
+  // app can answer without a connection, and the no-database deploy (a
+  // build check, a cold start before the pool is reachable) fails on the
+  // queries, never on the shape of the request.
+  //
+  // Trade-off: plaintext passwords, one seeded row - a demo, not a vault.
+  // A real login hashes with node:crypto scrypt and compares in constant
+  // time; everything around it (this file, the cookie, the middleware)
+  // stays exactly as it is.
+
+  const json = (obj: unknown, status = 200, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json', ...headers } });
+
+  export async function POST(req: Request) {
+    const form = await req.formData();
+    const user = String(form.get('user') ?? '').trim();
+    const pass = String(form.get('pass') ?? '').trim();
+    if (!user || !pass) return json({ error: 'user and pass are required' }, 400);
+    const db = await getContext().db();
+    const row = await db.get<{ id: number }>('SELECT id FROM users WHERE name = $1 AND pass = $2', [user, pass]);
+    if (!row) return json({ error: 'bad credentials' }, 401);
+    return json({ ok: true }, 200, { 'set-cookie': $sessionCookie('session', String(row.id)) });
+  }
+
+  // Logout: expire the cookie (Max-Age=0).
+  export function DELETE() {
+    return json({ ok: true }, 200, { 'set-cookie': $sessionCookie('session', '', { maxAge: 0 }) });
+  }
+</script>

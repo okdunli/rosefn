@@ -1,0 +1,95 @@
+<script>
+  import type { Pool } from 'pg';
+
+  // The middleware runs before every request - pages, POSTs and api calls
+  // alike. In this blog it does four jobs:
+  //
+  //   1. open the connection pool once per process (lazily - never at
+  //      module load, and never as a build side effect),
+  //   2. put the pool in the request context, so every api handler shares
+  //      the SAME pool instead of opening its own,
+  //   3. load the rows each route needs into the request context,
+  //   4. decide who is signed in.
+  //
+  // Why the data loads HERE and not in the page: a page's $data body ships
+  // to the browser (it re-runs on client-side navigation), so a database
+  // import inside a page would land in the client bundle and break the
+  // build. The middleware module is the one the compiler never ships.
+  //
+  // Why the POOL rides the context: there is exactly one pool per worker
+  // process, and the api handlers run after this middleware on the same
+  // request - `getContext().db` is the standard integration pattern, no
+  // module registry, no global. (The SQLite blog opens its connection
+  // inside each file; a pool is worth sharing, so it rides the bag.)
+
+  interface PostRow { id: number; title: string; body: string; author: string }
+
+  // The pool. The driver is resolved at RUNTIME, not bundled: esbuild
+  // inlines a literal import('pg') into the server bundle - 200 KB of
+  // driver whose lazy require('net') then throws under ESM - so the
+  // specifier is a VARIABLE the bundler cannot see. Node resolves 'pg'
+  // from this app's node_modules, the normal place a runtime dependency
+  // lives, and `npm ci` is part of every deploy of this example. The
+  // server bundle itself stays framework-only and still loads at the
+  // edge; a Postgres app's dynamic half simply belongs on Node (the
+  // documented edge boundary - an edge deploy swaps the driver for an
+  // HTTP one, e.g. @neondatabase/serverless, and changes nothing else).
+  let pool: Pool | undefined;
+  const getDb = async () => {
+    if (!pool) {
+      const url = process.env.DATABASE_URL;
+      if (!url) throw new Error('DATABASE_URL is not set - examples/blog-pg needs a Postgres connection string');
+      const driver = process.env.ROSEFN_PG_MODULE || 'pg';
+      const { default: Pg } = await import(/* @vite-ignore */ driver);
+      pool = new Pg({ connectionString: url, max: 10 });
+    }
+    return pool;
+  };
+
+  // The three shapes the app uses, over the pool. Same names the SQLite
+  // blog uses (all/get/run), so the page code does not change when the
+  // driver does - that is the whole point of the accessor. It rides the
+  // context as a FUNCTION on purpose: the middleware runs before routing,
+  // so a request that never touches the database (a 404, an asset) must
+  // not open a connection - or fail when DATABASE_URL is unset.
+  const db = async () => {
+    const p = await getDb();
+    return {
+      all: async <T>(sql: string, args: unknown[] = []): Promise<T[]> => (await p.query<T>(sql, args)).rows,
+      get: async <T>(sql: string, args: unknown[] = []): Promise<T | undefined> => (await p.query<T>(sql, args)).rows[0],
+      run: async (sql: string, args: unknown[] = []): Promise<void> => { await p.query(sql, args); },
+    };
+  };
+
+  export async function handle(request: Request) {
+    const { pathname } = new URL(request.url);
+    const session = $cookies(request).session;
+
+    // The write page is walled by ABSENCE of data, not by a redirect: with
+    // no session the middleware loads no posts, so the page renders its
+    // login form and the manager never exists in the response. A static
+    // deploy (the Go binary) shows exactly the same login form.
+    if (pathname === '/admin' && session) {
+      const q = await db();
+      getContext().posts = await q.all<PostRow>('SELECT id, title, body, author FROM posts ORDER BY id DESC');
+    }
+
+    // The list page reads the same rows.
+    if (pathname === '/') {
+      const q = await db();
+      getContext().posts = await q.all<PostRow>('SELECT id, title, body, author FROM posts ORDER BY id DESC');
+    }
+
+    // A single post: /post/<id>. The id is the last path segment.
+    const postMatch = pathname.match(/^\/post\/(\d+)$/);
+    if (postMatch) {
+      const q = await db();
+      getContext().post = (await q.get<PostRow>('SELECT id, title, body, author FROM posts WHERE id = $1', [Number(postMatch[1])])) ?? null;
+    }
+
+    // Every api handler and page downstream can ask who is calling - and
+    // the api handlers share this one pool by calling the same accessor.
+    getContext().user = session ? { id: Number(session) } : null;
+    getContext().db = db;
+  }
+</script>

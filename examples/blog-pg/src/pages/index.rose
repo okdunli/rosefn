@@ -1,0 +1,31 @@
+<script>
+  // The list page. $data runs per request on the server and reads the
+  // rows the middleware already loaded - so the page itself imports
+  // nothing, and the first response carries the data.
+  //
+  // The page has no event wiring, no form and no lifecycle: the compiler
+ // decides this route is zero-JS . The list ships as
+  // pure HTML - no state script, no bundle, zero script tags.
+  //
+  // On a client-side navigation the context is empty (it is a
+  // per-request, server-side bag), so the same $data falls back to the
+  // api: one request for fresh rows, the honest cost of server data
+  // after a SPA navigation. The fallback is CLIENT-only on purpose -
+  // Node's fetch rejects a relative URL, and on the server the context
+  // (or an empty list) is already the answer.
+  interface Post { id: number; title: string; body: string; author: string }
+
+  let posts = $data(async (): Promise<Post[]> =>
+    getContext().posts ?? (typeof location === 'undefined' ? [] : (await (await fetch('/api/posts')).json()).posts));
+</script>
+
+<h1>Posts</h1>
+<p>Every row below arrived in the first response - one request, no JavaScript.</p>
+<ul>
+  {#each posts() as post}
+    <li>
+      <a href={'/post/' + post.id}>{post.title}</a>
+      <span> — {post.author}</span>
+    </li>
+  {/each}
+</ul>

@@ -1,0 +1,17 @@
+<script>
+  // One post as JSON. The pool rides the request context (the middleware
+  // opened it); an unknown id is a JSON 404, never the HTML page.
+  interface PostRow { id: number; title: string; body: string; author: string }
+
+  const json = (obj: unknown, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
+
+  export async function GET(req: Request) {
+    const id = Number(new URL(req.url).pathname.split('/').pop());
+    if (!id) return json({ error: 'id is required' }, 400);
+    const db = await getContext().db();
+    const post = await db.get<PostRow>('SELECT id, title, body, author FROM posts WHERE id = $1', [id]);
+    if (!post) return json({ error: 'no post with that id' }, 404);
+    return { post };
+  }
+</script>

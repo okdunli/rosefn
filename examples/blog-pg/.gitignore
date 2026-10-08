@@ -1,0 +1,24 @@
+dist
+node_modules
+
+# local env files (may contain secrets) - never commit
+.env
+.env.*
+!.env.example
+
+# local dev database (created by running the app)
+.data/
+# local scratch: dev-server logs, one-off probe scripts
+*.log
+tmp/
+.vfy/
+# Windows reserved-name junk a stray shell redirect can create
+nul
+_nul
+# captured sessions / local credentials
+cookies.txt
+# release tarballs and design sources
+*.tar.gz
+*.psd
+# prebuilt binaries
+*.exe
