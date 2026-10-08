@@ -1,0 +1,17 @@
+<script>
+  // The walled page. Without a session the middleware put no user in the
+  // context, so this page renders the prompt and the gated content never
+  // exists in the response - the same document a static deploy would show.
+  let user = $data(async () => getContext().user ?? null);
+</script>
+
+<h1>Dashboard</h1>
+
+{#if user()}
+  <p>Welcome back, <strong>{user()!.name}</strong>. This page only exists in the response for a signed-in visitor.</p>
+  <p><a href="/api/auth/logout">Sign out</a></p>
+{/if}
+
+{#if !user()}
+  <p>This is the gated half of the app. <a href="/api/auth/login">Sign in</a> to see it.</p>
+{/if}

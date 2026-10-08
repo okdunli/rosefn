@@ -1,0 +1,56 @@
+<script>
+  // GET /api/auth/login - step one of the dance: mint the two one-time
+  // values, remember them in short-lived HttpOnly cookies, and redirect to
+  // the provider's authorize endpoint.
+  //
+  // No runtime imports: an api route can call every runtime global a page
+  // can ($sessionCookie below, getContext in the callback) - the compiler
+  // injects the surface, and esbuild drops what the handlers never call.
+  //
+  //   state     - the CSRF token: the callback must present exactly the
+  //               value this request minted, or it is a forged callback
+  //               (someone replaying a code they intercepted elsewhere).
+  //   verifier  - PKCE: its SHA-256 challenge travels in the URL, the
+  //               verifier itself only in the token request, so a code
+  //               intercepted in transit is useless without it.
+  //
+  // Both values come from Web Crypto (crypto.getRandomValues /
+  // crypto.subtle), which is a global on Node 18+ and every edge runtime.
+  const b64url = (bytes: Uint8Array) =>
+    btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const rand = () => b64url(crypto.getRandomValues(new Uint8Array(32)));
+
+  const json = (obj: unknown, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
+
+  export async function GET(req: Request) {
+    const oauth = getContext().oauth;
+    if (!oauth) {
+      return json({ error: 'set OAUTH_AUTHORIZE_URL, OAUTH_TOKEN_URL, OAUTH_USER_URL and OAUTH_CLIENT_ID' }, 500);
+    }
+    const state = rand();
+    const verifier = rand();
+    const challenge = b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
+
+    // The callback address: the env override wins, otherwise this very
+    // app's own origin (correct behind any proxy that sets Host properly).
+    const redirectUri = process.env.OAUTH_REDIRECT_URI || new URL('/api/auth/callback', req.url).href;
+
+    const authorize = new URL(oauth.authorizeUrl);
+    authorize.searchParams.set('response_type', 'code');
+    authorize.searchParams.set('client_id', oauth.clientId);
+    authorize.searchParams.set('redirect_uri', redirectUri);
+    authorize.searchParams.set('scope', oauth.scope);
+    authorize.searchParams.set('state', state);
+    authorize.searchParams.set('code_challenge', challenge);
+    authorize.searchParams.set('code_challenge_method', 'S256');
+
+    const res = new Response(null, { status: 302, headers: { location: authorize.href } });
+    // Ten minutes is the whole window for a human to sign in; both cookies
+    // are HttpOnly and SameSite=Lax (the callback IS a cross-site GET from
+    // the provider, which Lax permits while still blocking cross-site POSTs).
+    res.headers.append('set-cookie', $sessionCookie('oauth_state', state, { maxAge: 600 }));
+    res.headers.append('set-cookie', $sessionCookie('oauth_verifier', verifier, { maxAge: 600 }));
+    return res;
+  }
+</script>

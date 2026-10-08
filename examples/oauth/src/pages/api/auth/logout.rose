@@ -1,0 +1,10 @@
+<script>
+  // Sign out: expire the session cookie and go home. A GET, because it
+  // must be reachable from a plain link - and the CSRF guard on
+  // `rosefn serve` only refuses cross-site WRITES, which this is not.
+  export function GET() {
+    const res = new Response(null, { status: 302, headers: { location: '/' } });
+    res.headers.append('set-cookie', $sessionCookie('session', '', { maxAge: 0 }));
+    return res;
+  }
+</script>

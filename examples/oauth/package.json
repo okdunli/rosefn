@@ -1,0 +1,14 @@
+{
+  "name": "rosefn-oauth",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "rosefn dev",
+    "build": "rosefn build",
+    "preview": "rosefn preview",
+    "serve": "rosefn serve"
+  },
+  "dependencies": {
+    "rosefn": "latest"
+  }
+}

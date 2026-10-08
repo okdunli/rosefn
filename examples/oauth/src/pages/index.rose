@@ -1,0 +1,20 @@
+<script>
+  // The public home. The sign-in link is a plain <a> to the api route that
+  // starts the OAuth dance - it works with JavaScript disabled, because
+  // the dance is a sequence of ordinary HTTP redirects.
+  let user = $data(async () => getContext().user ?? null);
+</script>
+
+<h1>🌹 OAuth, the rosefn shape</h1>
+<p>
+  This app signs people in with any OAuth 2.0 provider - GitHub, Google, an
+  OIDC server, or the fake one the test suite runs locally. One link, two
+  redirects, one cookie.
+</p>
+
+{#if user()}
+  <p>Signed in as <strong>{user()!.name}</strong>. <a href="/dashboard">Go to the dashboard</a>.</p>
+{/if}
+{#if !user()}
+  <p><a href="/api/auth/login">Sign in</a> — or look at the <a href="/dashboard">dashboard</a> to see the wall.</p>
+{/if}

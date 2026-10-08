@@ -1,0 +1,60 @@
+<script>
+  // The middleware runs before every request. Here it does two jobs:
+  //
+  //   1. read the OAuth provider config from the environment ONCE per
+  //      request and put it in the context (the api routes below are the
+  //      only readers, and they must not each re-derive it),
+  //   2. decide who is signed in, from the session cookie the callback
+  //      sets, and put the answer in the context.
+  //
+  // The wall is DATA ABSENCE, not a redirect: with no session the context
+  // carries no user, so /dashboard renders its sign-in prompt and nothing
+  // gated ever exists in the response. A context-reading route is dynamic
+  // by construction - never baked, never served from a prerendered file -
+  // so nothing gated can leak into a static deploy either.
+  interface SessionUser { id: string; name: string }
+
+  // Provider config, from the environment. Any OAuth 2.0 / OIDC provider
+  // works: point the three URLs at it. `null` when unconfigured - the auth
+  // routes answer a clear 500 naming the missing variables instead of a
+  // redirect into the void.
+  const oauthConfig = () => {
+    const authorizeUrl = process.env.OAUTH_AUTHORIZE_URL;
+    const tokenUrl = process.env.OAUTH_TOKEN_URL;
+    const userUrl = process.env.OAUTH_USER_URL;
+    const clientId = process.env.OAUTH_CLIENT_ID;
+    if (!authorizeUrl || !tokenUrl || !userUrl || !clientId) return null;
+    return {
+      authorizeUrl,
+      tokenUrl,
+      userUrl,
+      clientId,
+      // The secret is optional at CONFIG time: a public client (PKCE only)
+      // has none, and the token route then simply omits it.
+      clientSecret: process.env.OAUTH_CLIENT_SECRET || '',
+      scope: process.env.OAUTH_SCOPE || 'read:user',
+      // Which fields of the provider's profile are the id and the display
+      // name - GitHub uses `login`, Google/OIDC use `sub`/`name`.
+      idField: process.env.OAUTH_ID_FIELD || 'id',
+      nameField: process.env.OAUTH_NAME_FIELD || 'name',
+    };
+  };
+
+  const readSession = (req: Request): SessionUser | null => {
+    // $cookies already decoded the value; $sessionCookie encoded it when it
+    // was set - one hop each way, so the JSON arrives exactly as written.
+    const raw = $cookies(req).session;
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed.id === 'string' ? parsed as SessionUser : null;
+    } catch {
+      return null; // a malformed cookie is simply "not signed in"
+    }
+  };
+
+  export async function handle(request: Request) {
+    getContext().oauth = oauthConfig();
+    getContext().user = readSession(request);
+  }
+</script>

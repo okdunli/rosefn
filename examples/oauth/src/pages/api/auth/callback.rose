@@ -1,0 +1,76 @@
+<script>
+  // GET /api/auth/callback?code=...&state=... - steps two and three: prove
+  // the callback is ours, trade the code for a token, read the profile,
+  // set the session cookie, and redirect into the app.
+  //
+  // The order is the security model: the state check runs BEFORE any
+  // network call, so a forged or replayed callback is refused without the
+  // provider ever being contacted (and without a code being spent).
+  const json = (obj: unknown, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
+
+  export async function GET(req: Request) {
+    const oauth = getContext().oauth;
+    if (!oauth) {
+      return json({ error: 'set OAUTH_AUTHORIZE_URL, OAUTH_TOKEN_URL, OAUTH_USER_URL and OAUTH_CLIENT_ID' }, 500);
+    }
+    const url = new URL(req.url);
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    const cookies = $cookies(req);
+
+    // 1. The provider's own error answer (?error=access_denied) is passed
+    //    through as a clean 403, not a crash.
+    const providerError = url.searchParams.get('error');
+    if (providerError) return json({ error: `provider refused: ${providerError}` }, 403);
+
+    // 2. State first, network second. A missing, mismatched or stale state
+    //    is a forged or replayed callback.
+    if (!state || !cookies.oauth_state || state !== cookies.oauth_state) {
+      return json({ error: 'state mismatch - this callback is not the one this app started' }, 403);
+    }
+    if (!code) return json({ error: 'code is required' }, 400);
+    if (!cookies.oauth_verifier) return json({ error: 'pkce verifier cookie is missing - start again' }, 400);
+
+    // 3. Trade the code (plus the verifier) for a token.
+    const tokenRes = await fetch(oauth.tokenUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: process.env.OAUTH_REDIRECT_URI || new URL('/api/auth/callback', req.url).href,
+        client_id: oauth.clientId,
+        ...(oauth.clientSecret ? { client_secret: oauth.clientSecret } : {}),
+        code_verifier: cookies.oauth_verifier,
+      }),
+    });
+    if (!tokenRes.ok) {
+      return json({ error: `token exchange failed: ${tokenRes.status}` }, 502);
+    }
+    const token = await tokenRes.json() as { access_token?: string };
+    if (!token.access_token) return json({ error: 'token exchange returned no access_token' }, 502);
+
+    // 4. Read the profile with the token.
+    const profileRes = await fetch(oauth.userUrl, {
+      headers: { authorization: `Bearer ${token.access_token}`, accept: 'application/json' },
+    });
+    if (!profileRes.ok) return json({ error: `profile fetch failed: ${profileRes.status}` }, 502);
+    const profile = await profileRes.json() as Record<string, unknown>;
+    const id = profile[oauth.idField];
+    const name = profile[oauth.nameField];
+    if (id === undefined) return json({ error: `profile has no ${oauth.idField} field` }, 502);
+
+    // 5. The session. trade-off: the profile rides the cookie as JSON - a
+    // demo, not a vault. A real deploy signs it (a JWT) or stores a row
+    // and puts the row's id in the cookie; everything around this file
+    // stays exactly as it is. ($sessionCookie encodes the value and
+    // $cookies decodes it, so the JSON travels raw here.)
+    const res = new Response(null, { status: 302, headers: { location: '/dashboard' } });
+    res.headers.append('set-cookie', $sessionCookie('session', JSON.stringify({ id: String(id), name: String(name ?? id) })));
+    // and the one-time cookies die with the flow that used them
+    res.headers.append('set-cookie', $sessionCookie('oauth_state', '', { maxAge: 0 }));
+    res.headers.append('set-cookie', $sessionCookie('oauth_verifier', '', { maxAge: 0 }));
+    return res;
+  }
+</script>
