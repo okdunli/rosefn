@@ -1,0 +1,17 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[functions]
+  directory = "netlify/functions"
+  included_files = ["dist/**"]
+
+# Netlify answers the publish directory first, so a prerendered document, a
+# bundle or a baked API body is served by the CDN and never invokes the
+# function. Everything else - dynamic routes, live /api routes, POST server
+# actions - falls through to the catch-all below (status 200 = rewrite, not
+# redirect; the browser keeps its URL).
+[[redirects]]
+  from = "/*"
+  to = "/.netlify/functions/rosefn"
+  status = 200
