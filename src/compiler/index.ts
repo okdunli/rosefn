@@ -460,6 +460,21 @@ export interface RequestHookContext {
 }
 
 /**
+ * The cross-machine store bridge, handed to a plugin's `onServe`. A
+ * `$store` write in this worker calls `install`'s sender; a patch that
+ * arrived from anywhere else enters through `deliver` and lands in the
+ * same store map the pages read. The cluster's own IPC relay stays the
+ * default on one machine - this is the seam a redis/NATS driver plugs
+ * into, from the worker process where its client library lives.
+ */
+export interface StoreBridge {
+  /** Install the sender: every $store write in this worker calls it. Pass null to detach. */
+  install(send: ((name: string, value: unknown) => void) | null): void;
+  /** Apply a patch that arrived from another process or machine. */
+  deliver(name: string, value: unknown): void;
+}
+
+/**
  * A plugin, in two halves. `transform` runs at BUILD time over each
  * component's raw source. The rest run at RUNTIME: `onRequest`/`onResponse`
  * once per request (Node server, dev/preview and edge adapter alike),
@@ -470,6 +485,8 @@ export interface RequestHookContext {
  * A runtime hook is bundled into dist/server.js together with the config
  * module that declares it, so its imports must load in the target runtime
  * (Node and edge both): keep node-only code out of rosefn.config.js.
+ * `onServe`/`onShutdown` are the exception - the CLI loads the config in
+ * the worker process itself, so a pool or a redis client may live there.
  */
 export interface Plugin {
   name: string;
@@ -478,8 +495,8 @@ export interface Plugin {
   onRequest?(ctx: RequestHookContext): Response | void | Promise<Response | void>;
   /** After the response exists, before it is sent. Return a Response to replace it. */
   onResponse?(ctx: RequestHookContext, res: Response): Response | void | Promise<Response | void>;
-  /** Worker start: open a connection pool, warm a cache. */
-  onServe?(meta: { port: number; workers: number }): void | Promise<void>;
+  /** Worker start: open a connection pool, warm a cache, install a cross-machine store driver. */
+  onServe?(meta: { port: number; workers: number; store: StoreBridge }): void | Promise<void>;
   /** Worker drain, before exit: close the pool. */
   onShutdown?(): void | Promise<void>;
 }
@@ -3061,6 +3078,22 @@ if (typeof process !== 'undefined' && typeof process.send === 'function') {
   process.on('message', (msg) => {
     if (msg && msg.type === 'rosefn:store') applyStorePatch(msg.name, msg.value);
   });
+}
+
+// (the cross-machine seam): the cluster relay above covers ONE
+// machine. A driver that spans machines (redis pub/sub, NATS, a database
+// NOTIFY) lives in the project's rosefn.config.js, because that is where
+// its client library is imported - and a plugin's onServe runs in the
+// WORKER process, next to this module but not inside it. These two exports
+// are the bridge: rosefn serve hands them to onServe's meta.store, and
+// the driver reaches the one store map the pages of THIS module read.
+// Both are inert unless called, so the edge bundle keeps its zero-import
+// shape and a dist built before this existed simply has no bridge.
+export function __installStoreTransport(send: (name: string, value: unknown) => void): void {
+  setStoreTransport(send);
+}
+export function __deliverStorePatch(name: string, value: unknown): void {
+  applyStorePatch(name, value);
 }
 
 export { localeList };
