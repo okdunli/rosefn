@@ -679,8 +679,9 @@ function scanSlotDecls(filePath: string): Array<{ name: string; props: string[] 
   } catch {
     return [];
   }
-  const noBlocks = src.replace(STYLE_RE, '');
-  const tpl = noBlocks.match(TEMPLATE_RE)?.[1] ?? noBlocks.replace(HEAD_RE, '').replace(COMPONENT_RE, '').trim();
+  const noScript = src.replace(COMPONENT_RE, '');
+  const noBlocks = noScript.replace(STYLE_RE, '');
+  const tpl = noBlocks.match(TEMPLATE_RE)?.[1] ?? noBlocks.replace(HEAD_RE, '').trim();
   const out: Array<{ name: string; props: string[] }> = [];
   for (const m of tpl.matchAll(/<slot\s+([^>]*?)\/?>/g)) {
     const name = /\bname\s*=\s*["'](\w+)["']/.exec(m[1]);
@@ -781,12 +782,13 @@ export async function compileComponent(filePath: string, publicDir: string, scop
     };
   }
 
-  const sourceNoHead = source.replace(HEAD_RE, '');
+  const sourceNoScript = source.replace(COMPONENT_RE, '');
+  const sourceNoHead = sourceNoScript.replace(HEAD_RE, '');
   const styleMatch = sourceNoHead.match(STYLE_RE);
   const scopedStyle = styleMatch?.[1] ? scopeCss(styleMatch[1], scopeKey) : '';
   const sourceNoBlocks = sourceNoHead.replace(STYLE_RE, '');
 
-  const scriptMatch = sourceNoBlocks.match(COMPONENT_RE);
+  const scriptMatch = source.match(COMPONENT_RE);
   const roseResolved = resolveRoseImports(scriptMatch?.[1] ?? '', filePath, registry);
   const rawScript = roseResolved.script;
   const roseImports = roseResolved.imports;
@@ -948,7 +950,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   }
 
   const templateMatch = sourceNoBlocks.match(TEMPLATE_RE);
-  const headContent = source.match(HEAD_RE)?.[1] ?? '';
+  const headContent = sourceNoScript.match(HEAD_RE)?.[1] ?? '';
   const rawTemplate = templateMatch
     ? templateMatch[1]
     : sourceNoBlocks.replace(COMPONENT_RE, '').trim();
