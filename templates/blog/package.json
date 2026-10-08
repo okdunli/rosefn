@@ -9,6 +9,6 @@
     "serve": "rosefn serve"
   },
   "dependencies": {
-    "rosefn": "file:../.."
+    "rosefn": "latest"
   }
 }
