@@ -342,22 +342,46 @@ function skipTemplate(src: string, i: number): number {
   return j;
 }
 
+// The literal that starts at `i`, if any: a quoted string, a template literal, or - the one that keeps derailing scanners - a REGEX literal.
+function skipLiteral(src: string, i: number): number | null {
+  const q = src[i];
+  if (q === '"' || q === "'") return skipQuoted(src, i);
+  if (q === '`') return skipTemplate(src, i);
+  if (q !== '/') return null;
+  if (src[i + 1] === '/' || src[i + 1] === '*') return null;
+  let b = i - 1;
+  while (b >= 0 && /\s/.test(src[b])) b--;
+  if (b >= 0) {
+    if (!'(,=:[!&|?{};+-*%~^'.includes(src[b])) {
+      const word = /(\w+)$/.exec(src.slice(0, b + 1))?.[1] ?? '';
+      if (!['return', 'typeof', 'case', 'in', 'of', 'new', 'delete', 'void', 'do', 'else', 'instanceof', 'yield', 'await'].includes(word)) return null;
+    }
+  }
+  let j = i + 1;
+  let inClass = false;
+  while (j < src.length) {
+    const c = src[j];
+    if (c === '\\') { j += 2; continue; }
+    if (c === '\n') return null;
+    if (inClass) { if (c === ']') inClass = false; }
+    else if (c === '[') inClass = true;
+    else if (c === '/') { j++; break; }
+    j++;
+  }
+  if (j > src.length) return null;
+  while (j < src.length && /[dgimsuvy]/.test(src[j])) j++;
+  return j;
+}
+
 // 's scanners are syntactic, and prose is not code: the demo's own "the same zero-JS document." (a sentence ending).
 function stripComments(src: string): string {
   let out = '';
   let i = 0;
   while (i < src.length) {
-    const q = src[i];
-    if (q === '"' || q === "'") {
-      const end = skipQuoted(src, i);
-      out += src.slice(i, end);
-      i = end;
-      continue;
-    }
-    if (q === '`') {
-      const end = skipTemplate(src, i);
-      out += src.slice(i, end);
-      i = end;
+    const lit = skipLiteral(src, i);
+    if (lit !== null) {
+      out += src.slice(i, lit);
+      i = lit;
       continue;
     }
     if (src.startsWith('//', i)) {
@@ -379,6 +403,130 @@ function stripComments(src: string): string {
     out += src[i++];
   }
   return out;
+}
+
+// Q1 (bug report): the zero-JS scanner cried wolf on the standard isomorphic guard.
+function stripGuardedBranches(src: string): string {
+  const GUARD = /typeof\s+(?:window|document|navigator|location|localStorage|sessionStorage)\s*(!==|===)\s*["']undefined["']/y;
+  const ws = (i: number): number => { while (i < src.length && /\s/.test(src[i])) i++; return i; };
+  const ternaryColon = (q: number): number => {
+    let depth = 0;
+    let i = q + 1;
+    while (i < src.length) {
+      const c = src[i];
+      const lit = skipLiteral(src, i);
+      if (lit !== null) { i = lit; continue; }
+      if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') { depth--; if (depth < 0) return -1; }
+      else if (depth === 0 && c === ':') return i;
+      else if (depth === 0 && c === '?') { const inner = ternaryColon(i); if (inner < 0) return -1; i = inner + 1; continue; }
+      i++;
+    }
+    return -1;
+  };
+  const exprEnd = (i: number): number => {
+    let depth = 0;
+    while (i < src.length) {
+      const c = src[i];
+      const lit = skipLiteral(src, i);
+      if (lit !== null) { i = lit; continue; }
+      if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') { if (depth === 0) return i; depth--; }
+      else if (depth === 0 && (c === ',' || c === ';')) return i;
+      else if (depth === 0 && c === '?') { const inner = ternaryColon(i); if (inner < 0) return src.length; i = inner + 1; continue; }
+      i++;
+    }
+    return src.length;
+  };
+  const braceEnd = (b: number): number => {
+    let depth = 0;
+    let i = b;
+    while (i < src.length) {
+      const c = src[i];
+      const lit = skipLiteral(src, i);
+      if (lit !== null) { i = lit; continue; }
+      if (c === '{') depth++;
+      else if (c === '}') { depth--; if (depth === 0) return i; }
+      i++;
+    }
+    return src.length;
+  };
+  const stmtEnd = (i: number): number => {
+    let depth = 0;
+    while (i < src.length) {
+      const c = src[i];
+      const lit = skipLiteral(src, i);
+      if (lit !== null) { i = lit; continue; }
+      if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') { if (depth === 0) return i; depth--; }
+      else if (depth === 0 && (c === ';' || c === '\n')) return i;
+      i++;
+    }
+    return src.length;
+  };
+  const isIfGuard = (src: string, at: number): boolean => {
+    let b = at - 1;
+    while (b >= 0 && /\s/.test(src[b])) b--;
+    if (b < 0 || src[b] !== '(') return false;
+    b--;
+    while (b >= 0 && /\s/.test(src[b])) b--;
+    return b >= 1 && src[b] === 'f' && src[b - 1] === 'i' && (b < 2 || !/[\w$]/.test(src[b - 2]));
+  };
+
+  const blanks: Array<[number, number]> = [];
+  let i = 0;
+  while (i < src.length) {
+    const lit = skipLiteral(src, i);
+    if (lit !== null) { i = lit; continue; }
+    GUARD.lastIndex = i;
+    const m = GUARD.exec(src);
+    if (!m) { i++; continue; }
+    const browserAfter = m[1] === '!==';
+    const j = ws(i + m[0].length);
+    const two = src.slice(j, j + 2);
+    if (two === '&&' && browserAfter) {
+      blanks.push([j + 2, exprEnd(j + 2)]);
+    } else if (two === '||' && !browserAfter) {
+      blanks.push([j + 2, exprEnd(j + 2)]);
+    } else if (src[j] === '?') {
+      const colon = ternaryColon(j);
+      if (colon < 0) {
+        if (browserAfter) blanks.push([j + 1, src.length]);
+      } else if (browserAfter) {
+        blanks.push([j + 1, colon]);
+      } else {
+        blanks.push([colon + 1, exprEnd(colon + 1)]);
+      }
+    } else if (src[j] === ')' && isIfGuard(src, i)) {
+      let bodyEnd: number;
+      const k = ws(j + 1);
+      if (src[k] === '{') {
+        bodyEnd = braceEnd(k);
+        if (browserAfter) blanks.push([k + 1, bodyEnd]);
+      } else {
+        bodyEnd = stmtEnd(k);
+        if (browserAfter) blanks.push([k, bodyEnd]);
+      }
+      const after = ws(bodyEnd + 1);
+      if (src.startsWith('else', after)) {
+        const e = ws(after + 4);
+        if (src[e] === '{') {
+          const close = braceEnd(e);
+          if (!browserAfter) blanks.push([e + 1, close]);
+        } else {
+          const stop = stmtEnd(e);
+          if (!browserAfter) blanks.push([e, stop]);
+        }
+      }
+    }
+    i = j;
+  }
+  if (blanks.length === 0) return src;
+  const out = [...src];
+  for (const [a, b] of blanks) {
+    for (let k = a; k < b && k < out.length; k++) if (out[k] !== '\n') out[k] = ' ';
+  }
+  return out.join('');
 }
 
 // The <script> block of a .rose source, verbatim.
@@ -869,16 +1017,17 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   if (!needsClient) {
     const codeOnly = stripComments(source);
     const scriptCodeOnly = stripComments(rawScript);
+    const scriptScannable = stripGuardedBranches(scriptCodeOnly);
     if (/\son[a-z]+\s*=\s*["'][^"']*["']/i.test(codeOnly)) {
       jsWarnings.push('an inline on* attribute (e.g. onclick="...") - it cannot fire without the bundle; use on:click or set csr = true');
     }
     if (/javascript:/i.test(codeOnly)) {
       jsWarnings.push('a javascript: URL - it needs the bundle to run; link to a real route');
     }
-    if (/\b(?:eval|new Function)\s*\(/.test(scriptCodeOnly)) {
+    if (/\b(?:eval|new Function)\s*\(/.test(scriptScannable)) {
       jsWarnings.push('eval()/new Function() - client code the predicate cannot see');
     }
-    if (/\b(?:document|window|localStorage|sessionStorage)\s*\.|\b(?:add|remove)EventListener\s*\(|\brequestAnimationFrame\s*\(|\bMutationObserver\b|\bnavigator\s*\.|\blocation\s*\.\s*(?:href|assign|replace|reload|pathname|search|hash|origin)\b|\b(?:setTimeout|setInterval)\s*\(/.test(scriptCodeOnly)) {
+    if (/\b(?:document|window|localStorage|sessionStorage)\s*\.|\b(?:add|remove)EventListener\s*\(|\brequestAnimationFrame\s*\(|\bMutationObserver\b|\bnavigator\s*\.|\blocation\s*\.\s*(?:href|assign|replace|reload|pathname|search|hash|origin)\b|\b(?:setTimeout|setInterval)\s*\(/.test(scriptScannable)) {
       jsWarnings.push('browser-only code (document./window./addEventListener/a timer/...) - a JS-free document never ships this script to the browser, so it throws on the server or runs there and never reaches the client; if the route needs the browser, set csr = true');
     }
   }
@@ -2729,6 +2878,8 @@ async function renderFallback(pathname, render) {
 }
 
 export function matchRoute(pattern, pathname) {
+  // Q0 (bug report): one canonical URL per route.
+  pathname = pathname.replace(/\\/+$/, '') || '/';
   const patternParts = pattern.split('/');
   const pathParts = pathname.split('/');
   
@@ -3062,6 +3213,8 @@ async function paintFallback(container, page, builtin) {
 }
 
 export function matchRoute(pattern, pathname) {
+  // Q0 (bug report): one canonical URL per route.
+  pathname = pathname.replace(/\\/+$/, '') || '/';
   const patternParts = pattern.split('/');
   const pathParts = pathname.split('/');
   

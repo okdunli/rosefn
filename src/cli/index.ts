@@ -584,6 +584,33 @@ function devNotify(): void {
   }
 }
 
+let devBuild: Promise<void> | null = null;
+let devBuildPending = false;
+
+function startDevBuild(): Promise<void> {
+  if (!devBuild) {
+    devBuild = (async () => {
+      try {
+        console.log('Rebuilding...');
+        await build();
+        devNotify();
+      } catch (err) {
+        console.error('Build failed (server still running):', err instanceof Error ? err.message : String(err));
+      } finally {
+        devBuild = null;
+        devBuildPending = false;
+      }
+    })();
+  }
+  return devBuild;
+}
+
+/** Q2: the promise to await before routing, or null when nothing is building. */
+function settleDevBuild(): Promise<void> | null {
+  if (!devMode || (!devBuild && !devBuildPending)) return null;
+  return startDevBuild();
+}
+
 // Wrap a dev response so every HTML document carries the bridge (and the resumed state, once).
 function devWrap(inner: (req: any, res: any) => void): (req: any, res: any) => void {
   devMode = true;
@@ -625,7 +652,21 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
       res.end(blocked.body);
       return;
     }
-    loadServer().then(async (ssrModule: any) => {
+    const want = pathnameOf(req.url || '/');
+    const canonical = want.replace(/\/+$/, '') || '/';
+    if (canonical !== want) {
+      let search = '';
+      try { search = new URL(req.url || '/', 'http://localhost').search; } catch {  }
+      const to = canonical + search;
+      res.statusCode = 308;
+      res.setHeader('Location', to);
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(`<!DOCTYPE html><title>Redirecting</title><p>Redirecting to <a href="${to}">${to}</a>.</p>`);
+      return;
+    }
+    const settled = settleDevBuild();
+    const ready = settled ? settled.then(() => loadServer()) : loadServer();
+    ready.then(async (ssrModule: any) => {
       const hookCtx = ssrModule.hasRequestHooks === true || ssrModule.hasResponseHooks === true
         ? await hookContext(req)
         : null;
@@ -963,16 +1004,9 @@ async function dev(): Promise<void> {
 
   let timeout: any;
   fs.watch(SRC_DIR, { recursive: true }, () => {
+    devBuildPending = true;
     clearTimeout(timeout);
-    timeout = setTimeout(async () => {
-      try {
-        console.log('Rebuilding...');
-        await build();
-        devNotify();
-      } catch (err) {
-        console.error('Build failed (server still running):', err instanceof Error ? err.message : String(err));
-      }
-    }, 200);
+    timeout = setTimeout(() => { void startDevBuild(); }, 200);
   });
 
   const http = await import('http');
