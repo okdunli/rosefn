@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Rosefn Devtools",
+  "version": "0.0.8",
+  "description": "The live signal graph and prefetch counters of a rosefn page - the same JSON the zero-hydration resume ships.",
+  "devtools_page": "devtools.html",
+  "minimum_chrome_version": "114"
+}

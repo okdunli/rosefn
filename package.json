@@ -26,10 +26,8 @@
     "src",
     "deploy",
     "templates",
+    "devtools",
     "pack.mjs",
-    "README.md",
-    "PLUGINS.md",
-    "VERSIONING.md",
     "LICENSE"
   ],
   "license": "MIT",
