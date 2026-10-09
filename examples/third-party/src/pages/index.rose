@@ -1,0 +1,62 @@
+<script>
+ // This route opts into a NONCE policy instead of the hashed one.
+  // The default policy is a sha256 over the exact bytes of the framework's
+  // own bundle - perfect for a self-contained page, and useless the moment
+  // the page needs to run someone else's script: the hash cannot name code
+  // the app does not ship. A nonce is minted per response, the header and
+  // every inline script in the document carry the same value, and
+  // 'strict-dynamic' lets those trusted scripts pull in more.
+  export const csp = { nonce: true };
+
+  // The page itself is still an ordinary rosefn page: state, events, the
+  // one-request contract. The third-party machinery lives entirely in the
+  // <head> below.
+  let clicks = $state(0);
+</script>
+
+<head>
+  <title>Third-party scripts, the rosefn shape</title>
+
+  <!-- 1. the Partytown config: an INLINE script. Under a nonce policy the
+       browser blocks every inline script that does not carry the nonce -
+       and rosefn stamps the route's head scripts with the same value the
+       CSP header carries, so this one runs. -->
+  <script>
+    window.partytown = {
+      lib: '/_partytown/',           // where the lib is served from
+      forward: ['dataLayer.push'],   // which calls move to the worker
+    };
+  </script>
+
+  <!-- 2. the lib itself: an EXTERNAL script. The nonce rides this tag too
+       (the framework stamps every script in the head), so the policy admits
+       it. Serve it from your own origin - a static file in public/ is the
+       honest way - and it costs one request that the browser caches. -->
+  <script src="/vendor/partytown.js"></script>
+
+  <!-- 3. the analytics snippet: NOT executed by the browser. Partytown's lib
+       reads these blocks and runs them in a web worker, so the main thread
+       never blocks on a third-party origin. A `text/partytown` block needs
+       no nonce - the browser never executes it. -->
+  <script type="text/partytown" src="https://www.googletagmanager.com/gtag/js?id=G-MEASUREMENT-ID"></script>
+  <script type="text/partytown">
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){ dataLayer.push(arguments); }
+    gtag('js', new Date());
+    gtag('config', 'G-MEASUREMENT-ID');
+  </script>
+</head>
+
+<h1>🌹 Third-party scripts, the rosefn shape</h1>
+<p>
+  This page runs a strict CSP with no <code>unsafe-inline</code> - and still
+  loads a third-party analytics library, off the main thread, through
+  Partytown. The route's own code is ordinary rosefn: one request, zero
+  hydration, the same single document.
+</p>
+<p>App interactions still work: <button on:click={() => $setState('clicks', clicks() + 1)}>click</button> <strong>{clicks()}</strong></p>
+<p>
+  View source: every inline <code>&lt;script&gt;</code> in the head carries the
+  same <code>nonce</code> as the <code>Content-Security-Policy</code> header -
+  that is the whole mechanism.
+</p>
