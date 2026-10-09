@@ -68,6 +68,14 @@ export interface CompileResult {
    * run on, so `buffer = true` routes are never prerendered.
    */
   buffer?: boolean;
+  /**
+   * The script calls `redirect()` or `notFound()` (the control-flow pair).
+   * Both are thrown signals whose answer is the RESPONSE's status - a 30x
+   * with a Location, or a real 404 - and a streamed response has committed
+   * its status before the render runs. Such a route is therefore buffered
+   * by construction, exactly like `buffer = true`, and never prerendered.
+   */
+  controlSignal?: boolean;
   /** the component exports `prefetch = 'off' | 'hover' | 'viewport' | 'all'` (app-global link-prefetch strategy) */
   prefetch?: string;
  /** The component exports `vitals = true` (app-global web-vitals reporting) */
@@ -779,6 +787,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const csr: boolean | undefined = csrMatch ? csrMatch[1] !== 'false' : undefined;
   const bufferMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+buffer\s*=\s*(true|false)\s*;?/);
   const buffer: boolean | undefined = bufferMatch ? bufferMatch[1] !== 'false' : undefined;
+  const controlSignal = /\b(?:redirect|notFound)\s*\(/.test(rawScript) || undefined;
   if (csr === false) {
     const dead = /\son:[a-z]+\s*=/.exec(source) ?? /\b(?:onMount|onCleanup|refresh)\s*\(/.exec(rawScript);
     if (dead) {
@@ -927,10 +936,6 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   const wired = wireEventBindings(templateCalled, actionNames);
   const eventBindings = wired.bindings;
 
-  const ssrTemplate = wired.template
-    .replace(SLOT_NAMED_RE, (_w, attrs) => `{__slot(${encodeSlotCall(attrs)})}`)
-    .replace(SLOT_RE, '{__slot__}');
-
   const stateKeys = decls.map((d) => d.name);
 
   const comps = new Map(roseImports.map((r) => {
@@ -938,6 +943,9 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
     const hit = registry.get(abs)!;
     return [r.name, { index: hit.index, slots: hit.slots }] as const;
   }));
+  const ssrTemplate = rewriteQuotedExprAttrs(wired.template
+    .replace(SLOT_NAMED_RE, (_w, attrs) => `{__slot(${encodeSlotCall(attrs)})}`)
+    .replace(SLOT_RE, '{__slot__}'), comps);
   assertKnownDirectives(ssrTemplate, filePath);
   const compiledTemplate = compileTemplate(ssrTemplate, 'h', '__c', null, 0, true, comps);
   const compiledHead = headContent.trim() ? compileHead(headContent) : '';
@@ -963,6 +971,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
     revalidate,
     csr,
     buffer,
+    controlSignal,
     prefetch,
     vitals,
     bundle,
@@ -1415,6 +1424,11 @@ function compileHead(head: string): string {
  *
  * The known set is exactly what findBlock matches: `{#if}`, `{#each}`,
  * `{#boundary}` and their closers. There is no `{:...}` directive at all.
+ * The same gate catches the two shapes findBlock cannot match at all - an
+ * `{#each}` with no `as <name>` and an opener with no closer - which used to
+ * reach esbuild the same way (`Unexpected "#each"`, `Unexpected "#if"`).
+ * Adversarial probing found all three in one afternoon; a template compiler
+ * that emits broken code silently is the worst failure mode it has.
  */
 const KNOWN_CLOSERS = new Set(['if', 'each', 'boundary']);
 function assertKnownDirectives(template: string, filePath: string): void {
@@ -1429,6 +1443,10 @@ function assertKnownDirectives(template: string, filePath: string): void {
     rawRanges.push([raw.index, end]);
     RAW_OPEN.lastIndex = end;
   }
+  const COMMENT_RE = /<!--[\s\S]*?-->/g;
+  let note: RegExpExecArray | null;
+  while ((note = COMMENT_RE.exec(template))) rawRanges.push([note.index, note.index + note[0].length]);
+  rawRanges.sort((a, b) => a[0] - b[0]);
   const inRaw = (idx: number): boolean => rawRanges.some(([s, e]) => idx >= s && idx < e);
   const DIRECTIVE_RE = /\{([:/])(\w+)\}/g;
   let m: RegExpExecArray | null;
@@ -1456,6 +1474,82 @@ function assertKnownDirectives(template: string, filePath: string): void {
       { file: filePath, line: lineAt(template, m), hint: "rosefn templates support {#if}, {#each} and {#boundary} - and there is no {:else}: nest a second {#if} with the negated condition" },
     );
   }
+  const OPENER_RE = /\{#(if|each|boundary)\b([^}]*)\}/g;
+  while ((m = OPENER_RE.exec(template))) {
+    if (inRaw(m.index)) continue;
+    const [, kind, head] = m;
+    if (kind === 'each' && !/\bas\s+(\w+)\s*$/.test(head)) {
+      throw new RoseError(
+        'E-TEMPLATE',
+        `${filePath}: {#each ${head.trim()}} is missing its item name`,
+        { file: filePath, line: lineAt(template, m), hint: 'write {#each items() as item} - the name after `as` is what the block body reads (item.id, item.name)' },
+      );
+    }
+    const OPEN_RE = new RegExp(`\\{#${kind}\\b[^}]*\\}`, 'g');
+    const CLOSE_RE = new RegExp(`\\{/${kind}\\}`, 'g');
+    let depth = 1;
+    let i = m.index + m[0].length;
+    for (;;) {
+      OPEN_RE.lastIndex = i;
+      CLOSE_RE.lastIndex = i;
+      const nextOpen = OPEN_RE.exec(template);
+      const nextClose = CLOSE_RE.exec(template);
+      if (!nextClose) break;
+      if (nextOpen && nextOpen.index < nextClose.index) {
+        i = nextOpen.index + nextOpen[0].length;
+        continue;
+      }
+      i = nextClose.index + nextClose[0].length;
+      if (--depth === 0) break;
+    }
+    if (depth !== 0) {
+      throw new RoseError(
+        'E-TEMPLATE',
+        `${filePath}: unclosed {#${kind}} - every block needs its {/${kind}}`,
+        { file: filePath, line: lineAt(template, m), hint: `add the matching {/${kind}} (an inner {#if} or {#each} closes first, deepest first)` },
+      );
+    }
+  }
+}
+
+/**
+ * A QUOTED attribute whose value carries an expression - `class="{x}"`,
+ * `style="color:{c};"`, `href="/p{id}"` - used to be compiled as if the value
+ * were body text: the reactive markers landed INSIDE the attribute
+ * (`class="<!--⟦m:0⟧-->yes<!--⟦/m:0⟧-->"`), a class list no selector matches,
+ * and no wire pass can repair it (markers inside an attribute value are not
+ * nodes). The real CMS writes `style="background:{p.enabled ? ...};"` on
+ * every row, so this was not exotic. The unquoted form (`class={x}`) has
+ * always compiled correctly through attrMark(); this pass rewrites the quoted
+ * form into a single equivalent expression - `class={('yes')}`,
+ * `style={('background:' + (p.enabled ? …) + ';')}` - so there is ONE
+ * attribute path in the compiler instead of two, one of them broken.
+ *
+ * Component tags keep their own attribute parser (a quoted value is a string
+ * prop there, by design), and a value holding a template literal is left
+ * alone: rewriting it would need the literal-aware scanner the value does not
+ * have, and the old path was no better.
+ */
+function rewriteQuotedExprAttrs(template: string, comps: Map<string, unknown>): string {
+  const TAG_RE = /<([a-zA-Z][\w-]*)((?:\s+[\w:-]+(?:=(?:"[^"]*"|'[^']*'|[^\s"'>]+))?)*)\s*(\/?)>/g;
+  return template.replace(TAG_RE, (tag: string, name: string, attrs: string, selfClose: string) => {
+    if (comps.has(name) || !/\{/.test(attrs)) return tag;
+    const rewritten = attrs.replace(/([\w:-]+)="([^"]*)"/g, (whole: string, attr: string, value: string) => {
+      if (!/\{/.test(value) || value.includes('`')) return whole;
+      const spans = templateExprSpans(value);
+      if (spans.length === 0) return whole;
+      let expr = '';
+      let last = 0;
+      for (const s of spans) {
+        if (last < s.start) expr += (expr ? ' + ' : '') + JSON.stringify(value.slice(last, s.start));
+        expr += (expr ? ' + ' : '') + `(${s.expr})`;
+        last = s.end + 1;
+      }
+      if (last < value.length) expr += (expr ? ' + ' : '') + JSON.stringify(value.slice(last));
+      return `${attr}={${expr}}`;
+    });
+    return `<${name}${rewritten}${selfClose ? ' /' : ''}>`;
+  });
 }
 
 function compileTemplate(
@@ -1500,6 +1594,15 @@ function compileTemplate(
       const closeAt = remaining.toLowerCase().indexOf(`</${tag}`, rawHit.index + rawHit[0].length);
       const gt = closeAt < 0 ? -1 : remaining.indexOf('>', closeAt);
       const end = gt < 0 ? remaining.length : gt + 1;
+      result += emitChunk(remaining.slice(0, end), acc, closes, scope);
+      remaining = remaining.substring(end);
+      continue;
+    }
+
+    const noteAt = remaining.indexOf('<!--');
+    if (noteAt >= 0 && (!earliest || noteAt < earliest.index)) {
+      const noteEnd = remaining.indexOf('-->', noteAt + 4);
+      const end = noteEnd < 0 ? remaining.length : noteEnd + 3;
       result += emitChunk(remaining.slice(0, end), acc, closes, scope);
       remaining = remaining.substring(end);
       continue;
@@ -1937,7 +2040,7 @@ function compileSlot(acc: string): string {
   return `${acc} += String(children);\n`;
 }
 
-const RUNTIME_IMPORTS = `import { state, setState, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, ifMark, eachMark, headMark, rawMark } from './runtime.js';`;
+const RUNTIME_IMPORTS = `import { state, setState, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, ifMark, eachMark, headMark, rawMark, redirect, notFound } from './runtime.js';`;
 
 const API_RUNTIME_HELPERS = RUNTIME_IMPORTS
   .replace(/^import\s*\{/, '')
@@ -2317,11 +2420,45 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
 
   const pages = infos
     .map((info, i) => ({ info, i }))
-    .filter(({ info }) => !info.isLayout && !info.isNotFound && !info.isError && !info.isApi && !info.isMiddleware && !info.isComponent);
+    .filter(({ info }) => !info.isLayout && !info.isNotFound && !info.isError && !info.isApi && !info.isMiddleware && !info.isComponent)
+    // Specificity order, by route specificity: a literal segment
+    // beats a param, a param beats a catch-all, and an optional catch-all
+    // (which also matches the parent path) goes last. Without this a root
+    // `[[...slug]]` - the shape a CMS's public site is written as - would
+    // match EVERY pathname first and shadow every real route. The order is
+    // stable within a class, so an app without catch-alls is unchanged.
+    .sort((a, b) => {
+      const rank = (pattern: string): number[] => {
+        const segs = pattern.split('/');
+        return [
+          segs.filter((s) => s.startsWith('**')).length,
+          segs.filter((s) => s.startsWith('*')).length,
+          segs.filter((s) => s.startsWith(':')).length,
+        ];
+      };
+      const ra = rank(a.info.pattern);
+      const rb = rank(b.info.pattern);
+      for (let k = 0; k < 3; k++) if (ra[k] !== rb[k]) return ra[k] - rb[k];
+      return a.info.filePath < b.info.filePath ? -1 : 1;
+    });
 
   const apiRoutes = infos
     .map((info, i) => ({ info, i }))
-    .filter(({ info }) => info.isApi);
+    .filter(({ info }) => info.isApi)
+    .sort((a, b) => {
+      const rank = (pattern: string): number[] => {
+        const segs = pattern.split('/');
+        return [
+          segs.filter((s) => s.startsWith('**')).length,
+          segs.filter((s) => s.startsWith('*')).length,
+          segs.filter((s) => s.startsWith(':')).length,
+        ];
+      };
+      const ra = rank(a.info.pattern);
+      const rb = rank(b.info.pattern);
+      for (let k = 0; k < 3; k++) if (ra[k] !== rb[k]) return ra[k] - rb[k];
+      return a.info.filePath < b.info.filePath ? -1 : 1;
+    });
 
   const compose = (idx: number): string => {
     let expr = `render_${idx}`;
@@ -2396,8 +2533,9 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
       }
       const csrFlag = routeNoJs(i) ? ', csr: false' : '';
       const bufferFlag = compiled[i].buffer ? ', buffer: true' : '';
+      const signalFlag = compiled[i].controlSignal ? ', signal: true' : '';
       const guardFlag = compiled[i].guardName ? `, guard: beforeAction_${i}` : '';
-      return `{ pattern: '${info.pattern}', path: '${info.routePath}', render: ${compose(i)}, actions: ${actionMap ? `{ ${actionMap} }` : 'null'}${guardFlag}${csrFlag}${bufferFlag} }`;
+      return `{ pattern: '${info.pattern}', path: '${info.routePath}', render: ${compose(i)}, actions: ${actionMap ? `{ ${actionMap} }` : 'null'}${guardFlag}${csrFlag}${bufferFlag}${signalFlag} }`;
     })
     .join(',\n  ');
 
@@ -2482,7 +2620,7 @@ export const routeParams = {
 
 // Routes whose component reads the request context (getContext()), mutates a shared store ($store()), reads the query ($query(), P0-1)
 export const dynamicRoutes = [
-  ${pages.filter(({ i }) => compiled[i].usesContext || compiled[i].cspNonce || compiled[i].buffer).map(({ info }) => `'${info.routePath}'`).join(',\n  ')}
+  ${pages.filter(({ i }) => compiled[i].usesContext || compiled[i].cspNonce || compiled[i].buffer || compiled[i].controlSignal).map(({ info }) => `'${info.routePath}'`).join(',\n  ')}
 ];
 
 // Which api routes opt into build-time baking (export const prerender = true): routePath -> boolean.
@@ -2511,7 +2649,7 @@ export function isNoJs(pathname) {
 
 // P0-2 (bug report): routes that exported "buffer = true".
 export function isBuffered(pathname) {
-  return routes.some((route) => route.buffer && matchRoute(route.pattern, pathname));
+  return routes.some((route) => (route.buffer || route.signal) && matchRoute(route.pattern, pathname));
 }
 
 
@@ -2593,6 +2731,18 @@ async function renderFallback(pathname, render) {
 export function matchRoute(pattern, pathname) {
   const patternParts = pattern.split('/');
   const pathParts = pathname.split('/');
+  
+  const last = patternParts[patternParts.length - 1];
+  if (last && (last.startsWith('*') || last.startsWith('**'))) {
+    const fixed = patternParts.slice(0, -1);
+    if (pathParts.length < fixed.length) return false;
+    if (last.startsWith('*') && !last.startsWith('**') && pathParts.length === fixed.length) return false;
+    for (let i = 0; i < fixed.length; i++) {
+      if (fixed[i].startsWith(':')) continue;
+      if (fixed[i] !== pathParts[i]) return false;
+    }
+    return true;
+  }
   if (patternParts.length !== pathParts.length) return false;
   for (let i = 0; i < patternParts.length; i++) {
     if (patternParts[i].startsWith(':')) continue;
@@ -2619,9 +2769,11 @@ export async function renderPage(pathname, form) {
       const patternParts = route.pattern.split('/');
       const pathParts = pathname.split('/');
       for (let i = 0; i < patternParts.length; i++) {
-        if (patternParts[i].startsWith(':')) {
-          setState(patternParts[i].slice(1), pathParts[i]);
-        }
+        const seg = patternParts[i];
+        if (seg.startsWith(':')) setState(seg.slice(1), pathParts[i]);
+        
+        
+        else if (seg.startsWith('*')) setState(seg.replace(/^\\*+/, ''), pathParts.slice(i));
       }
  // I18n: a [lang] segment naming no dictionary is a 404 - the URL is the contract.
       const langIdx = patternParts.indexOf(':lang');
@@ -2653,6 +2805,12 @@ export async function renderPage(pathname, form) {
             if (err instanceof ActionError) {
               setState('actionError', { action: actionName, message: err.message, code: err.code, field: err.field });
               actionStatus = err.code;
+            } else if (err && err.__rosefn === 'redirect') {
+              
+              return { redirect: err.path, status: err.status ?? 303, ...docAttrs(pathname) };
+            } else if (err && err.__rosefn === 'notFound') {
+              if (notFound) return { ...(await renderFallback(pathname, notFound)), status: 404 };
+              return { html: '<h1>404</h1><p>Page not found</p>', state: '{}', head: [], status: 404, ...docAttrs(pathname) };
             } else {
               throw err;
             }
@@ -2663,6 +2821,15 @@ export async function renderPage(pathname, form) {
       try {
         rendered = extractHead(await route.render([], ''));
       } catch (err) {
+        // The control-flow pair: redirect() and notFound() are THROWN from inside the render (a $data body resolving a slug that no longer exists).
+        const signal = err && err.__rosefn;
+        if (signal === 'redirect') {
+          return { redirect: err.path, status: err.status ?? 307, ...docAttrs(pathname) };
+        }
+        if (signal === 'notFound') {
+          if (notFound) return { ...(await renderFallback(pathname, notFound)), status: 404 };
+          return { html: '<h1>404</h1><p>Page not found</p>', state: '{}', head: [], status: 404, ...docAttrs(pathname) };
+        }
         console.error('Rosefn: render failed for', pathname, err instanceof Error ? err.message : err);
         if (errorPage) return { ...(await renderFallback(pathname, errorPage)), status: 500 };
         return { html: '<h1>500</h1><p>Something went wrong rendering this page.</p>', state: '{}', head: [], status: 500, ...docAttrs(pathname) };
@@ -2714,7 +2881,25 @@ export async function handleApi(method, pathname, request) {
           headers: { 'content-type': 'application/json', allow: Object.keys(route.handlers).join(', ') },
         });
       }
-      return toResponse(await fn(request));
+      try {
+        return toResponse(await fn(request));
+      } catch (err) {
+        
+        const signal = err && err.__rosefn;
+        if (signal === 'redirect') {
+          return new Response(JSON.stringify({ error: 'redirect', location: err.path }), {
+            status: err.status ?? 307,
+            headers: { 'content-type': 'application/json', location: err.path },
+          });
+        }
+        if (signal === 'notFound') {
+          return new Response(JSON.stringify({ error: 'not found' }), {
+            status: 404,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        throw err;
+      }
     }
   }
   return new Response(JSON.stringify({ error: 'not found' }), {
@@ -2731,9 +2916,11 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
       const patternParts = route.pattern.split('/');
       const pathParts = pathname.split('/');
       for (let i = 0; i < patternParts.length; i++) {
-        if (patternParts[i].startsWith(':')) {
-          setState(patternParts[i].slice(1), pathParts[i]);
-        }
+        const seg = patternParts[i];
+        if (seg.startsWith(':')) setState(seg.slice(1), pathParts[i]);
+        
+        
+        else if (seg.startsWith('*')) setState(seg.replace(/^\\*+/, ''), pathParts.slice(i));
       }
       // i18n: an unknown locale must 404 BEFORE the shell flushes - a
       // streamed response cannot change its status afterwards
@@ -2877,6 +3064,18 @@ async function paintFallback(container, page, builtin) {
 export function matchRoute(pattern, pathname) {
   const patternParts = pattern.split('/');
   const pathParts = pathname.split('/');
+  
+  const last = patternParts[patternParts.length - 1];
+  if (last && (last.startsWith('*') || last.startsWith('**'))) {
+    const fixed = patternParts.slice(0, -1);
+    if (pathParts.length < fixed.length) return false;
+    if (last.startsWith('*') && !last.startsWith('**') && pathParts.length === fixed.length) return false;
+    for (let i = 0; i < fixed.length; i++) {
+      if (fixed[i].startsWith(':')) continue;
+      if (fixed[i] !== pathParts[i]) return false;
+    }
+    return true;
+  }
   if (patternParts.length !== pathParts.length) return false;
   for (let i = 0; i < patternParts.length; i++) {
     if (patternParts[i].startsWith(':')) continue;
@@ -2899,7 +3098,11 @@ async function applyParams(route, pathname) {
   const patternParts = route.pattern.split('/');
   const pathParts = pathname.split('/');
   for (let i = 0; i < patternParts.length; i++) {
-    if (patternParts[i].startsWith(':')) setState(patternParts[i].slice(1), pathParts[i]);
+    const seg = patternParts[i];
+    if (seg.startsWith(':')) setState(seg.slice(1), pathParts[i]);
+    
+    
+    else if (seg.startsWith('*')) setState(seg.replace(/^\\*+/, ''), pathParts.slice(i));
   }
   const langIdx = patternParts.indexOf(':lang');
   if (langIdx >= 0) await ensureLocale(pathParts[langIdx]);
@@ -3069,6 +3272,7 @@ ${langDirBlock}
       }
       if (!initial) __navReset(container);
       let broken = false;
+      let signal = null;
       await __withOwner(container, async () => {
         await applyParams(route, pathname);
         const closes = [];
@@ -3076,7 +3280,10 @@ ${langDirBlock}
         try {
           const render = await getRender(route); 
           html = await render(closes, '');
-        } catch {
+        } catch (err) {
+          
+          if (err && err.__rosefn === 'notFound') { signal = 'notFound'; return; }
+          if (err && err.__rosefn === 'redirect') { signal = err.path; return; }
           
           
           broken = true;
@@ -3087,6 +3294,14 @@ ${langDirBlock}
         bindEvents(container);
         flushMounts();
       });
+      if (signal === 'notFound') {
+        await paintFallback(container, notFound, '<h1>404</h1><p>Page not found</p>');
+        return;
+      }
+      if (signal) {
+        location.href = signal; 
+        return;
+      }
       if (broken) {
         await paintFallback(container, errorPage, '<h1>500</h1><p>Something went wrong rendering this page.</p>');
       }
@@ -3276,9 +3491,15 @@ function getRouteInfo(filePath: string, root: string): RouteInfo {
 
   let parts = withoutExt.split('/').filter((p) => p !== '_layout');
   if (parts.length > 1 && parts[parts.length - 1] === 'index') parts = parts.slice(0, -1);
-  const routeParts = parts.map((part) =>
-    part.startsWith('[') && part.endsWith(']') ? `:${part.slice(1, -1)}` : part
-  );
+  const CATCH_ALL = /^\[\.\.\.(\w+)\]$/;
+  const OPTIONAL_CATCH_ALL = /^\[\[\.\.\.(\w+)\]\]$/;
+  const routeParts = parts.map((part) => {
+    const optional = OPTIONAL_CATCH_ALL.exec(part);
+    if (optional) return `**${optional[1]}`;
+    const catchAll = CATCH_ALL.exec(part);
+    if (catchAll) return `*${catchAll[1]}`;
+    return part.startsWith('[') && part.endsWith(']') ? `:${part.slice(1, -1)}` : part;
+  });
 
   let routePath: string;
   if (routeParts.length === 0 || (routeParts.length === 1 && routeParts[0] === 'index')) {
@@ -3291,7 +3512,13 @@ function getRouteInfo(filePath: string, root: string): RouteInfo {
     filePath,
     routePath,
     pattern: routePath,
-    paramNames: parts.filter((p) => p.startsWith('[') && p.endsWith(']')).map((p) => p.slice(1, -1)),
+    paramNames: parts.flatMap((p) => {
+      const optional = OPTIONAL_CATCH_ALL.exec(p);
+      if (optional) return [optional[1]];
+      const catchAll = CATCH_ALL.exec(p);
+      if (catchAll) return [catchAll[1]];
+      return p.startsWith('[') && p.endsWith(']') ? [p.slice(1, -1)] : [];
+    }),
     isLayout,
     isNotFound,
     isError,

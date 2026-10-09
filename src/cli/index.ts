@@ -1,6 +1,4 @@
-/**
- * rosefn CLI - simplest possible SSR + static server
- */
+// Rosefn CLI - simplest possible SSR + static server
 
 import * as fs from 'fs';
 import * as path from 'path';
@@ -78,15 +76,28 @@ async function sendWebResponse(web: any, res: any): Promise<void> {
   res.end(Buffer.from(await web.arrayBuffer()));
 }
 
-/**
- * Send a rendered page document - through onResponse first . The
- * hook sees the status, headers and body exactly as they will go on the
- * wire and may replace them, so the ETag inside sendHtml is then computed
- * over the bytes actually sent. One helper for the POST-action path and the
- * buffered GET path: same hook, same order, no drift between them.
- */
+// Send a rendered page document - through onResponse first .
 async function sendPage(req: any, res: any, ssrModule: any, hookCtx: any, page: any, routePath: string): Promise<void> {
   let status = page.status ?? 200;
+  if (page.redirect) {
+    const body = `<!DOCTYPE html><title>Redirecting</title><p>Redirecting to <a href="${page.redirect}">${page.redirect}</a>.</p>`;
+    let headers: Record<string, any> = pageHeaders(ssrModule, routePath, '');
+    if (hookCtx) {
+      const out = await ssrModule.runResponseHooks(hookCtx, new Response(body, {
+        status,
+        headers: { 'content-type': 'text/html; charset=utf-8', location: page.redirect, ...headers },
+      }));
+      status = out.status;
+      headers = webHeadersToNode(out);
+    }
+    headers.location = page.redirect;
+    res.statusCode = status;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Location', page.redirect);
+    for (const [k, v] of Object.entries(headers)) if (k !== 'location') res.setHeader(k, v);
+    res.end(body);
+    return;
+  }
   const nonce = nonceFor(ssrModule, routePath);
   let html = getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, nonce);
   let headers: Record<string, any> = pageHeaders(ssrModule, routePath, nonce);
@@ -114,24 +125,7 @@ const SRC_DIR = process.argv[3] && !process.argv[3].startsWith('-') ? path.resol
 const OUT_DIR = path.join(process.cwd(), 'dist');
 const PORT = Number(process.env.PORT) || 3000;
 
-/**
- * Import dist/server.js, cached until the file changes on disk.
- *
- * The dev server rebuilds it on file changes, so a plain import() would
- * serve the cached (stale) module - re-import when mtime moves. But the
- * import must NOT be per-request: server state (stores mutated by server
- * actions) lives in that module, and a fresh import per request would
- * reset it on every hit, so an action's effect would vanish immediately.
- *
- * The dev re-import needs a NEW PATH, not a new `?v=` query: tsx's ESM
- * loader (which `npm run dev` runs the CLI through) caches by resolved
- * path and ignores the search string, so the query trick silently handed
- * back the previous module - a rebuild that served the OLD code until the
- * NEXT rebuild landed, which is exactly the "hot reload" a developer
- * cannot trust. A copied file under dist/.build/ (which every build
- * deletes, and which never ships) is a new module under any loader.
- * Preview and serve never rebuild, so they import dist/server.js itself.
- */
+// Import dist/server.js, cached until the file changes on disk. Preview and serve never rebuild, so they import dist/server.js itself.
 let serverModule: any = null;
 let serverMtime = -1;
 let serverVersion = 0;
@@ -375,7 +369,11 @@ function enumerateParams(pattern: string, names: string[], raw: Record<string, u
     let i = 0;
     return pattern
       .split('/')
-      .map((seg) => (seg.startsWith(':') ? encodeURIComponent(values[i++]) : seg))
+      .map((seg) => {
+        if (seg.startsWith(':')) return encodeURIComponent(values[i++]);
+        if (seg.startsWith('*')) return values[i++].split('/').map(encodeURIComponent).join('/');
+        return seg;
+      })
       .join('/');
   });
 }
@@ -524,7 +522,7 @@ async function hookContext(req: any): Promise<{
   for (const [k, v] of Object.entries(req.headers)) {
     if (v !== undefined) headers[k] = Array.isArray(v) ? v.join(', ') : String(v);
   }
-  const request = new Request(`http://${req.headers.host || 'localhost'}${req.url}`, {
+            const request = new Request(`http://${req.headers.host || 'localhost'}${req.url}`, {
     method: req.method || 'GET',
     headers,
   });
@@ -586,14 +584,7 @@ function devNotify(): void {
   }
 }
 
-/**
- * Wrap a dev response so every HTML document carries the bridge (and the
- * resumed state, once). Wrapping res is the one choke point that covers the
- * buffered and the streamed paths alike - the alternative is a flag threaded
- * through five call sites plus the generated server bundle's own shell writer.
- * The bridge script is not hashed, so dev also drops the CSP header: the hash
- * policy is a production guarantee and dev documents are localhost-only.
- */
+// Wrap a dev response so every HTML document carries the bridge (and the resumed state, once).
 function devWrap(inner: (req: any, res: any) => void): (req: any, res: any) => void {
   devMode = true;
   return (req, res) => {
@@ -610,7 +601,7 @@ function devWrap(inner: (req: any, res: any) => void): (req: any, res: any) => v
       const at = s.indexOf('<head>');
       if (at < 0) return chunk;
       injected = true;
-      const resume = seed ? `<script>window.__rosefn_resume=${seed.replace(/<\//g, '<\\/')}</script>` : '';
+      const resume = seed ? `<script>window.__rosefn_resume=${seed.replace(/<\/script>/g, '')}</script>` : '';
       const out = s.slice(0, at + 6) + resume + DEV_BRIDGE + s.slice(at + 6);
       return Buffer.isBuffer(chunk) ? Buffer.from(out, 'utf8') : out;
     };
@@ -919,24 +910,51 @@ async function freePort(from: number): Promise<number> {
 }
 
 /**
- * The version from package.json - one source of truth, no constant to drift.
- * Resolved from THIS module (not the cwd): the banner names the framework's
- * version even when it builds somebody else's project. Two layouts answer:
- * in the repo this module sits at src/cli/, in the published package the CLI
- * is bundled to dist-cli/ with the sources beside it - so try both.
+ * The FRAMEWORK's version - one source of truth, no constant to drift.
+ *
+ * Three layouts answer, in order:
+ *  1. src/FRAMEWORK_VERSION, a one-line stamp that ships beside the CLI
+ *     source. It is the only candidate that survives EMBEDDING: a real app
+ *     copies the framework's src/ into its own tree, where the nearest
+ *     package.json is the APP's - which is how a banner ended up naming the
+ *     app's version as the framework's for weeks, with no way to tell which
+ *     framework build was actually running.
+ *  2. the package.json two directories up (this repo: the framework's own),
+ *  3. the one beside the bundle (the published package: dist-cli/ + src/).
+ * A test asserts the stamp equals package.json, so the two cannot drift.
  */
 function version(): string {
-  for (const rel of ['../../package.json', '../package.json']) {
+  for (const rel of ['../FRAMEWORK_VERSION', '../../FRAMEWORK_VERSION', '../../package.json', '../package.json']) {
     try {
-      const v = JSON.parse(fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf-8')).version;
+      const raw = fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf-8');
+      const v = rel.endsWith('FRAMEWORK_VERSION') ? raw.trim() : JSON.parse(raw).version;
       if (v) return v;
     } catch { /* not this layout */ }
   }
   return '0.0.0';
 }
 
+/**
+ * The PROJECT's version, when it is a different package from the framework.
+ * A project that embeds the CLI source (the way a real app does) has its own
+ * package.json, and a banner that named only that one left the operator
+ * unable to tell which FRAMEWORK build was actually running - the two
+ * versions advanced independently for weeks. The banner now names both:
+ * "Rosefn v0.4.0 - project: my-app v0.1.1". Absent (running inside the
+ * framework repo itself, or a directory with no package.json) -> nothing.
+ */
+function projectTag(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf-8'));
+    if (!pkg.version || pkg.name === 'rosefn') return '';
+    return ` - project: ${pkg.name} v${pkg.version}`;
+  } catch {
+    return '';
+  }
+}
+
 async function dev(): Promise<void> {
-  console.log(`🌹 Rosefn v${version()} dev server starting...`);
+  console.log(`🌹 Rosefn v${version()}${projectTag()} dev server starting...`);
   try {
     await build();
   } catch (err) {
@@ -971,29 +989,11 @@ async function preview(): Promise<void> {
   const server = http.createServer(serveStatic(OUT_DIR, true));
 
   listenFree(server, PORT, (port) => {
-    console.log(`🌹 Rosefn v${version()} preview at http://localhost:` + port);
+    console.log(`🌹 Rosefn v${version()}${projectTag()} preview at http://localhost:${port}`);
   });
 }
 
-/**
- * `rosefn serve` runs what `build` produced - no rebuild, no
- * watcher, production semantics (a preview that re-rendered on the fly
- * could serve a half-written file). Multi-core through the stdlib cluster:
- * the primary supervises and serves no traffic, the workers serve; every
- * request is logged; SIGTERM drains in-flight work and exits.
- *
- * Boundaries, stated plainly:
- *  - each worker is its own process with its own dist/server.js module.
- *    Module-scope state is therefore per-worker, which is what $store()
- * fixes: writes broadcast through the primary, reads stay
- *    local-synchronous. ISR revalidation may run in more than one worker
- *    for one route: the guard is per-worker and the cost is one duplicate
- *    render.
- *  - the signal-driven drain is POSIX behavior. On Windows a kill() is
- *    abrupt by the platform's design, so the worker instead exits on the
- *    primary's death (the disconnect handler below) - a killed primary must
- *    never leave orphans holding the port.
- */
+
 async function serve(): Promise<void> {
   if (!fs.existsSync(path.join(OUT_DIR, 'server.js'))) {
     console.error(`Rosefn: ${OUT_DIR} has no server.js - run rosefn build first`);
@@ -1020,7 +1020,7 @@ async function serve(): Promise<void> {
     process.on('SIGTERM', stop);
     process.on('SIGINT', stop);
     cluster.on('exit', () => { if (--live <= 0) process.exit(0); });
-    console.log(`🌹 Rosefn v${version()} serve: ${workers} worker${workers > 1 ? 's' : ''} on http://localhost:${port} (cluster, bounded bodies, graceful shutdown, access log on stdout)`);
+    console.log(`🌹 Rosefn v${version()}${projectTag()} serve: ${workers} worker${workers > 1 ? 's' : ''} on http://localhost:${port} (cluster, bounded bodies, graceful shutdown, access log on stdout)`);
     return;
   }
   process.on('disconnect', () => process.exit(0));
@@ -1035,7 +1035,7 @@ async function serve(): Promise<void> {
       try { serverModule?.__installStoreTransport?.(send); } catch { /* a stale dist: no bridge, no crash */ }
     },
     deliver: (name: string, value: unknown) => {
-      try { serverModule?.__deliverStorePatch?.(name, value); } catch { /* ditto */ }
+      try { serverModule?.__deliverStorePatch?.(name, value); } catch {  }
     },
   };
   try {
@@ -1077,11 +1077,7 @@ async function serve(): Promise<void> {
   process.on('SIGINT', stop);
 }
 
-/**
- * The templates directory, in the two layouts the CLI ships in: the repo
- * checkout (src/cli -> two up) and the installed package (dist-cli -> one
- * up). The same two candidates `version()` tries for package.json.
- */
+
 function templatesDir(): string | null {
   for (const rel of ['../../templates', '../templates']) {
     const p = fileURLToPath(new URL(rel, import.meta.url));
@@ -1108,12 +1104,7 @@ function writeTypeScriptReady(dir: string): void {
   }, null, 2) + '\n');
 }
 
-/**
- * Copy a template into the new project and make it the developer's own:
- * the name, the published-package dependency (the template source points at
- * this checkout so it runs in-repo), the TypeScript-ready files. A
- * template's own build output and node_modules never ride along.
- */
+
 function copyTemplate(dir: string, name: string, display: string): void {
   const base = templatesDir();
   const shipped = base ? path.resolve(base, name) : '';
@@ -1200,9 +1191,7 @@ async function scaffold(): Promise<void> {
   writeTypeScriptReady(dir);
 
   fs.writeFileSync(path.join(pages, 'index.rose'), `<script>
-  // One file per route: markup, script and styles together.
-  // The script block is TypeScript - interfaces, annotations, generics and
-  // casts all compile, and \`npm run check\` type-checks them.
+  
   interface Item { label: string }
 
   let count = $state(0);
@@ -1211,8 +1200,8 @@ async function scaffold(): Promise<void> {
 
   function increment() { $setState('count', count() + 1); }
   function toggleList() { $setState('showList', !showList()); }
-  // typed server data: the body runs per request on the server (and ships
-  // to the client, where it re-runs on a client-side navigation)
+  
+  
   let first: Item = $data((): Item => ({ label: items()[0] ?? 'nothing yet' }));
 </script>
 

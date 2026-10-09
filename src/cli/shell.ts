@@ -114,10 +114,10 @@ document.addEventListener('submit', (e) => {
 // rebuild-triggered reload so the edit lands on the state the developer had,
 // and the devtools extension (devtools/) reads it the same way - the signal
 // graph plus the prefetch counters, which is the whole observable state of a
-// running page. It is the same serializeState the zero-hydration resume
-// already ships, so the only new bytes are the assignment (and a property
-// whose body is a call that already exists in this scope).
-window.__rosefn = { state: () => serializeState(), prefetch: () => prefetchStats() };
+// running page. Both are DIRECT references (no wrapper arrow): the names take
+// no arguments, so the call is identical and every document that carries the
+// bundle pays eleven bytes for the pair instead of forty.
+window.__rosefn = { state: serializeState, prefetch: prefetchStats };
 // initial=true: DOM is SSR output, resume state + wire markers (zero hydration).
 // If the document was rendered for a DIFFERENT route (a static-file server's
 // SPA fallback serves index.html for unknown paths), adopt nothing - let the
