@@ -1,0 +1,52 @@
+<script>
+  // The landing page: a working client for the two endpoints. The fetch
+  // path is the JS one; the curl lines in the README are the no-JS one -
+  // an api is the same api either way.
+  let result = $state('');
+  let error = $state('');
+
+  async function call(path: string, init?: RequestInit) {
+    error('');
+    const res = await fetch(path, init);
+    const text = await res.text();
+    if (res.ok) { result(text); } else { result(''); error(`${res.status} ${text}`); }
+  }
+
+  async function signIn(e: SubmitEvent) {
+    e.preventDefault();
+    const form = e.target as HTMLFormElement;
+    const res = await fetch('/api/token', { method: 'POST', body: new FormData(form) });
+    if (!res.ok) { error(`${res.status} ${await res.text()}`); result(''); return; }
+    const body = await res.json();
+    (form.querySelector('[name=token]') as HTMLInputElement).value = body.access_token;
+    error('');
+  }
+
+  async function whoami(e: SubmitEvent) {
+    e.preventDefault();
+    const form = e.target as HTMLFormElement;
+    const token = String(new FormData(form).get('token') ?? '');
+    await call('/api/me', { headers: { authorization: `Bearer ${token}` } });
+  }
+</script>
+
+<h1>🌹 JWT, the rosefn shape</h1>
+<p>
+  Two endpoints: <code>POST /api/token</code> mints, <code>GET /api/me</code>
+  verifies. HS256 over Web Crypto — no library, no <code>node:</code> import,
+  and the same bundle runs on Node, the edge and a serverless function.
+</p>
+
+<form on:submit={signIn}>
+  <input name="user" placeholder="user" aria-label="user" value="ada">
+  <input name="pass" type="password" placeholder="pass" aria-label="pass" value="lovelace">
+  <button type="submit">Get a token</button>
+</form>
+
+<form on:submit={whoami}>
+  <input name="token" placeholder="paste a token" aria-label="token" size="60">
+  <button type="submit">Who am I?</button>
+</form>
+
+{#if error()}<p><strong>{error()}</strong></p>{/if}
+{#if result()}<pre>{result()}</pre>{/if}

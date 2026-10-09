@@ -1,0 +1,65 @@
+<script>
+  // The middleware runs before every request and has one job: verify the
+  // caller's JWT (if any) and put the claims in the request context.
+  //
+  // The verification is Web Crypto (crypto.subtle) - HS256 over HMAC-SHA256,
+  // which is a global on Node 18+ and every edge runtime. No node: import,
+  // no jsonwebtoken dependency, and the same server bundle runs on Node,
+  // the edge adapter and a serverless function unchanged. crypto.subtle
+  // .verify also does the constant-time comparison for us.
+  interface Claims { sub: string; name: string; exp?: number }
+
+  const b64urlToBytes = (s: string): Uint8Array => {
+    const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
+    const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + pad);
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  };
+
+  // One key per secret, imported once per process (the import is async, so
+  // the promise is cached - a per-request import would be the slow path).
+  let keyPromise: Promise<CryptoKey> | null = null;
+  const key = (secret: string): Promise<CryptoKey> => {
+    if (!keyPromise) {
+      keyPromise = crypto.subtle.importKey(
+        'raw',
+        new TextEncoder().encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign', 'verify'],
+      );
+    }
+    return keyPromise;
+  };
+
+  const verify = async (token: string, secret: string): Promise<Claims | null> => {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const k = await key(secret);
+    const ok = await crypto.subtle.verify(
+      'HMAC',
+      k,
+      b64urlToBytes(parts[2]),
+      new TextEncoder().encode(`${parts[0]}.${parts[1]}`),
+    );
+    if (!ok) return null; // a tampered payload or a foreign signature
+    let claims: Claims;
+    try {
+      claims = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[1])));
+    } catch {
+      return null;
+    }
+    if (typeof claims.exp === 'number' && claims.exp * 1000 <= Date.now()) return null;
+    return claims && typeof claims.sub === 'string' ? claims : null;
+  };
+
+  export async function handle(request: Request) {
+    const secret = process.env.JWT_SECRET;
+    const header = request.headers.get('authorization') ?? '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    // No secret configured and no token presented: the app is simply
+    // anonymous. A token WITHOUT a secret is a 500 the route answers
+    // loudly (see /api/me), not a silent pass.
+    getContext().user = (secret && token) ? await verify(token, secret) : null;
+    if (token && !(getContext().user)) getContext().authError = 'invalid or expired token';
+  }
+</script>

@@ -1,0 +1,41 @@
+<script>
+  // POST /api/token - the mint. The demo account is ada / lovelace; a real
+  // service checks a hashed password against its users table (node:crypto
+  // scrypt, constant-time compare) and everything around it stays as it is.
+  //
+  // HS256 with a shared secret is the symmetric shape: whoever can verify
+  // can also mint, which is right for one service. Two services that must
+  // verify each other's tokens move to RS256/ES256 (the header's alg is
+  // already there to say so) - the sign/verify seam below does not change,
+  // only the key.
+  const b64url = (s: string) => btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const bytesToB64url = (u8: Uint8Array) => b64url(String.fromCharCode(...u8));
+
+  const json = (obj: unknown, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
+
+  export async function POST(req: Request) {
+    const secret = process.env.JWT_SECRET;
+    if (!secret) return json({ error: 'JWT_SECRET is not set - the mint needs the signing secret' }, 500);
+    const form = await req.formData();
+    const user = String(form.get('user') ?? '').trim();
+    const pass = String(form.get('pass') ?? '').trim();
+    // Validation before the credential check: a malformed request is a 400
+    // whether or not the account exists.
+    if (!user || !pass) return json({ error: 'user and pass are required' }, 400);
+    if (user !== 'ada' || pass !== 'lovelace') return json({ error: 'bad credentials' }, 401);
+
+    const now = Math.floor(Date.now() / 1000);
+    const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+    const body = b64url(JSON.stringify({ sub: '1', name: 'ada', iat: now, exp: now + 3600 }));
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign'],
+    );
+    const sig = bytesToB64url(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${header}.${body}`))));
+    return json({ access_token: `${header}.${body}.${sig}`, token_type: 'Bearer', expires_in: 3600 });
+  }
+</script>
