@@ -1,9 +1,4 @@
-/**
- * rosefn Compiler - Compile .rose components to SSR + client-resume JS
- *
- * Features: compile-time reactivity, zero-hydration resume, file-system
- * routing, nested layouts, server data fetching ($data) with request cache.
- */
+// Rosefn Compiler - Compile .rose components to SSR + client-resume JS
 
 import * as fs from 'fs';
 import * as path from 'path';
@@ -26,11 +21,7 @@ const SLOT_RE = /<slot\s*\/?>/g;
  *  keeps the plain `<slot />` out of it - that one is the default slot. */
 const SLOT_NAMED_RE = /<slot\s+((?=[^>]*\bname\s*=)[^>]*?)\/?>/g;
 
-/**
- * Encode a named slot tag as the template expression
- * `__slot('row', [['item', (post)]])` - array pairs, because the template
- * scanner matches `{...}` without nested braces.
- */
+// Encode a named slot tag as the template expression `__slot('row', [['item', (post)]])` - array pairs.
 function encodeSlotCall(attrs: string): string {
   const name = /\bname\s*=\s*["'](\w+)["']/.exec(attrs)?.[1];
   if (!name) throw new RoseError('E-TEMPLATE', '<slot> with attributes must declare a name: <slot name="row" ... />', { hint: 'a slot carrying attributes is a NAMED slot - it must declare which one: <slot name="row" item={post} />' });
@@ -343,17 +334,7 @@ function skipTemplate(src: string, i: number): number {
   return j;
 }
 
-/**
- * 's scanners are syntactic, and prose is not code: the demo's
- * own "the same zero-JS document." (a sentence ending, not a member access)
- * tripped the browser-only warning on a route that touches no browser API.
- * Drop both comment syntaxes - JS line and block comments, HTML comments -
- * outside string and template literals, so a URL inside a string can never
- * eat the rest of its line and a real member access can never hide inside a
- * comment. Only the advisory warnings read the result: the needsClient
- * predicate keeps scanning the raw source, because missing a real `on:`
- * wiring is a broken page while a stray warning is only noise.
- */
+// 's scanners are syntactic, and prose is not code: the demo's own "the same zero-JS document." (a sentence ending).
 function stripComments(src: string): string {
   let out = '';
   let i = 0;
@@ -392,22 +373,12 @@ function stripComments(src: string): string {
   return out;
 }
 
-/**
- * The <script> block of a .rose source, verbatim. `rosefn check` must
- * type-check exactly what the compiler will embed, so the extraction lives
- * here and both consumers share it - one regex, one truth.
- */
+// The <script> block of a .rose source, verbatim.
 export function scriptOf(source: string): string | null {
   return source.match(COMPONENT_RE)?.[1] ?? null;
 }
 
-/**
- * The per-request bag the runtime hooks receive. Web-standard on purpose:
- * the same object reaches a hook on the Node server, the preview server and
- * the edge adapter, so hook code is written once and runs everywhere.
- * `state` is scratch space - one hook writes, a later hook (or the page,
- * through getContext()) reads.
- */
+// The per-request bag the runtime hooks receive.
 export interface RequestHookContext {
   request: Request;
   url: URL;
@@ -416,14 +387,7 @@ export interface RequestHookContext {
   state: Record<string, unknown>;
 }
 
-/**
- * The cross-machine store bridge, handed to a plugin's `onServe`. A
- * `$store` write in this worker calls `install`'s sender; a patch that
- * arrived from anywhere else enters through `deliver` and lands in the
- * same store map the pages read. The cluster's own IPC relay stays the
- * default on one machine - this is the seam a redis/NATS driver plugs
- * into, from the worker process where its client library lives.
- */
+
 export interface StoreBridge {
   /** Install the sender: every $store write in this worker calls it. Pass null to detach. */
   install(send: ((name: string, value: unknown) => void) | null): void;
@@ -431,20 +395,7 @@ export interface StoreBridge {
   deliver(name: string, value: unknown): void;
 }
 
-/**
- * A plugin, in two halves. `transform` runs at BUILD time over each
- * component's raw source. The rest run at RUNTIME: `onRequest`/`onResponse`
- * once per request (Node server, dev/preview and edge adapter alike),
- * `onServe`/`onShutdown` once per worker process under `rosefn serve`
- * (Node only - an edge runtime owns the lifecycle, there is no worker start
- * to hook).
- *
- * A runtime hook is bundled into dist/server.js together with the config
- * module that declares it, so its imports must load in the target runtime
- * (Node and edge both): keep node-only code out of rosefn.config.js.
- * `onServe`/`onShutdown` are the exception - the CLI loads the config in
- * the worker process itself, so a pool or a redis client may live there.
- */
+
 export interface Plugin {
   name: string;
   transform?(code: string, filePath: string): string | Promise<string>;
@@ -458,20 +409,7 @@ export interface Plugin {
   onShutdown?(): void | Promise<void>;
 }
 
-/**
- * The i18n half of rosefn.config.js - a named export beside the
- * plugins:
- *
- *   export const i18n = { preload: ['en', 'zh'] };
- *
- * `preload` lists the locales baked into the CLIENT bundle. The default is
- * every locale: a language switch then costs zero requests, which is the
- * one-request bet taken to its conclusion. An app with many languages lists
- * the ones it wants inline; the rest are written to dist/locales/<lang>.json
- * and fetched on first use (ensureLocale in the runtime). The SERVER bundle
- * always carries every locale - it renders any language on demand, and its
- * size is nobody's hot path.
- */
+
 export interface I18nConfig {
   preload?: string[];
 }
@@ -481,20 +419,7 @@ export interface RosefnConfig {
   i18n: I18nConfig;
 }
 
-/**
- * Plugins live in `<root>/rosefn.config.js` as the default export: an array
- * of `{ name, transform, onRequest, onResponse, onServe, onShutdown }`.
- * `transform` runs over each component's raw source (template + script +
- * style, before any parsing) at build time; the runtime hooks are bundled
- * into dist/server.js by build() below. trade-off: transform alone covers
- * macros, custom syntax, includes and auto-imports - a transform can rewrite
- * anything, including the script block; the request/serve hooks cover auth,
- * logging and lifecycle, which no source rewrite can express. The import is
- * cache-busted per build so a config edit takes effect on the dev server's
- * next rebuild, and a missing file is simply "no config" (existence is
- * checked first, so a config with a syntax error still fails loudly).
- * One import, one evaluation: the i18n options ride in the same module.
- */
+
 export async function loadConfig(root: string): Promise<RosefnConfig> {
   const file = path.join(root, 'rosefn.config.js');
   if (!fs.existsSync(file)) return { plugins: [], i18n: {} };
@@ -1013,6 +938,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
     const hit = registry.get(abs)!;
     return [r.name, { index: hit.index, slots: hit.slots }] as const;
   }));
+  assertKnownDirectives(ssrTemplate, filePath);
   const compiledTemplate = compileTemplate(ssrTemplate, 'h', '__c', null, 0, true, comps);
   const compiledHead = headContent.trim() ? compileHead(headContent) : '';
   const hasNamedSlots = /<slot\s+[^>]*\bname\s*=/.test(template);
@@ -1363,35 +1289,9 @@ function braceDepthAt(src: string, index: number): number {
   return depth;
 }
 
-/**
- * Compile a .rose template to statements that build an HTML string with
- * reactive markers, and push update closures into the shared `closes` array.
- *
- * Marker protocol (identical on server and client, so the client can adopt
- * the SSR DOM instead of re-rendering it):
- *   text:      <!--⟦m:K⟧-->value          wire() updates the following text node
- *   if block:  <!--⟦i:K⟧-->html<!--⟦/i:K⟧-->   wire() inserts/removes the block
- *   each list: <!--⟦l:K⟧-->items<!--⟦/l:K⟧-->  wire() rebuilds the list
- *   attr:      name="value" data-b="K:name"   wire() re-sets the attribute
- *
- * Text/attr values are HTML-escaped on the server; wire() writes raw values
- * because DOM text nodes and attributes are not HTML-parsed.
- *
- * `comps` maps an imported component's local name to its module index
- * and slot declarations. A `<Card title={x}>` tag compiles to a call of that
- * module's render() - the child pushes its markers into the SAME closes array
- * the parent is using, so one wire() pass covers the whole tree (the same
- * trick the layout chain already uses with children html).
- */
+// Compile a .rose template to statements that build an HTML string with reactive markers, and push update closures into the shared `closes` array.
 
-/**
- * Auto-call a BARE state read and nothing else. The callify pass has already
- * rewritten a bare name to `name()`, so what reaches here is that - or an
- * expression the developer wrote (a comparison, a member read, a call with
- * arguments). Appending () to THOSE is a crash the developer reads as a
- * framework bug: `{#if flash().name}` must not become `flash().name()`, and
- * `{#each rows.filter(ok) as row}` must not become `rows.filter(ok)()`.
- */
+
 function autoCall(expr: string): string {
   const e = expr.trim();
   return /^[A-Za-z_$][\w$]*$/.test(e) ? `${e}()` : e;
@@ -1502,6 +1402,62 @@ function compileHead(head: string): string {
   return out;
 }
 
+/**
+ * - "errors an agent can fix" - closed on a real
+ * failure from the field. A template directive rosefn does not implement
+ * used to reach esbuild as generated code and die THERE: the xoboe port
+ * wrote `{:else}` (the branch syntax every other template language has and
+ * rosefn deliberately does not - `prompt.ts` says so in one line) and got
+ * `dist/.build/comp-12.ssr.js:87: ERROR: Unexpected ":"` - a file the author
+ * never wrote, a construct never named, a fix never suggested. An unknown
+ * directive is now a build error at the .rose file, with the line, the
+ * construct and the rosefn shape that replaces it.
+ *
+ * The known set is exactly what findBlock matches: `{#if}`, `{#each}`,
+ * `{#boundary}` and their closers. There is no `{:...}` directive at all.
+ */
+const KNOWN_CLOSERS = new Set(['if', 'each', 'boundary']);
+function assertKnownDirectives(template: string, filePath: string): void {
+  const rawRanges: Array<[number, number]> = [];
+  const RAW_OPEN = /<(style|script|noscript)\b[^>]*>/gi;
+  let raw: RegExpExecArray | null;
+  while ((raw = RAW_OPEN.exec(template))) {
+    const tag = raw[1].toLowerCase();
+    const closeAt = template.toLowerCase().indexOf(`</${tag}`, raw.index + raw[0].length);
+    const gt = closeAt < 0 ? -1 : template.indexOf('>', closeAt);
+    const end = gt < 0 ? template.length : gt + 1;
+    rawRanges.push([raw.index, end]);
+    RAW_OPEN.lastIndex = end;
+  }
+  const inRaw = (idx: number): boolean => rawRanges.some(([s, e]) => idx >= s && idx < e);
+  const DIRECTIVE_RE = /\{([:/])(\w+)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = DIRECTIVE_RE.exec(template))) {
+    if (inRaw(m.index)) continue;
+    const [, sigil, word] = m;
+    if (sigil === '/' && KNOWN_CLOSERS.has(word)) continue;
+    if (sigil === '/') {
+      throw new RoseError(
+        'E-TEMPLATE',
+        `${filePath}: {/${word}} does not close anything`,
+        { file: filePath, line: lineAt(template, m), hint: 'the closers are {/if}, {/each} and {/boundary} - one per block you opened' },
+      );
+    }
+    if (word === 'else') {
+      throw new RoseError(
+        'E-TEMPLATE',
+        `${filePath}: {:else} is not rosefn syntax - rosefn has no else branch`,
+        { file: filePath, line: lineAt(template, m), hint: 'nest a second {#if}: {#if cond}A{/if}{#if !cond}B{/if} - the negation of the first condition IS the else' },
+      );
+    }
+    throw new RoseError(
+      'E-TEMPLATE',
+      `${filePath}: {:${word}} is not a rosefn directive`,
+      { file: filePath, line: lineAt(template, m), hint: "rosefn templates support {#if}, {#each} and {#boundary} - and there is no {:else}: nest a second {#if} with the negated condition" },
+    );
+  }
+}
+
 function compileTemplate(
   template: string,
   acc: string,
@@ -1536,6 +1492,18 @@ function compileTemplate(
     const earliest = candidates.length > 0
       ? candidates.reduce((a, b) => (a.index <= b.index ? a : b))
       : null;
+
+    const rawOpenRe = /<(style|script|noscript)\b[^>]*>/g;
+    const rawHit = rawOpenRe.exec(remaining);
+    if (rawHit && earliest && rawHit.index < earliest.index) {
+      const tag = rawHit[1].toLowerCase();
+      const closeAt = remaining.toLowerCase().indexOf(`</${tag}`, rawHit.index + rawHit[0].length);
+      const gt = closeAt < 0 ? -1 : remaining.indexOf('>', closeAt);
+      const end = gt < 0 ? remaining.length : gt + 1;
+      result += emitChunk(remaining.slice(0, end), acc, closes, scope);
+      remaining = remaining.substring(end);
+      continue;
+    }
 
     if (!earliest) {
       result += emitChunk(remaining, acc, closes, scope);
@@ -1699,11 +1667,7 @@ interface CompTag {
   selfClosing: boolean;
 }
 
-/**
- * Scan one tag from its `<` to its `>`, quote- and brace-aware so a `>` inside
- * an attribute expression (`title={a > b}`) does not end the tag. Returns the
- * index just past `>`, or -1 when the tag is never closed.
- */
+// Scan one tag from its `<` to its `>`, quote- and brace-aware so a `>` inside an attribute expression (`title={a > b}`) does not end the tag.
 function scanTagEnd(src: string, start: number): number {
   let j = start + 1;
   let quote = '';
@@ -2039,9 +2003,7 @@ export ${isComponent ? 'function' : 'async function'} render(closes, children, _
   ${script}
   ${stateDeclsCode}
   ${dataDeclsCode}
- // The incremental patches of the action that produced THIS response,
-  // applied to the state the declarations above just established (a no-op on
-  // every path that is not a server action's re-render - see the runtime).
+ 
   ${isComponent ? '' : 'applyStateDeltas();'}
   const __root = (__c, children) => { let h = ''; ${templateFn} return h; };
   let __html = ${isComponent ? '' : 'await '}__root(closes, children);${headCode}
@@ -2163,19 +2125,14 @@ export function buildReport(infos: RouteInfo[], compiled: CompileResult[]): stri
  * normal rosefn document is zero bytes - nothing references it unless the
  * host page does.
  */
-const MOUNT_ENTRY = `// Rosefn mount: embed this app inside a foreign page.
-// <div data-rosefn="/route"></div> + <script type="module" src="/mount.js"></script>
-// One fetch per container (the route's own document), zero hydration, and
-// navigation that never touches the host page's URL, history or <head>.
+const MOUNT_ENTRY = `
 import { start, postForm } from '/client.js';
 
 for (const el of document.querySelectorAll('[data-rosefn]')) {
   const route = el.getAttribute('data-rosefn');
   const doc = await fetch(route).then((r) => (r.ok ? r.text() : ''));
   const parsed = new DOMParser().parseFromString(doc, 'text/html');
-  // A JS-shipping document wraps its content in #app; a zero-JS route's
-  // content is the body's own (no wrapper). Either way: the server's DOM,
-  // minus the scripts it inlined.
+  // A JS-shipping document wraps its content in #app; a zero-JS route's content is the body's own (no wrapper).
   const app = parsed.getElementById('app');
   if (app) {
     el.innerHTML = app.innerHTML;
@@ -2185,19 +2142,14 @@ for (const el of document.querySelectorAll('[data-rosefn]')) {
     }
   }
   // start() resumes from #__rosefn_state (zero hydration), so the state
-  // script rides along inside the container - and is dropped once adopted.
+  
   const state = parsed.getElementById('__rosefn_state');
   if (state) el.appendChild(state);
-  // A static-file server's SPA fallback answers the shell for an unknown
-  // path, and its #app holds a DIFFERENT route: adopt only a document the
-  // server really rendered for this route, else render it from the bundle.
+  
   const rendered = state ? JSON.parse(state.textContent || '{}').__route : null;
   await start(el, route, rendered === route);
   if (state) state.remove();
-  // Navigation stays inside the mount: the listener bails for anything
-  // outside the container, so the host page's own links keep working. The
-  // attribute is kept in step with what is mounted - it is how a server
-  // action inside the mount finds its route (and its container).
+  
   el.addEventListener('click', (e) => {
     const a = e.target.closest && e.target.closest('a[href^="/"]');
     if (!a || !el.contains(a)) return;
@@ -2205,9 +2157,7 @@ for (const el of document.querySelectorAll('[data-rosefn]')) {
     el.setAttribute('data-rosefn', a.getAttribute('href'));
     start(el, a.getAttribute('href'), false);
   });
-  // Progressive-enhancement forms work inside a mount too: the native POST
-  // would replace the HOST page, so the submit is intercepted and adopted
-  // in place - the same one-request, in-place contract as a standalone page.
+  // Progressive-enhancement forms work inside a mount too: the native POST would replace the HOST page.
   el.addEventListener('submit', (e) => {
     const f = e.target;
     if (!f || f.tagName !== 'FORM' || f.hasAttribute('data-on-submit')) return;
@@ -2331,9 +2281,7 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
   const runtimePlugins = plugins.filter((p) => p && (p.onRequest || p.onResponse));
   if (runtimePlugins.length > 0) {
     const configRel = path.relative(buildDir, path.join(root, 'rosefn.config.js')).replace(/\\/g, '/');
-    await fs.promises.writeFile(path.join(buildDir, 'plugins.js'), `// Generated by rosefn - the runtime half of rosefn.config.js. Do not edit.
-// Bundled into dist/server.js: these hooks run per request on every server
-// (Node, dev/preview, edge). Transform hooks already ran at build time.
+    await fs.promises.writeFile(path.join(buildDir, 'plugins.js'), `    
 import config from ${JSON.stringify(configRel)};
 
 const list = Array.isArray(config) ? config : [];
@@ -2465,12 +2413,7 @@ const __pluginHooks = [];
 const __hasRequestHooks = false;
 const __hasResponseHooks = false;`}
 
-// The runtime plugin hooks. onRequest runs before routing and
-// middleware and may short-circuit the request with its own Response; onResponse
-// runs once the response exists and may replace it. Both are no-ops when the
-// project declares no runtime hooks. A throwing hook is logged and skipped -
-// the request continues - so a broken logging plugin can never take a site
-// down (a build-time transform, by contrast, fails loudly).
+
 export async function runRequestHooks(ctx) {
   for (const p of __pluginHooks) {
     if (!p.onRequest) continue;
@@ -2498,32 +2441,20 @@ export async function runResponseHooks(ctx, res) {
   return out;
 }
 
-// The servers read these to skip building the hook context entirely when no
-// hook exists - the hot path pays nothing for the feature.
+
+
 export const hasRequestHooks = __hasRequestHooks;
 export const hasResponseHooks = __hasResponseHooks;
 
-// P0-1: the query of the request being rendered, for $query(). The servers
-// call this before every render (stream, buffered, POST, api) with the parsed
-// query string; routing itself matches the pathname, which is what fixed the
-// query-404. A render with no query (the build's prerender, the ISR
-// background pass) passes {} explicitly - the bag is per request, so a stale
-// one must never leak into the next.
+// P0-1: the query of the request being rendered, for $query().
 export function setQuery(query) {
   setRequestQuery(query || {});
 }
 
-// i18n: the dictionaries baked at build time from
-// src/locales/*.json. A route segment named [lang] is the locale: the value
-// must name one of these dictionaries, and $t resolves keys against it.
+
 setLocales(${localesJson}, '${defaultLocale}');
 
-// The store transport. Under "rosefn serve" every worker is its
-// own process with its own dist/server.js module, so a $store write must
-// travel: this worker -> primary -> every other worker. process.send exists
-// only inside cluster workers, so a single-process runner (dev, preview,
-// the edge adapter) keeps the transport null and $store stays plain
-// per-process state - the documented boundary, not a bug.
+
 if (typeof process !== 'undefined' && typeof process.send === 'function') {
   setStoreTransport((name, value) => process.send({ type: 'rosefn:store', name, value }));
   process.on('message', (msg) => {
@@ -2531,15 +2462,7 @@ if (typeof process !== 'undefined' && typeof process.send === 'function') {
   });
 }
 
-// (the cross-machine seam): the cluster relay above covers ONE
-// machine. A driver that spans machines (redis pub/sub, NATS, a database
-// NOTIFY) lives in the project's rosefn.config.js, because that is where
-// its client library is imported - and a plugin's onServe runs in the
-// WORKER process, next to this module but not inside it. These two exports
-// are the bridge: rosefn serve hands them to onServe's meta.store, and
-// the driver reaches the one store map the pages of THIS module read.
-// Both are inert unless called, so the edge bundle keeps its zero-import
-// shape and a dist built before this existed simply has no bridge.
+// (the cross-machine seam): the cluster relay above covers ONE machine.
 export function __installStoreTransport(send: (name: string, value: unknown) => void): void {
   setStoreTransport(send);
 }
@@ -2550,73 +2473,34 @@ export function __deliverStorePatch(name: string, value: unknown): void {
 export { localeList };
 export const defaultLocale = '${defaultLocale}';
 
-// Route params maps, re-exported for the build's prerender step: routePath
-// -> the component's exported params (a static map or a function). Reading
-// them through the server bundle keeps the deploy dir free of component
-// modules - both bundles are self-contained, nothing else may ship. Only
-// components that actually export params appear here (a missing export
-// means the dynamic route renders on demand).
+// Route params maps, re-exported for the build's prerender step: routePath -> the component's exported params (a static map or a function).
 ${pages.filter(({ i }) => compiled[i].hasParams).map(({ i }) => `import * as comp_${i} from './comp-${i}.ssr.js';`).join('\n')}
 
 export const routeParams = {
   ${pages.filter(({ info, i }) => compiled[i].hasParams).map(({ info, i }) => `'${info.routePath}': comp_${i}.params`).join(',\n  ')}
 };
 
-// Routes whose component reads the request context (getContext()), mutates a
-// shared store ($store()), reads the query ($query(), P0-1), opted into
-// nonce-based CSP or into the buffered path (buffer = true, P0-2):
-// the bag is per-request, the store is per-process, a nonce is per-response,
-// and a buffered route's hooks must run per request - so these are dynamic.
-// The build never bakes them and the servers never answer them from a
-// prerendered file. Public routes keep the static fast path (file cache,
-// ETag/304, streaming) untouched.
+// Routes whose component reads the request context (getContext()), mutates a shared store ($store()), reads the query ($query(), P0-1)
 export const dynamicRoutes = [
   ${pages.filter(({ i }) => compiled[i].usesContext || compiled[i].cspNonce || compiled[i].buffer).map(({ info }) => `'${info.routePath}'`).join(',\n  ')}
 ];
 
-// Which api routes opt into build-time baking (export const prerender = true):
-// routePath -> boolean. The build calls the GET handler once and writes the
-// body to dist/, so the Go single binary serves read-only APIs without Node.
+// Which api routes opt into build-time baking (export const prerender = true): routePath -> boolean.
 ${apiRoutes.filter(({ i }) => compiled[i].hasPrerender).map(({ i }) => `import * as api_${i} from './comp-${i}.ssr.js';`).join('\n')}
 
 export const apiPrerender = {
   ${apiRoutes.map(({ info, i }) => `'${info.routePath}': ${compiled[i].hasPrerender ? `api_${i}.prerender === true` : 'false'}`).join(',\n  ')}
 };
 
-// Stale-while-revalidate windows (export const revalidate = N): the build
-// bakes these routes like any other, and the preview server serves the
-// baked file for up to N seconds - after which the next request is answered
-// STALE (instant, from disk) while a background pass re-renders and swaps
-// the file (ISR). Routes that read the request context are
-// excluded: they render per request and have no baked file to revalidate.
-// The dev server ignores the window (it rebuilds on change), the edge
-// adapter renders live (always fresh), and the Go binary serves the baked
-// file forever - the same static-half boundary as page POSTs.
+
 export const revalidate = [
   ${pages.filter(({ i }) => compiled[i].revalidate !== undefined && !compiled[i].usesContext).map(({ info, i }) => `{ pattern: '${info.pattern}', seconds: ${compiled[i].revalidate} }`).join(',\n  ')}
 ];
 
-// pages/_middleware.rose: a Web-standard request handler that runs before
-// every render on the server (pages, POSTs, api calls alike). Returning a
-// Response short-circuits the whole request - a redirect, an auth wall, a
-// rewrite; returning nothing continues, and getContext() hands the
-// per-request bag to $data, server actions and api handlers. Absent -> null,
-// and the servers keep their static fast paths.
+// Pages/_middleware.rose: a Web-standard request handler that runs before every render on the server (pages, POSTs, api calls alike).
 export const middleware = ${middlewareIdx >= 0 ? 'middlewareMod.handle ?? null' : 'null'};
 
-// Routes whose DOCUMENTS ship without the client bundle (
-// decided by the compiler since #29): HTML + CSS only - no runtime, no
-// state script, zero JavaScript for whoever lands on them. The compiler
-// picks these automatically: a route whose whole chain needs nothing from
-// the client (no event wiring, no lifecycle, no action, no form) is a
-// content route. An exported "csr = true" forces the bundle back in; an
-// exported "csr = false" is the same decision, asserted. The route's render
-// function still rides in the client bundle, so a client-side navigation
-// from an interactive page paints it normally and a static deploy's SPA
-// fallback can render it too; only the document is JS-free.
-// isNoJs() lets the servers keep these routes on the buffered path: a
-// streamed no-JS document would carry the shell's default <title> (the
-// route head is applied client-side at boot, and there is no client).
+// Routes whose DOCUMENTS ship without the client bundle ( decided by the compiler since #29): HTML + CSS only - no runtime, no state script.
 export const noJsRoutes = [
   ${pages.filter(({ i }) => routeNoJs(i)).map(({ info }) => `'${info.pattern}'`).join(',\n  ')}
 ];
@@ -2625,21 +2509,12 @@ export function isNoJs(pathname) {
   return noJsRoutes.some((pattern) => matchRoute(pattern, pathname));
 }
 
-// P0-2 (bug report): routes that exported "buffer = true". The servers ask
-// this BEFORE choosing a path: a streamed response commits its status and
-// headers before the body exists, so its onResponse hooks cannot see the
-// document and a render that throws mid-flight still answers 200. A buffered
-// route keeps every capability and gives up the early flush - the trade is
-// the route's to make, per route, not the framework's.
+// P0-2 (bug report): routes that exported "buffer = true".
 export function isBuffered(pathname) {
   return routes.some((route) => route.buffer && matchRoute(route.pattern, pathname));
 }
 
-// Per-route response headers: a route exporting a headers
-// map carries them into every response the servers write for it, merged
-// OVER the framework defaults (the strict CSP) - so an app can tighten or
-// relax the policy per route. Absent -> null, and the servers keep sending
-// the defaults alone.
+
 export const routeHeaders = [
   ${pages.filter(({ i }) => compiled[i].headers).map(({ info, i }) => `{ pattern: '${info.pattern}', headers: ${JSON.stringify(compiled[i].headers)} }`).join(',\n  ')}
 ];
@@ -2649,14 +2524,7 @@ export function headersFor(pathname) {
   return hit ? hit.headers : null;
 }
 
-// Routes that opted into nonce-based CSP (export const csp = { nonce: true },
-// ). The servers ask this BEFORE writing a document: when it is true they
-// mint one random nonce per response, put it in the CSP header ('nonce-...'
-// plus 'strict-dynamic', so the document's own code may load more code) and
-// stamp the same value on the script tag. The default policy stays a hash -
-// cspNonceRoutes is empty for an app that never asks, so the fast path is
-// unchanged. The Go binary never sees this: these routes are dynamic, so it
-// has no baked file for them to serve.
+
 export const cspNonceRoutes = [
   ${pages.filter(({ i }) => compiled[i].cspNonce).map(({ info }) => `'${info.routePath}'`).join(',\n  ')}
 ];
@@ -2665,9 +2533,7 @@ export function cspNonce(pathname) {
   return cspNonceRoutes.some((pattern) => matchRoute(pattern, pathname));
 }
 
-// A Web-standard Request from whatever the host provides: the edge adapter
-// passes one already; the Node server passes its IncomingMessage (plus the
-// already-parsed FormData for POSTs, so middleware can read form fields).
+// A Web-standard Request from whatever the host provides: the edge adapter passes one already; the Node server passes its IncomingMessage (plus).
 function toWebRequest(raw, form) {
   if (raw instanceof Request) return raw;
   const init = { method: raw.method || 'GET', headers: new Headers(raw.headers || {}) };
@@ -2675,13 +2541,7 @@ function toWebRequest(raw, form) {
   return new Request('http://' + (raw.headers?.host || 'localhost') + (raw.url || '/'), init);
 }
 
-// Runs the middleware (if the project has one) for this request and returns
-// its short-circuit Response, or null to continue. The servers call this
-// EXACTLY ONCE per request, before anything else: it resets the per-request
-// context bag and the middleware fills it via getContext(), which $data,
-// server actions and api handlers then read while rendering. rawReq: the
-// host's request (Node IncomingMessage or a Web-standard Request); form:
-// the already-parsed FormData of a POST.
+
 export async function runMiddleware(rawReq, form) {
   resetRequestContext();
   if (!middleware || !rawReq) return null;
@@ -2693,10 +2553,7 @@ const routes = [
   ${serverRoutes}
 ];
 
-// API routes (pages/api/*.rose): pattern -> HTTP-method handlers. They never
-// render HTML and never reach the client bundle. The middleware ran before
-// this (the servers call runMiddleware() first), so handlers can read
-// getContext() for auth without re-running anything.
+// API routes (pages/api/*.rose): pattern -> HTTP-method handlers. They never render HTML and never reach the client bundle.
 const apiRoutes = [
   ${apiRoutes.map(({ info, i }) => {
     const handlers = (compiled[i].apiMethods ?? []).map((n) => `${n}: ${n}_${i}`).join(', ');
@@ -2707,16 +2564,11 @@ const apiRoutes = [
 // pages/404.rose (with its layouts) or null -> built-in plain 404
 const notFound = ${notFoundRender};
 
-// pages/500.rose (with its layouts) or null -> built-in plain 500: a route
+
 // whose render throws degrades to this instead of failing the response.
 const errorPage = ${errorRender};
 
-// The <html> attributes of the document for a pathname - the locale
-// of its [lang] segment (the default when there is none, or when the segment
-// names no dictionary: that request 404s in the default language) and the
-// reading direction that locale implies. The buffered render returns the same
-// pair; the streaming path needs it BEFORE the shell flushes, which is why
-// the servers ask for it by pathname.
+
 export function docAttrs(pathname) {
   for (const route of routes) {
     if (!matchRoute(route.pattern, pathname)) continue;
@@ -2726,7 +2578,7 @@ export function docAttrs(pathname) {
       const lang = pathname.split('/')[langIdx];
       if (isLocale(lang)) return { lang, dir: localeDir(lang) };
     }
-    break; // matched, but not a localized route (or a bogus locale): the default
+    break; 
   }
   return { lang: defaultLocale, dir: localeDir(defaultLocale) };
 }
@@ -2749,13 +2601,7 @@ export function matchRoute(pattern, pathname) {
   return true;
 }
 
-// Head blocks (one per component in the route chain) are pulled out of the
-// page html: the shell injects them into <head>, and the client re-applies
-// them on navigation. Document order is page-first, so the shell's keyed
-// merge lets a page override its layouts. The EMPTY marker pair stays in the
-// body so the client's wire() still finds the block: at boot it adopts the
-// shell-injected elements in place (marked with the same keys, so no
-// duplicates) and keeps the head reactive.
+// Head blocks (one per component in the route chain) are pulled out of the page html: the shell injects them into <head>.
 function extractHead(rendered) {
   const head = [];
   const html = rendered.replace(/<!--\u27e6h:(\\d+)\u27e7-->([\\s\\S]*?)<!--\u27e6\\/h:\\1\u27e7-->/g, (_, id, content) => {
@@ -2765,18 +2611,7 @@ function extractHead(rendered) {
   return { html, head };
 }
 
-// form: the submitted FormData of a progressive-enhancement POST. The
-// selected server action runs first and returns a state patch (e.g.
-// { guests: [...] }); seeding those keys BEFORE the render makes state()
-// adopt them, so the response is the page as it looks AFTER the action -
-// with or without JS. A __action field picks the action by name (default
-// 'action', the conventional <form method="POST"> target); a click handler
-// bound to an action ($action('like')) sends the same field.
-// A route whose render throws degrades to pages/500.rose (status 500) - or
-// the built-in plain 500 - instead of failing the whole response.
-// The middleware does NOT run here: the servers run it once per request via
-// runMiddleware() (which also seeds the request context), so a page render
-// never re-runs it.
+// Form: the submitted FormData of a progressive-enhancement POST.
 export async function renderPage(pathname, form) {
   clearRequestState();
   for (const route of routes) {
@@ -2788,27 +2623,16 @@ export async function renderPage(pathname, form) {
           setState(patternParts[i].slice(1), pathParts[i]);
         }
       }
- // i18n: a [lang] segment naming no dictionary is a
-      // 404 - the URL is the contract, and rendering the page with fallback
-      // strings would serve duplicate content under a bogus language
+ // I18n: a [lang] segment naming no dictionary is a 404 - the URL is the contract.
       const langIdx = patternParts.indexOf(':lang');
       if (langIdx >= 0 && !isLocale(pathParts[langIdx])) {
         if (notFound) return { ...(await renderFallback(pathname, notFound)), status: 404 };
         return { html: '<h1>404</h1><p>Page not found</p>', state: '{}', head: [], status: 404, ...docAttrs(pathname) };
       }
- // The document's <html lang>/<dir> follow this route's locale
-      // (the default's when the route is not localized)
+ 
+      
       const docLang = langIdx >= 0 ? pathParts[langIdx] : defaultLocale;
- // The action dispatch. The page's guard (exported
-      // beforeAction) runs FIRST and vetoes with an ActionError - the
-      // action-level permission check. Then the selected action runs and its
-      // return value seeds this render's state, per key, so an incremental
-      // patch ($append and friends) grows a large list by one row instead of
-      // re-sending the whole thing. An ActionError from either half is a
-      // BUSINESS failure: it is seeded as the 'actionError' state, the
-      // response carries its status, and the page renders with the failure
-      // visible (a {#boundary} around the action's widget contains it).
-      // Anything else is a bug and keeps going to the 500 page.
+ // The action dispatch. The page's guard (exported beforeAction) runs FIRST and vetoes with an ActionError - the action-level permission check.
       let actionStatus = 0;
       if (form && route.actions) {
         const actionName = form.get('__action') || 'action';
@@ -2820,9 +2644,7 @@ export async function renderPage(pathname, form) {
             if (patch && typeof patch === 'object') {
               for (const key of Object.keys(patch)) {
                 const v = patch[key];
-                // An incremental patch is RECORDED, not applied: the render's
-                // own state declarations apply it, so the delta is relative to
-                // the value the page was going to render anyway.
+                // An incremental patch is RECORDED, not applied: the render's own state declarations apply.
                 if (v instanceof StateDelta) setStateDelta(key, v);
                 else setState(key, v);
               }
@@ -2846,20 +2668,8 @@ export async function renderPage(pathname, form) {
         return { html: '<h1>500</h1><p>Something went wrong rendering this page.</p>', state: '{}', head: [], status: 500, ...docAttrs(pathname) };
       }
       // __route tells the bootstrap which route this document was rendered for.
-      // A static-file server may serve another route's document (SPA fallback);
-      // the bootstrap then client-renders instead of adopting mismatched DOM.
       const state = JSON.stringify({ __route: pathname, ...JSON.parse(serializeState()) });
- // csr ( auto since #29): false when the compiler found
-      // nothing in the route's chain that needs the client (or the route
-      // asserted csr = false) - the document ships no runtime, no state
-      // script, zero JavaScript. Every other route keeps the bundle. The
-      // caller passes this straight to the shell as js.
- // Status is the failed action's code when one failed - the page
-      // rendered fine, so the body is the page with the failure visible, and
-      // the status says what happened (a 403 from the guard, a 422 from a
-      // validation action). 200 otherwise.
- // Lang/dir are the document's <html> attributes - the locale
-      // this route rendered in, and its reading direction.
+ // Csr ( auto since #29): false when the compiler found nothing in the route's chain that needs the client (or the route asserted csr = false) .
       return { html: rendered.html, state, head: rendered.head, status: actionStatus || 200, csr: route.csr !== false, lang: docLang, dir: localeDir(docLang) };
     }
   }
@@ -2874,21 +2684,13 @@ export async function renderPage(pathname, form) {
 export function canStream(pathname) {
   return routes.some((route) => {
     if (!matchRoute(route.pattern, pathname)) return false;
- // i18n: an unknown locale must answer 404, and a
-    // streamed response cannot change its status - so it takes the buffered
-    // path (renderPage returns the real 404), never the streaming one
+ // I18n: an unknown locale must answer 404, and a streamed response cannot change its status - so it takes the buffered path (renderPage returns).
     const langIdx = route.pattern.split('/').indexOf(':lang');
     return langIdx < 0 || isLocale(pathname.split('/')[langIdx]);
   });
 }
 
-// === API routes ===
-// The /api namespace answers JSON, never HTML: an API client that hits an
-// unknown path must not receive the SPA shell. Handlers receive a
-// Web-standard Request and return a plain object (serialized as JSON, 200),
-// a Response (passed through), or nothing (204). A method the route does
-// not export answers 405 with an Allow header. Same code path on the Node
-// server and the edge adapter - Response is a global in both.
+// === API routes === The /api namespace answers JSON, never HTML: an API client that hits an unknown path must not receive the SPA shell.
 export function isApi(pathname) {
   return pathname === '/api' || pathname.startsWith('/api/');
 }
@@ -2921,18 +2723,7 @@ export async function handleApi(method, pathname, request) {
   });
 }
 
-// === Streaming SSR ===
-// The static shell (doctype, <head>, body + container open) flushes BEFORE
-// the - possibly slow - render completes: the first byte leaves in
-// microseconds instead of after every $data resolves. The route HTML, the
-// state script, and the inlined bundle follow as later chunks of one chunked
-// response - still exactly one request.
-// The route's <head> tags are NOT in the streamed document: the client
-// applies them at boot from the body's head markers, so JS users see the
-// correct head immediately; no-JS consumers of streamed responses get the
-// static shell head (prerendered files stay complete documents).
-// Returns 200 (matched; a render throw degrades to the error-page body) or
-// 404 (unmatched - nothing written, so the caller can still buffer).
+// === Streaming SSR === The static shell (doctype, <head>, body + container open) flushes BEFORE the - possibly slow - render completes: the first byte.
 export async function renderPageStream(pathname, write, shellOpen, clientTag) {
   clearRequestState();
   for (const route of routes) {
@@ -2953,17 +2744,12 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
       try {
         html = extractHead(await route.render([], '')).html;
       } catch (err) {
-        // the shell is already on the wire: degrade to the error page BODY
-        // (the status stays 200 - a real 500 needs the buffered path, which
-        // the server picks for routes known-broken at build time)
+        
         console.error('Rosefn: render failed for', pathname, err instanceof Error ? err.message : err);
         html = errorPage ? extractHead(await errorPage([], '')).html : '<h1>500</h1><p>Something went wrong rendering this page.</p>';
       }
       write(html);
- // csr: false ( auto since #29): a no-JS route's document
-      // ends here - no state script, no inlined bundle. (The servers keep
-      // these routes off the streaming path so their <head> is complete;
-      // this is the correctness floor if one streams anyway.)
+ // Csr: false ( auto since #29): a no-JS route's document ends here - no state script, no inlined bundle.
       if (route.csr === false) {
         write('</div>\\n</body>\\n</html>');
         return 200;
@@ -3001,8 +2787,8 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
 
   const prefetchMode = compiled.find((c) => c.prefetch)?.prefetch ?? 'all';
   const vitalsOn = compiled.some((c) => c.vitals === true);
-  const vitalsBlock = vitalsOn
- ? `\n// the app asked for web-vitals - measure once, at boot, and let the\n// app decide where the numbers go (one 'rosefn:vitals' CustomEvent per metric).\nreportVitals;\n`
+    const vitalsBlock = vitalsOn
+? `\n// the app asked for web-vitals - measure once, at boot, and let the\n// app decide where the numbers go (one 'rosefn:vitals' CustomEvent per metric).\nreportVitals();\n`
     : '';
 
   const hasLang = infos.some((i) => i.pattern.includes(':lang'));
@@ -3031,24 +2817,14 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
 ${clientImports}
 import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState, setFxOwner, resetContainerFx } from './runtime.js';
 
-// i18n: the dictionaries baked at build time - the client
-// renders any PRELOADED locale from the bundle, so switching language costs
-// zero requests (the same bet as the inlined route table). a locale
-// the app left out of the preload (i18n.preload in rosefn.config.js) is a
-// pack instead: it lives at /locales/<lang>.json and applyParams() fetches it
-// on first use - one request per language per session, then it renders from
-// memory like any other. The default build preloads everything and ships no
-// packs at all.
+// I18n: the dictionaries baked at build time - the client renders any PRELOADED locale from the bundle.
 setLocales(${clientLocalesJson}, '${defaultLocale}');
 setLocalePacks(${JSON.stringify(packed)});
 ${hasLang ? `// the default locale, kept beside setLocales' own copy so <html lang> can
 // follow a route that carries no [lang] segment (a non-i18n page)
 const __defLocale = '${defaultLocale}';` : ''}
 ${vitalsOn ? `// the app asked for web-vitals. The import is what keeps\n// reportVitals alive through minification and tree-shaking; the call is one\n// statement at boot, before the first render.\nimport { reportVitals } from './runtime.js';`: ''}
-// The two pack doors, re-exported for an app that wants to warm a language
-// before its visitor asks for it (ensureLocale) or to feed a dictionary it
-// fetched itself (loadLocale). Both are already in the bundle - ensureLocale
-// is what applyParams calls - so the re-export costs the statement alone.
+// The two pack doors, re-exported for an app that wants to warm a language before its visitor asks for it (ensureLocale) or to feed a dictionary.
 export { ensureLocale, loadLocale } from './runtime.js';
 ${vitalsBlock}
 
@@ -3056,14 +2832,7 @@ const routes = [
   ${clientRoutes}
 ];
 
-// === Mode B: lazy route chunks ===
-// Split mode's registry entries arrive without a render function: loadChain
-// loads the route's module graph (the page plus its layouts, one chunk per
-// module, the shared runtime in its own vendor chunk) in parallel and
-// composes it at runtime - the exact nesting compose() built at compile
-// time for inline mode. getRender memoizes the composed function on the
-// entry, so a chunk loads once per session; inline mode's entries are the
-// render functions themselves, so the helper is a pass-through there.
+// === Mode B: lazy route chunks === Split mode's registry entries arrive without a render function: loadChain loads the route's module graph (the page).
 const loadChain = async (loaders) => {
   const mods = await Promise.all(loaders.map((load) => load()));
   let expr = (closes, children) => mods[0].render(closes, children);
@@ -3079,12 +2848,10 @@ const getRender = async (route) => {
   return (route.render ??= (await route.load()).render);
 };
 
-// pages/404.rose (with its layouts) or null -> built-in plain 404
+
 const notFound = ${notFoundRender};
 
-// pages/500.rose (with its layouts) or null -> built-in plain 500: a route
-// whose render throws on the client degrades to this instead of breaking
-// navigation.
+// Pages/500.rose (with its layouts) or null -> built-in plain 500: a route whose render throws on the client degrades to this instead of breaking.
 const errorPage = ${errorRender};
 
 // Paint a fallback page (404/500) into the container, wired like any render.
@@ -3118,41 +2885,16 @@ export function matchRoute(pattern, pathname) {
   return true;
 }
 
-// === Link prefetch ===
-// Hover / focus / touch an internal link and the target route renders NOW -
-// $data included - against a throwaway signal map. The click that follows
-// paints from the cached HTML: no await, no request, no spinner. Other
-// frameworks prefetch data only; Rosefn prefetches the whole render because
-// the inlined bundle already contains every route.
-// Trade-off: the cache holds either a result or the in-flight promise (dedupes
-// hover storms); one isolated render runs at a time so signal-map swapping
-// stays correct without any merging logic. Entries are single-use: a consumed
-// entry disappears from the cache, which is also how tests observe a hit.
-// P1, three guards for link-heavy pages:
-//   1. strategy - the app declares "export const prefetch = 'off' | 'hover' |
-//      'viewport' | 'all'" (root layout); 'all' is the original behavior.
-// Trade-off: app-global, not per-route - per-route would carry the mode
-//      in each document's shell.
-//   2. budget - renders are serialized by the queue, so "concurrency" is 1;
-//      the budget caps the QUEUE: a hover storm past it drops the excess
-//      instead of rendering fifty routes nobody clicks.
-//   3. LRU cap - unconsumed entries would otherwise live forever; the oldest
-//      is evicted first (Map iteration order; entries are single-use, so
-//      insertion order IS the recency order).
+// === Link prefetch === Hover / focus / touch an internal link and the target route renders NOW - $data included - against a throwaway signal map.
 let prefetchMode = ${JSON.stringify(prefetchMode)};
 export function setPrefetchMode(mode) { prefetchMode = mode; }
 const PREFETCH_BUDGET = 8;
 const PREFETCH_MAX_CACHED = 4;
-const prefetchCache = new Map(); // pathname -> { html, closes, state } | Promise
+const prefetchCache = new Map(); 
 let prefetchQueue = Promise.resolve();
 let prefetchPending = 0;
 
-// Applies the route's params to state. A [lang] segment whose dictionary is
-// a runtime pack (i18n.preload) is awaited HERE - the one place every client
-// render path goes through (navigation, prefetch, action adopt) - so a packed
-// locale costs one request per session and then renders from memory. A
-// preloaded locale (the default: every dictionary inline) resolves without
-// touching the network, so the common path stays synchronous in spirit.
+
 async function applyParams(route, pathname) {
   const patternParts = route.pattern.split('/');
   const pathParts = pathname.split('/');
@@ -3163,11 +2905,7 @@ async function applyParams(route, pathname) {
   if (langIdx >= 0) await ensureLocale(pathParts[langIdx]);
 }
 
-// The network decides too. Prefetch spends bytes BEFORE the click -
-// the one thing a data-saver (navigator.connection.saveData) or a 2g link
-// explicitly refuses. NetworkInformation is Chromium-only and feature-
-// detected; read live per call, so a connection that upgrades mid-session is
-// picked up on the next hover. Everywhere else the app's strategy stands.
+
 function __netOk() {
   const c = navigator.connection;
   if (!c) return true;
@@ -3182,35 +2920,25 @@ export function prefetch(pathname, source = 'hover') {
   if (prefetchMode === 'viewport' && source !== 'viewport') return;
   if (!__netOk()) return; // save-data / 2g: no bytes before the click
   if (prefetchCache.has(pathname)) return;
-  if (pathname === location.pathname) return; // already here: nothing to prefetch
+  if (pathname === location.pathname) return; 
   const route = routes.find((r) => matchRoute(r.pattern, pathname));
   if (!route) return;
-  if (prefetchPending >= PREFETCH_BUDGET) return; // budget spent: drop it, a later hover retries
-  // P0-1: the link may carry a query (/search?q=cats). $query() reads the
-  // browser's own URL, which is the page being LEFT - so the prefetched
-  // render would see the wrong one. Override it for the duration and clear
-  // it after; the queue below serializes renders, so one slot is enough.
+  if (prefetchPending >= PREFETCH_BUDGET) return; // Budget spent: drop it, a later hover retries. P0-1: the link may carry a query (/search?q=cats)
   const qi = pathname.indexOf('?');
   const qOverride = qi >= 0 ? Object.fromEntries(new URLSearchParams(pathname.slice(qi))) : null;
   const p = prefetchQueue.then(async () => {
     try {
       setPrefetchOverride(qOverride);
-      // the isolated render also captures the onMount callbacks the route
-      // queued and the onCleanup disposers it registered: the paint that
-      // consumes this entry replays the mounts after wiring and adopts the
-      // cleanups, so the prefetched route's timers are disposed on the next
-      // navigation like any live route's
+      // The isolated render also captures the onMount callbacks the route queued and the onCleanup disposers it registered: the paint that consumes.
       const { result, state, mounts, cleanups } = await isolateStateAsync(async () => {
         await applyParams(route, pathname); // a packed locale's dictionary lands before the render
         const closes = [];
-        const render = await getRender(route); // split mode: loads the route's chunk here
+        const render = await getRender(route); 
         const html = await render(closes, '');
         return { html, closes };
       });
       const entry = { ...result, state, mounts, cleanups };
-      prefetchCache.set(pathname, entry); // promise -> result
-      // evict oldest-first; in-flight promises are never evicted (evicting
-      // one would only force a duplicate render)
+      prefetchCache.set(pathname, entry); // Promise -> result. evict oldest-first; in-flight promises are never evicted (evicting. one would only force a duplicate render)
       while (prefetchCache.size > PREFETCH_MAX_CACHED) {
         const oldest = prefetchCache.keys().next().value;
         if (prefetchCache.get(oldest) instanceof Promise) break;
@@ -3218,7 +2946,7 @@ export function prefetch(pathname, source = 'hover') {
       }
       return entry;
     } catch {
-      prefetchCache.delete(pathname); // failed: the next hover retries
+      prefetchCache.delete(pathname); 
       return null;
     } finally {
       setPrefetchOverride(null);
@@ -3234,10 +2962,7 @@ export function prefetchStats() {
   return { cached: prefetchCache.size, pending: prefetchPending, mode: prefetchMode, network: __netOk() };
 }
 
-// One delegated listener per event type on the app container: survives DOM
-// swaps and cloned blocks, so handlers never need re-binding. A handler
-// compiled from a server action (data-on-*="$action:name") dispatches to
-// $action instead of the local handler registry.
+// One delegated listener per event type on the app container: survives DOM swaps and cloned blocks, so handlers never need re-binding.
 const DELEGATED = ['click', 'input', 'change', 'submit'];
 function bindEvents(container) {
   if (container.__rosefn_bound) return;
@@ -3254,17 +2979,9 @@ function bindEvents(container) {
   }
 }
 
-// === Server actions from any event ===
-// POST the body to the current route and adopt the response in place: the
-// server runs the selected action, seeds its state patch, and re-renders, so
-// the swapped DOM is the page as it looks AFTER the action - one request, no
-// reload, and wire() patches only the marked nodes (no re-render). The
-// bootstrap's <form method="POST"> interception goes through the same door.
+// === Server actions from any event === POST the body to the current route and adopt the response in place: the server runs the selected action.
 async function postForm(body, container, pathname) {
- // A mount passes its own container and route - without them the
-  // POST would target the host page's URL and adopt into a #app the host
-  // page does not have. The document path passes neither and gets both
-  // defaults, which is exactly what it always used.
+ 
   const box = container || document.getElementById('app');
   const route = pathname || location.pathname;
   const res = await fetch(route, { method: 'POST', body });
@@ -3279,39 +2996,24 @@ async function postForm(body, container, pathname) {
   else paint();
 }
 
-// Call a page's server action by name from any event handler:
-// <button on:click={like}> compiles to $action('like'). Without JS the
-// binding is inert - the progressive-enhancement story stays with forms.
+// Call a page's server action by name from any event handler: <button on:click={like}> compiles to $action('like').
 export async function $action(name, e) {
   if (e && e.preventDefault) e.preventDefault();
   const body = new FormData();
   body.append('__action', name);
- // An event inside a mount belongs to that mount - the attribute is
-  // kept in step with what is currently mounted, so the POST targets the
-  // mounted route and the response lands in the mounted container. Outside a
-  // mount, closest() is null and the document defaults apply.
+ // An event inside a mount belongs to that mount - the attribute is kept in step with what is currently mounted.
   const box = e && e.target && e.target.closest ? e.target.closest('[data-rosefn]') : null;
   return postForm(body, box || undefined, box ? box.getAttribute('data-rosefn') : undefined);
 }
 
 export { postForm };
 
-// The live signal graph as JSON - the same serializeState the zero-hydration
-// resume uses, exported so the bootstrap's dev seam (window.__rosefn.state())
-// can hand it to the dev server's reload bridge and to a devtools extension.
-// A local re-export on purpose: it keeps the binding alive through minification
-// for the bootstrap text appended after the bundle.
+// The live signal graph as JSON - the same serializeState the zero-hydration resume uses.
 export { serializeState };
 
-// initial=true: adopt the SSR DOM (zero hydration) - wire reactive markers to
-// the existing nodes and bind events. initial=false: client-side navigation -
-// re-render the route chain from scratch and wire the fresh DOM.
+// Initial=true: adopt the SSR DOM (zero hydration) - wire reactive markers to the existing nodes and bind events.
 
-// One gate for the two ownership models, so they can never drift. The
-// DOCUMENT's app root owns the global bookkeeping - every effect, every
-// cleanup, every state key, exactly as before mounts existed. A mount
-// container owns its own slice: its navigation disposes and re-seeds only
-// what IT created, so a page hosting several mounts keeps them all live.
+
 function __ownsDoc(container) {
   return container === document.getElementById('app');
 }
@@ -3343,29 +3045,25 @@ export async function start(container, pathname, initial) {
   }
   for (const route of routes) {
     if (matchRoute(route.pattern, pathname)) {
-      // i18n: an unknown locale paints the 404 page, same as the server
-      // (before the prefetch check: a cached entry for a bogus locale is
-      // discarded, never painted)
+      // I18n: an unknown locale paints the 404 page, same as the server (before the prefetch check: a cached entry for a bogus locale is discarded).
       const langIdx = route.pattern.split('/').indexOf(':lang');
 ${langDirBlock}
         await paintFallback(container, notFound, '<h1>404</h1><p>Page not found</p>');
         return;
       }
-      // Prefetched on hover/focus/touch: the render already ran, so paint its
-      // HTML and adopt its signal entries - events then patch the very nodes
-      // we wire, and no $data re-runs on click.
+      // Prefetched on hover/focus/touch: the render already ran, so paint its HTML and adopt its signal entries - events then patch the very nodes we.
       let hit = initial ? undefined : prefetchCache.get(pathname);
       if (hit && typeof hit.then === 'function') hit = await hit; // in-flight: land it first
       if (hit) {
-        prefetchCache.delete(pathname); // single-use: the next hover refetches
+        prefetchCache.delete(pathname); 
         __navReset(container);
         restoreState(hit.state);
         container.innerHTML = hit.html;
         await __withOwner(container, () => {
           wire(container, hit.closes);
           bindEvents(container);
-          hit.mounts.forEach((fn) => fn()); // the prefetched route's mounts
-          adoptCleanups(hit.cleanups); // and its cleanups, for the next reset
+          hit.mounts.forEach((fn) => fn()); 
+          adoptCleanups(hit.cleanups); 
         });
         return;
       }
@@ -3376,11 +3074,11 @@ ${langDirBlock}
         const closes = [];
         let html;
         try {
-          const render = await getRender(route); // split mode: loads the route's chunk here
+          const render = await getRender(route); 
           html = await render(closes, '');
         } catch {
-          // the route itself is broken: degrade to pages/500.rose (or the
-          // built-in plain 500) instead of leaving the container empty
+          
+          
           broken = true;
           return;
         }
@@ -3395,9 +3093,7 @@ ${langDirBlock}
       return;
     }
   }
-  // unmatched route: pages/404.rose renders (with its head + interactivity),
-  // else the built-in plain 404 - and an i18n app's document returns to the
-  // default locale, the same one the server stamps on its 404
+  // Unmatched route: pages/404.rose renders (with its head + interactivity)
 ${hasLang ? ` // the same app-root gate as above - a mount never touches the
   // host document's language or direction.
   if (container === document.getElementById('app')) {
@@ -3407,21 +3103,16 @@ ${hasLang ? ` // the same app-root gate as above - a mount never touches the
   await paintFallback(container, notFound, '<h1>404</h1><p>Page not found</p>');
 }
 
-// Adopt a server-rendered response in place - the JS-enabled half of
-// progressive-enhancement forms: the bootstrap POSTs a <form method="POST">
-// via fetch and hands the response here. The DOM is swapped and wired with
-// the same zero-render trick as boot: re-run the route's render to rebuild
-// the marker closures, wire them against the adopted nodes. The page never
-// re-renders visibly, no hydration payload, no second request beyond the POST.
+// Adopt a server-rendered response in place - the JS-enabled half of progressive-enhancement forms: the bootstrap POSTs a <form method="POST">.
 export async function adopt(container, html, stateJson, pathname) {
- // The route the response belongs to. A mount passes its own; the
-  // document path passes nothing and keeps location.pathname.
+ 
+  
   const route0 = pathname || location.pathname;
   __navReset(container);
   clearMounts(); // stale mounts from a failed render never fire
   resumeState(stateJson);
   container.innerHTML = html;
-  // keep the embedded state in sync so a later SPA-fallback check agrees
+  
   const st = document.getElementById('__rosefn_state');
   if (st) st.textContent = stateJson;
   for (const route of routes) {
@@ -3430,11 +3121,11 @@ export async function adopt(container, html, stateJson, pathname) {
         await applyParams(route, route0);
         const closes = [];
         try {
-          const render = await getRender(route); // split mode: loads the route's chunk here
+          const render = await getRender(route); 
           await render(closes, '');
         } catch {
-          // the adopted response's route is broken (e.g. the action's page
-          // throws): keep the swapped DOM but skip wiring it
+          
+          
           return;
         }
         wire(container, closes);
@@ -3445,15 +3136,7 @@ export async function adopt(container, html, stateJson, pathname) {
     }
   }
 }
-// === refresh() implementation ===
-// Re-render the current route in place: the client half of router.refresh()
-// (a router refresh) / (a full invalidation). Same machinery as a client-side
-// navigation to the current path - $data re-runs, state re-seeds from the
-// fresh render, wire() patches the marked nodes - but a refresh never lands
-// a prefetch entry: a hover from a minute ago is exactly what it exists to
-// bypass. Zero requests: the render (and its $data) runs in the page.
-// Trade-off: state resets like navigation (no per-key retention); add
-// retention when an app needs refresh-without-losing-input.
+// === refresh() implementation === Re-render the current route in place: the client half of router.refresh() (a router refresh) / (a full invalidation).
 setRefreshHook(async () => {
   prefetchCache.delete(location.pathname);
   await start(document.getElementById('app'), location.pathname, false);
@@ -3499,13 +3182,35 @@ setRefreshHook(async () => {
 
   console.log('Rosefn zero-JS report:');
   for (const line of buildReport(infos, compiled)) console.log('  ' + line);
+  const warnGroups = new Map<string, { why: string; files: Map<string, Set<string>> }>();
   for (const { info, i } of pages) {
     if (!routeShipsNoJs(infos, compiled, i)) continue;
     for (const ci of [i, ...layoutsOf(infos, i)]) {
       for (const w of compiled[ci].jsWarnings ?? []) {
-        console.warn(`Rosefn warning: ${info.routePath} ships zero JavaScript but ${path.basename(infos[ci].filePath)} contains ${w}`);
+        let g = warnGroups.get(w);
+        if (!g) {
+          g = { why: w, files: new Map() };
+          warnGroups.set(w, g);
+        }
+        const file = path.relative(root, infos[ci].filePath).replace(/\\/g, '/');
+        let routes = g.files.get(file);
+        if (!routes) {
+          routes = new Set();
+          g.files.set(file, routes);
+        }
+        routes.add(info.routePath);
       }
     }
+  }
+  for (const g of warnGroups.values()) {
+    const allRoutes = new Set<string>();
+    for (const routes of g.files.values()) for (const r of routes) allRoutes.add(r);
+    const parts = [...g.files.entries()]
+      .sort((a, b) => b[1].size - a[1].size)
+      .map(([file, routes]) => `${file} (${routes.size === 1 ? [...routes][0] : `${routes.size} routes`})`);
+    const shown = parts.slice(0, 4).join(', ');
+    const more = parts.length > 4 ? `, +${parts.length - 4} more files` : '';
+    console.warn(`Rosefn warning: ${allRoutes.size} routes ship zero JavaScript while their chain contains ${g.why} - ${shown}${more}`);
   }
 
   return { routes: pages.map(({ info }) => info), bundle: bundleMode };

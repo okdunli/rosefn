@@ -1,11 +1,4 @@
-/**
- * HTML shell - the document wrapper for every rosefn page.
- *
- * The client bundle is INLINED into the document, so a full page load costs
- * exactly one request: the HTML itself. No other framework in the comparison
- * set achieves that - they all
- * ship a separate JS bundle, doubling the round-trips before first paint.
- */
+
 
 import * as fs from 'fs';
 import * as path from 'path';
@@ -16,10 +9,6 @@ const OUT_DIR = path.join(process.cwd(), 'dist');
 
 let clientCache: { mtimeMs: number; source: string } | null = null;
 
-// The bundle mode the last build decided ('inline' | 'split'). In
-// split mode getClientSource() answers null - "nothing to inline" - so
-// every shell caller (documents, headers, the streaming tag) follows the
-// external-bundle path without a parameter threaded through each one.
 let splitMode = false;
 export function setBundleMode(mode: string): void {
   splitMode = mode === 'split';
@@ -27,7 +16,7 @@ export function setBundleMode(mode: string): void {
 
 /** Read dist/client.js with an mtime-based cache (dev server rebuilds it). */
 export function getClientSource(): string | null {
-  if (splitMode) return null; // mode B: the document references /client.js
+  if (splitMode) return null;
   const file = path.join(OUT_DIR, 'client.js');
   try {
     const st = fs.statSync(file);
@@ -42,11 +31,7 @@ export function getClientSource(): string | null {
 
 let styleCache: { mtimeMs: number; source: string } | null = null;
 
-/**
- * Read dist/styles.css (every component's scoped <style>, merged at build
- * time) with an mtime-based cache. '' when the app declares no component
- * styles - the document then carries only the shell's own STYLES.
- */
+// Read dist/styles.css (every component's scoped <style>, merged at build time) with an mtime-based cache.
 export function getStyles(): string {
   const file = path.join(OUT_DIR, 'styles.css');
   try {
@@ -60,10 +45,6 @@ export function getStyles(): string {
   }
 }
 
-// Bootstrap appended after the inlined bundle: client-side navigation.
-// Distinct names avoid any collision with minified bundle identifiers.
-// Minified once at module load - this text ships inside EVERY document, so
-// every byte here is paid on every page load.
 const BOOTSTRAP = esbuild.transformSync(`
 const __app = document.getElementById('app');
 // Native View Transitions around client-side navigation (progressive:
@@ -162,33 +143,9 @@ if (__resumed) {
 }
 `, { minify: true }).code;
 
-// The document inlines its entire runtime, so rosefn can ship a STRICT
-// content security policy without 'unsafe-inline' in script-src - the one
-// thing every compared framework cannot do by default (their separate,
-// often dynamically-named bundles force 'unsafe-inline' or nonce plumbing).
-// The policy hashes the exact bytes of the inline module script (bundle +
-// bootstrap), so the page's own code runs and nothing else does
-// . style-src stays 'unsafe-inline' because the scoped
-// component styles are inline <style> blocks: CSS cannot execute, and
-// hashing every route-dependent style block would cost more than it buys.
-// img/font stay data: (assets are inlined), connect/form stay 'self'
-// (a rosefn app is one origin), and object/base/frame are locked down.
-// A route exporting `headers = { ... }` overrides any of this per route.
-// Mode B and the edge's no-build case share the external shape:
-// /client.js plus a tiny inline bootstrap. There the hash covers exactly
-// the bootstrap's bytes and 'self' covers the external modules - still no
-// 'unsafe-inline' anywhere.
-// The policy tail, shared by both script-src shapes so the two can never
-// drift: only the script source differs between them.
 const CSP_TAIL = `style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`;
 let cspCache: { for: string | null; value: string } | null = null;
-// The exact bytes between the external bootstrap's script tags - the single
-// source of truth shared by the tag and the CSP hash, same contract as
-// inlineScript: the policy can never drift from what actually ships.
 const EXTERNAL_BOOTSTRAP = `\nimport { start, prefetch, postForm } from '/client.js';\n${BOOTSTRAP}`;
-// The exact bytes between the module script's tags - the single source of
-// truth shared by the tag and the CSP hash, so the policy can never drift
-// from what actually ships.
 function inlineScript(client: string): string {
   return `\n${client}\n${BOOTSTRAP}`;
 }
@@ -227,9 +184,6 @@ export function mintNonce(): string {
 export function securityHeaders(client: string | null, nonce = ''): Record<string, string> {
   if (nonce) return { 'Content-Security-Policy': `script-src 'nonce-${nonce}' 'strict-dynamic'; ${CSP_TAIL}` };
   if (!cspCache || cspCache.for !== client) {
-    // client === null: split mode (or the edge without a built client.js).
-    // 'self' covers the external modules and chunks, the hash covers the
-    // inline bootstrap - the same no-unsafe-inline guarantee as inline mode.
     const scriptSrc = client
       ? `'sha256-${createHash('sha256').update(inlineScript(client), 'utf-8').digest('base64')}'`
       : `'self' 'sha256-${createHash('sha256').update(EXTERNAL_BOOTSTRAP, 'utf-8').digest('base64')}'`;
@@ -241,13 +195,8 @@ export function securityHeaders(client: string | null, nonce = ''): Record<strin
   return { 'Content-Security-Policy': cspCache.value };
 }
 
-// An inline SVG favicon (the rose). Without it every browser requests
-// /favicon.ico on every page load - one wasted request per visit. A route
-// can override it with its own <link rel="icon"> in a <head> block.
 const FAVICON = '<link rel="icon" href="data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 100 100\'><text y=\'.9em\' font-size=\'90\'>🌹</text></svg>">';
 
-// Shared by the buffered shell and the streaming shell-open so both produce
-// byte-identical static markup.
 const STYLES = `
     body { font-family: system-ui, sans-serif; margin: 0; padding: 2rem; }
     button { padding: 0.5rem 1rem; font-size: 1rem; margin-right: 0.5rem; }
@@ -261,10 +210,6 @@ const STYLES = `
     ::view-transition-old(root), ::view-transition-new(root) { animation-duration: .18s; }
   `;
 
-// The stylesheet ships inside every document, so its source formatting is a
-// tax on every route: collapse whitespace outside strings once, here. The
-// alternation leaves quoted content alone; selectors survive because no
-// space is written around their combinators or pseudo colons above.
 const STYLES_MIN = STYLES.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"']+/g, (m) =>
   m[0] === '"' || m[0] === "'" ? m : m.replace(/\s+/g, ' ').replace(/\s*([:;{},])\s*/g, '$1').trim()
 ).trim();
@@ -291,10 +236,7 @@ const STYLES_MIN = STYLES.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"']+/g,
 function mergeHeadBlocks(blocks: string[]): string {
   const byKey = new Map<string, string>();
   const order: string[] = [];
-  // positional keys: tag -> how many unkeyed elements of that tag came before
   const positional = new Map<string, number>();
-  // first occurrence wins: blocks arrive page-first (a page renders inside its
-  // layouts' <slot/>), so the page's title/meta override the layouts'
   const put = (key: string, html: string) => {
     if (!byKey.has(key)) {
       byKey.set(key, html);
@@ -302,15 +244,10 @@ function mergeHeadBlocks(blocks: string[]): string {
     }
   };
   for (const block of blocks) {
-    // title carries content, so it needs its own pattern
     for (const m of block.matchAll(/<title[^>]*>[\s\S]*?<\/title>/gi)) put('title', m[0]);
-    // One pass over every other head element: a void tag (meta/link/base),
-    // a paired one (style/script/noscript, and any tag a route writes), or a
-    // self-closed one. The closing alternative is tried before the bare `>`
-    // so a paired element keeps its content and a void one still matches.
     for (const m of block.matchAll(/<(\w+)((?:\s+[\w:-]+(?:=(?:"[^"]*"|'[^']*'|[^\s"'>]+))?)*)\s*(?:\/>|>([\s\S]*?)<\/\1\s*>|>)/gi)) {
       const tag = m[1].toLowerCase();
-      if (tag === 'title') continue; // handled above, with its own key
+      if (tag === 'title') continue;
       const attrs = m[2];
       const keyMatch = attrs.match(/\s(?:name|property|rel|charset)=(?:"([^"]*)"|'([^']*)')/i);
       const idMatch = attrs.match(/\sid=(?:"([^"]*)"|'([^']*)')/i);
@@ -321,9 +258,6 @@ function mergeHeadBlocks(blocks: string[]): string {
         key = `${tag}:#${positional.get(tag) ?? 0}`;
         positional.set(tag, (positional.get(tag) ?? 0) + 1);
       }
-      // keyed tags carry their key (must match HEAD_ATTR in the runtime) so
-      // the client adopts these SSR-injected elements in place on the first
-      // navigation instead of creating duplicates
       const marked = m[0].replace(/^<\w+/, (t) => `${t} data-rosefn-head="${key}"`);
       put(key, marked);
     }
@@ -376,26 +310,13 @@ export function buildShell(ssrHtml: string, stateJson: string, client: string | 
   const clientTag = clientScriptTag(client, nonce);
 
   const mergedHead = mergeHeadBlocks(head);
-  // a route-provided <title> replaces the default one
+  const headStamped = nonce
+    ? mergedHead.replace(/<script\b([^>]*)>/gi, (m, attrs: string) => (/\bnonce=/.test(attrs) ? m : `<script${attrs} nonce="${nonce}">`))
+    : mergedHead;
   const titleTag = /<title>/i.test(mergedHead) ? '' : '<title>Rosefn</title>';
-  // a route-provided icon replaces the inline favicon
   const iconTag = /rel=["']?icon/i.test(mergedHead) ? '' : `\n  ${FAVICON}`;
-  const headTags = mergedHead ? `\n  ${mergedHead}` : '';
+  const headTags = mergedHead ? `\n  ${headStamped}` : '';
   const styleTag = styles ? `\n  <style>${styles}</style>` : '';
- // js=false (a route exporting csr = false): the document
-  // ends at the container - no state script, no inlined bundle, zero
-  // JavaScript. The route's render function still rides in the bundle for
-  // client-side navigation and the SPA fallback; only this document is
-  // JS-free. Scoped styles stay: CSS is not JavaScript.
-  //
-  // P1-1 (bug report): a JS-free document is also DEMO-FREE. The #app wrapper
-  // and the shell's own stylesheet existed for the client (the bootstrap
-  // renders into #app; STYLES dresses the framework's demo). With no script
-  // in the document they are pure pollution: the wrapper inserts an element
-  // between the page's own CSS selectors and its content (div > p becomes
-  // div > #app > p) and the demo's pink links / body padding outrank the
-  // route's theme.css on equal specificity. So a zero-JS document is exactly
-  // the route's own markup - nothing wrapped, nothing injected.
   const jsTail = js
     ? `\n  <script type="application/json" id="__rosefn_state">${stateJson}</script>\n  ${clientTag}`
     : '';
