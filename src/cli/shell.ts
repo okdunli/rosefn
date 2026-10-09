@@ -109,13 +109,15 @@ document.addEventListener('submit', (e) => {
   e.preventDefault();
   postForm(new FormData(f));
 });
-// Dev seam: the live signal graph, readable as JSON. Two callers, one
+// Dev seam: the live signal graph, readable as JSON. Three callers, one
 // implementation: the dev server's reload bridge snapshots it before a
 // rebuild-triggered reload so the edit lands on the state the developer had,
-// and a devtools extension reads it the same way. It is the same
-// serializeState the zero-hydration resume already ships, so the only new
-// bytes are the assignment.
-window.__rosefn = { state: () => serializeState() };
+// and the devtools extension (devtools/) reads it the same way - the signal
+// graph plus the prefetch counters, which is the whole observable state of a
+// running page. It is the same serializeState the zero-hydration resume
+// already ships, so the only new bytes are the assignment (and a property
+// whose body is a call that already exists in this scope).
+window.__rosefn = { state: () => serializeState(), prefetch: () => prefetchStats() };
 // initial=true: DOM is SSR output, resume state + wire markers (zero hydration).
 // If the document was rendered for a DIFFERENT route (a static-file server's
 // SPA fallback serves index.html for unknown paths), adopt nothing - let the
@@ -145,7 +147,7 @@ if (__resumed) {
 
 const CSP_TAIL = `style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`;
 let cspCache: { for: string | null; value: string } | null = null;
-const EXTERNAL_BOOTSTRAP = `\nimport { start, prefetch, postForm } from '/client.js';\n${BOOTSTRAP}`;
+const EXTERNAL_BOOTSTRAP = `\nimport { start, prefetch, postForm, prefetchStats } from '/client.js';\n${BOOTSTRAP}`;
 function inlineScript(client: string): string {
   return `\n${client}\n${BOOTSTRAP}`;
 }
