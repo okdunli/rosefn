@@ -45,7 +45,7 @@ export function getStyles(): string {
   }
 }
 
-const BOOTSTRAP = esbuild.transformSync(`
+const BOOTSTRAP_SOURCE = `
 // shell = false: the document's SSR content sits directly in <body> - no
 // #app wrapper, no demo styles, so a real theme's CSS owns the document from
 // the first byte (and a JS-less visitor never sees either). The bundle still
@@ -168,13 +168,46 @@ if (__state.__notFound) {
 } else {
   start(__app, window.location.pathname);
 }
-`, { minify: true }).code;
+`;
+let BOOTSTRAP_CACHE: string | null = null;
+function bootstrap(): string {
+  if (BOOTSTRAP_CACHE === null) {
+    if ((globalThis as any).__ROSEFN_SKIP_MINIFY) {
+      BOOTSTRAP_CACHE = BOOTSTRAP_SOURCE;
+    } else {
+      try {
+        BOOTSTRAP_CACHE = esbuild.transformSync(BOOTSTRAP_SOURCE, { minify: true }).code;
+      } catch {
+        BOOTSTRAP_CACHE = BOOTSTRAP_SOURCE;
+      }
+    }
+  }
+  return BOOTSTRAP_CACHE;
+}
 
 const CSP_TAIL = `style-src 'unsafe-inline'; img-src 'self' data: https://fastly.picsum.photos; font-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`;
 let cspCache: { for: string | null; value: string } | null = null;
-const EXTERNAL_BOOTSTRAP = `\nimport { start, prefetch, postForm, prefetchStats } from '/client.js';\n${BOOTSTRAP}`;
+let EXTERNAL_BOOTSTRAP_CACHE: string | null = null;
+function externalBootstrap(): string {
+  if (EXTERNAL_BOOTSTRAP_CACHE === null) EXTERNAL_BOOTSTRAP_CACHE = `\nimport { start, startNotFound, prefetch, postForm, prefetchStats, serializeState } from '/client.js';\n${bootstrap()}`;
+  return EXTERNAL_BOOTSTRAP_CACHE;
+}
 function inlineScript(client: string): string {
-  return `\n${client}\n${BOOTSTRAP}`;
+  const m = /\bexport\s*\{([^}]*)\}\s*;?\s*$/.exec(client);
+  let body = client;
+  let aliases = "";
+  if (m) {
+    body = client.slice(0, m.index) + client.slice(m.index + m[0].length);
+    aliases = m[1]
+      .split(",")
+      .map((pair) => {
+        const parts = pair.split(" as ").map((x) => x.trim());
+        if (parts.length === 1 || parts[0] === parts[1]) return "";
+        return parts[0] && parts[1] ? `var ${parts[1]} = ${parts[0]};` : "";
+      })
+      .join("");
+  }
+  return `\n${body}\n${aliases}\n${bootstrap()}`;
 }
 /**
  * A fresh CSP nonce: 128 bits from the platform RNG, base64 - the syntax the
@@ -213,7 +246,7 @@ export function securityHeaders(client: string | null, nonce = ''): Record<strin
   if (!cspCache || cspCache.for !== client) {
     const scriptSrc = client
       ? `'sha256-${createHash('sha256').update(inlineScript(client), 'utf-8').digest('base64')}'`
-      : `'self' 'sha256-${createHash('sha256').update(EXTERNAL_BOOTSTRAP, 'utf-8').digest('base64')}'`;
+      : `'self' 'sha256-${createHash('sha256').update(externalBootstrap(), 'utf-8').digest('base64')}'`;
     cspCache = {
       for: client,
       value: `script-src ${scriptSrc}; ${CSP_TAIL}`,
@@ -304,7 +337,7 @@ export function clientScriptTag(client: string | null, nonce = ''): string {
   const n = nonce ? ` nonce="${nonce}"` : '';
   return client
     ? `<script type="module"${n}>${inlineScript(client)}</script>`
-    : `<script type="module"${n} src="/client.js"></script>\n<script type="module"${n}>${EXTERNAL_BOOTSTRAP}</script>`;
+    : `<script type="module"${n} src="/client.js"></script>\n<script type="module"${n}>${externalBootstrap()}</script>`;
 }
 
 /**
