@@ -13,12 +13,33 @@ const port = Number(process.env.PORT || 8080);
 let handle: ((request: Request) => Promise<Response>) | null = null;
 let mod: any = null;
 let warmList: string[] = [];
+
+const earlyHintLinks: string[] = (() => {
+  try {
+    const html = fs.readFileSync(path.join(dist, 'index.html'), 'utf8');
+    const links: string[] = [];
+    for (const m of html.matchAll(/<script[^>]+src="([^"]+)"/g)) {
+      const v = `<${m[1]}>; rel=preload; as=script`;
+      if (!links.includes(v)) links.push(v);
+    }
+    for (const m of html.matchAll(/<link[^>]+rel="stylesheet"[^>]*>/g)) {
+      const href = /href="([^"]+)"/.exec(m[0])?.[1];
+      if (href) { const v = `<${href}>; rel=preload; as=style`; if (!links.includes(v)) links.push(v); }
+    }
+    for (const m of html.matchAll(/<link[^>]+href="([^"]+)"[^>]+rel="stylesheet"[^>]*>/g)) {
+      const v = `<${m[1]}>; rel=preload; as=style`;
+      if (!links.includes(v)) links.push(v);
+    }
+    return links;
+  } catch { return []; }
+})();
+
 const ready = createEdgeHandler(dist).then(async (h) => {
   handle = h;
   try {
     mod = await import(new URL('./server.js', import.meta.url).href);
     warmList = ['/', ...((mod.dynamicRoutes as string[]) || []).filter((r: string) => !r.includes(':'))];
-  } catch {  }
+  } catch { /* warm list stays just the home route */ }
 });
 
 const hotCache = new Map<string, { raw: Buffer; br: Buffer; gzip: Buffer; headers: Record<string, string>; etag: string; fetchedAt: number; refreshing?: boolean }>();
@@ -152,7 +173,7 @@ try {
     if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
     if (!(k in process.env)) process.env[k] = v;
   }
-} catch {  }
+} catch { /* no .env: fine */ }
 const REVALIDATE_TOKEN = process.env.ROSEFN_REVALIDATE_TOKEN || '';
 let revalidateMod: any = null;
 
@@ -259,6 +280,9 @@ http.createServer(async (req, res) => {
       (init as any).duplex = 'half';
     }
     const cookieHeader = String(req.headers.cookie || '');
+    if (earlyHintLinks.length && req.method === 'GET' && String(req.headers.accept ?? '').includes('text/html')) {
+      try { res.writeEarlyHints({ link: earlyHintLinks }); } catch { /* client gone: the render still finishes */ }
+    }
     const response = await handle!(new Request(url, init));
     if (req.method === 'GET') fillHot(req.url || '/', cookieHeader, response.clone());
     res.statusCode = response.status;
