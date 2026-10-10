@@ -123,7 +123,20 @@ export function textMark(closes: Close[], fn: Close, pair?: boolean, arg?: unkno
 
 export function attrMark(closes: Close[], fn: Close, name: string, arg?: unknown): string {
   const i = closes.push(fn) - 1;
-  return `${name}="${esc(fn(arg))}" data-b="${i}:${name}"`;
+  return `${name}="${esc(fn(arg))}" data-b${i}="${name}"`;
+}
+
+/**
+ * Boolean attributes (F1): presence IS the value - `checked="false"` still
+ * checks the box, so a reactive boolean attr can never ride attrMark. The
+ * SSR side emits the bare attribute only when truthy, plus an index-suffixed
+ * marker either way; wire()'s boolean branch flips the PROPERTY (the one
+ * thing a live DOM obeys after user interaction) and mirrors the attribute
+ * for no-JS parity.
+ */
+export function boolAttrMark(closes: Close[], fn: Close, name: string, arg?: unknown): string {
+  const i = closes.push(fn) - 1;
+  return (fn(arg) ? ` ${name}=""` : '') + ` data-b${i}="!${name}"`;
 }
 
 export function ifMark(
@@ -148,8 +161,8 @@ export function ifMark(
 }
 
 export function eachMark(closes: Close[], items: Close, fn: (s: unknown, c: Close[]) => unknown): string {
-  const i = closes.push(() => (items() as unknown[]).map((v) => {
-    return { html: String(fn(v, closes)), closes, scope: v };
+  const i = closes.push(() => (items() as unknown[]).map((v, vi) => {
+    return { html: String(fn(v, closes, vi)), closes, scope: v };
   })) - 1;
   let h = `<!--\u27e6l:${i}\u27e7-->`;
   for (const r of closes[i]() as Array<{ html: string }>) h += r.html;
@@ -224,6 +237,21 @@ const HEAD_ATTR = 'data-rosefn-head';
 
 export const handlers: Record<string, (e: Event) => void> =
   (globalThis as { __rosefn_handlers?: Record<string, (e: Event) => void> }).__rosefn_handlers ??= {};
+
+/**
+ * F5: `use:NAME` element actions - the plugin point for DOM behaviors
+ * (tooltips, dropdowns, canvas glue) that themes and plugins register once
+ * per module: directives.tooltip = (el) => { ...; return cleanup? }. wire()
+ * invokes each action for its element when the route adopts; the returned
+ * cleanup (if any) rides the same disposal set as every other effect.
+ * Parameters travel as data-* attributes the action reads - keeping them out
+ * of the reactive graph keeps the action contract one argument.
+ */
+export const directives: Record<string, (el: Element, param?: unknown) => void | (() => void) | { update?: (p: unknown) => void; destroy?: () => void }> =
+  (globalThis as { __rosefn_directives?: Record<string, (el: Element, param?: unknown) => void | (() => void) | { update?: (p: unknown) => void; destroy?: () => void }> })
+    .__rosefn_directives ??= {};
+
+const actionRecords = new WeakMap<Element, { update?: (p: unknown) => void; destroy?: () => void }>();
 
 /**
  * Apply one route's whole <head> (every block of its chain, page first) to the
@@ -486,17 +514,67 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
     } else if (root.nodeType !== 11) clearHead();
   }
 
-  const els = (holder as Element).querySelectorAll('[data-b]');
-  els.forEach((el) => {
+  const all = (holder as Element).querySelectorAll('*');
+  all.forEach((el) => {
     if (islandSkip && el.closest('[data-rv-island]')) return;
-    const spec = el.getAttribute('data-b')!;
-    const sep = spec.indexOf(':');
-    const idx = +spec.slice(0, sep);
-    const attr = spec.slice(sep + 1);
-    el.removeAttribute('data-b');
-    weff(() => {
-      el.setAttribute(attr, String((closes[idx] as (s?: unknown) => unknown)(scope)));
-    });
+    for (const an of el.getAttributeNames()) {
+      if (!an.startsWith('data-b')) continue;
+      const idx = Number(an.slice(6));
+      if (!Number.isFinite(idx)) continue;
+      const attr = el.getAttribute(an)!;
+      el.removeAttribute(an);
+      const effect = () => String((closes[idx] as (s?: unknown) => unknown)(scope));
+      if (attr === 'data-use-param') {
+        weff(() => {
+          const raw = effect();
+          let p: unknown = raw;
+          try { p = JSON.parse(raw); } catch { /* string param */ }
+          actionRecords.get(el)?.update?.(p);
+        });
+        continue;
+      }
+      if (attr === 'value') {
+        weff(() => {
+          const v = effect();
+          const inp = el as unknown as HTMLInputElement;
+          if (inp.value !== v) inp.value = v;
+        });
+      } else if (attr.startsWith('!')) {
+        const name = attr.slice(1);
+        weff(() => {
+          const v = (closes[idx] as (s?: unknown) => unknown)(scope);
+          const live = !(v === false || v == null || v === '' || v === 'false' || v === 0);
+          const target = el as unknown as Record<string, unknown>;
+          if (target[name] !== live) target[name] = live;
+          if (live) el.setAttribute(name, '');
+          else el.removeAttribute(name);
+        });
+      } else {
+        weff(() => { el.setAttribute(attr, effect()); });
+      }
+    }
+  });
+
+  const uses = (holder as Element).querySelectorAll('[data-use]');
+  uses.forEach((el) => {
+    if (islandSkip && el.closest('[data-rv-island]')) return;
+    const name = el.getAttribute('data-use')!;
+    const fn = directives[name];
+    if (!fn) {
+      console.warn(`Rosefn: use:${name} has no registered action (directives.${name}?)`);
+      return;
+    }
+    const rawParam = el.getAttribute('data-use-param');
+    let initial: unknown = rawParam ?? undefined;
+    if (typeof initial === 'string') {
+      try { initial = JSON.parse(initial); } catch { /* plain string param */ }
+    }
+    const ret = fn(el, initial);
+    if (typeof ret === 'function') created.push(ret);
+    else if (ret && typeof ret === 'object') {
+      actionRecords.set(el, { update: ret.update, destroy: ret.destroy });
+      if (ret.destroy) created.push(ret.destroy);
+    }
   });
 
   if (holder !== root) {

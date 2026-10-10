@@ -1,0 +1,35 @@
+<script>
+  let name = $state('');
+  let subscribed = $state(false);
+  let plan = $state('free');
+  let colors = $state([]);
+  function clear() { $setState('name', ''); }
+</script>
+
+<div class="bind-demo">
+  <h1>Two-way binding demo</h1>
+  <input bind:value={name} placeholder="Type your name">
+  <p>Hello {name() || 'stranger'}!</p>
+  <label>
+    <input type="checkbox" bind:checked={subscribed}>
+    Subscribe
+  </label>
+  <p>{subscribed() ? 'Subscribed' : 'Not subscribed'}</p>
+  <fieldset>
+    <legend>Plan</legend>
+    <label><input type="radio" name="plan" value="free" bind:group={plan}> Free</label>
+    <label><input type="radio" name="plan" value="pro" bind:group={plan}> Pro</label>
+  </fieldset>
+  <p>Plan: {plan}</p>
+  <fieldset>
+    <legend>Colors</legend>
+    <label><input type="checkbox" value="red" bind:group={colors}> Red</label>
+    <label><input type="checkbox" value="green" bind:group={colors}> Green</label>
+  </fieldset>
+  <p>Colors: {colors().join(', ') || 'none'}</p>
+  <select bind:value={plan}>
+    <option value="free">Free plan</option>
+    <option value="pro">Pro plan</option>
+  </select>
+  <button on:click={clear}>Clear</button>
+</div>

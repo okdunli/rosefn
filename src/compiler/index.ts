@@ -16,10 +16,10 @@ const DECL_RE = /(?:let|const|var)\s+(\w+)[^=]*=\s*\$(state|data|kv)\b/g;
 const DECL_CAST_RE = /^\s+as\s+[^;\n]+/;
 const SETSTATE_RE = /\$setState\(([^,]+),\s*([^)]+)\)/g;
 const EVENT_RE = /on:(\w+)=\{([^}]+)\}/g;
-const SLOT_RE = /<slot\s*\/?>/g;
+const SLOT_RE = /<slot\s*\/>|<slot>([\s\S]*?)<\/slot>/g;
 /** A named slot: `<slot name="row" item={post} />` . The lookahead
  *  keeps the plain `<slot />` out of it - that one is the default slot. */
-const SLOT_NAMED_RE = /<slot\s+((?=[^>]*\bname\s*=)[^>]*?)\/?>/g;
+const SLOT_NAMED_RE = /<slot\s+((?=[^>]*\bname\s*=)[^>]*?)(?:\/>|>([\s\S]*?)<\/slot>)/g;
 
 // Encode a named slot tag as the template expression `__slot('row', [['item', (post)]])` - array pairs.
 function encodeSlotCall(attrs: string): string {
@@ -709,18 +709,32 @@ function nodeOnlyImports(importStmts: string): string[] {
  * the state declarations, so the arrow closes over the same `count()`/`setN`
  * the rest of the page uses.
  */
-function wireEventBindings(template: string, actionNames: Set<string>): {
+function wireEventBindings(template: string, actionNames: Set<string>, filePath = '<template>'): {
   template: string;
   bindings: Array<{ event: string; fn: string }>;
 } {
   const bindings: Array<{ event: string; fn: string }> = [];
   let out = '';
   let rest = template;
+  const KNOWN_MODS: Record<string, string> = {
+    preventDefault: 'e.preventDefault()',
+    stopPropagation: 'e.stopPropagation()',
+  };
   for (;;) {
-    const m = /\bon:(\w+)\s*=\s*\{/.exec(rest);
+    const m = /\bon:(\w+)((?:\|\w+)*)\s*=\s*\{/.exec(rest);
     if (!m) {
       out += rest;
       break;
+    }
+    const mods = m[2] ? m[2].slice(1).split('|') : [];
+    for (const mod of mods) {
+      if (!KNOWN_MODS[mod]) {
+        throw new RoseError(
+          'E-TEMPLATE',
+          `${filePath}: unknown event modifier |${mod}`,
+          { hint: `the supported modifiers are ${Object.keys(KNOWN_MODS).map((k) => '|' + k).join(' ')} - anything else belongs inside the handler body` },
+        );
+      }
     }
     out += rest.slice(0, m.index);
     let i = m.index + m[0].length;
@@ -743,7 +757,22 @@ function wireEventBindings(template: string, actionNames: Set<string>): {
       i++;
     }
     const expr = rest.slice(m.index + m[0].length, i).trim();
-    if (actionNames.has(expr)) {
+    const wrap = (body: string): string =>
+      mods.length
+        ? `(e) => { ${mods.map((mod) => KNOWN_MODS[mod]).join('; ')}; (${body})(e); }`
+        : body;
+    if (mods.length && actionNames.has(expr)) {
+      throw new RoseError(
+        'E-TEMPLATE',
+        `${filePath}: event modifiers are not supported on the server action ${expr}`,
+        { hint: '$action already preventDefaults - drop the modifiers, or bind a local handler that calls $action' },
+      );
+    }
+    if (mods.length) {
+      const name = `__h${bindings.length}`;
+      out += `data-on-${m[1]}="${name}"`;
+      bindings.push({ event: m[1], fn: `${name}: ${wrap(expr)}` });
+    } else if (actionNames.has(expr)) {
       out += `data-on-${m[1]}="$action:${expr}"`;
     } else if (/^\w+$/.test(expr)) {
       out += `data-on-${m[1]}="${expr}"`;
@@ -1109,20 +1138,137 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   const imgDefaulted = templateCalled
     .replace(/<img\b(?![^>]*?\sloading=)/gi, '<img loading="lazy"')
     .replace(/<img\b(?![^>]*?\sdecoding=)/gi, '<img decoding="async"')
-  const wired = wireEventBindings(imgDefaulted, actionNames);
-  const eventBindings = wired.bindings;
+  const wired = wireEventBindings(imgDefaulted, actionNames, filePath);
 
   const stateKeys = decls.map((d) => d.name);
+
+  const bindBindings: Array<{ event: string; fn: string }> = [];
+  let bindCounter = 0;
+  const bindExpanded = wired.template.replace(
+    /\sbind:(value|checked)\s*=\s*\{([\w$]+)(?:\(\))?\}/g,
+    (whole, kind: string, name: string) => {
+      if (!stateKeys.includes(name)) {
+        throw new Error(
+          `${filePath}: bind:${kind}={${name}} must name a $state declaration` +
+            (stateKeys.length ? ` (state keys here: ${stateKeys.join(', ')})` : ' (this file declares no $state)'),
+        );
+      }
+      const setter = setterNames.get(name)!;
+      const evt = kind === 'checked' ? 'change' : 'input';
+      const hname = `__rvbind_${scopeKey.replace(/\W/g, '_')}_${bindCounter++}`;
+      bindBindings.push({
+        event: evt,
+        fn:
+          kind === 'checked'
+            ? `${hname}: (e) => ${setter}(e.target.checked)`
+            : `${hname}: (e) => { const t = e.target; ${setter}(t.type === 'number' || t.type === 'range' ? t.valueAsNumber : t.value); }`,
+      });
+      const evtAttr = kind === 'checked'
+        ? ` data-on-change="${hname}"`
+        : ` data-on-input="${hname}" data-on-change="${hname}"`;
+      return ` ${kind}={${name}()}${evtAttr}`;
+    },
+  );
 
   const comps = new Map(roseImports.map((r) => {
     const abs = path.resolve(path.dirname(filePath), r.specifier);
     const hit = registry.get(abs)!;
     return [r.name, { index: hit.index, slots: hit.slots }] as const;
   }));
-  const deferExpanded = expandDeferBlocks(wired.template);
+  const groupBindings: Array<{ event: string; fn: string }> = [];
+  let groupCounter = 0;
+  const TAG_SCAN_RE = /<([a-zA-Z][^\s>/]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
+  const groupExpanded = (() => {
+    if (!bindExpanded.includes('bind:group')) return bindExpanded;
+    let out = '';
+    let pos = 0;
+    let m: RegExpExecArray | null;
+    TAG_SCAN_RE.lastIndex = 0;
+    while ((m = TAG_SCAN_RE.exec(bindExpanded))) {
+      const [whole, tag, attrs, selfClose] = m;
+      const gm = /\sbind:group\s*=\s*\{([\w$]+)(?:\(\))?\}/.exec(attrs);
+      if (!gm) continue;
+      const name = gm[1];
+      if (!stateKeys.includes(name)) {
+        throw new RoseError(
+          'E-TEMPLATE',
+          `${filePath}: bind:group={${name}} must name a $state declaration`,
+          { hint: 'the group state holds the selected value (radio) or an ARRAY of checked values (checkbox) - declare it: let ' + name + ' = $state("")' },
+        );
+      }
+      if (!/\stype\s*=\s*["'](radio|checkbox)["']/.test(attrs)) {
+        throw new RoseError(
+          'E-TEMPLATE',
+          `${filePath}: bind:group is for radio and checkbox inputs`,
+          { hint: '<input type="radio" value="v" bind:group={state}> holds the selected value; type="checkbox" holds an ARRAY of the checked values (declare the state as $state([]))' },
+        );
+      }
+      const isArrayGroup = /\stype\s*=\s*["']checkbox["']/.test(attrs);
+      const vm = /\svalue\s*=\s*"([^"]*)"|\svalue\s*=\s*'([^']*)'/.exec(attrs);
+      if (!vm || /\{/.test(vm[0])) {
+        throw new RoseError(
+          'E-TEMPLATE',
+          `${filePath}: a bind:group input needs a static value attribute`,
+          { hint: '<input type="radio" value="free" bind:group={plan}> - the value IS what the state receives' },
+        );
+      }
+      if (/\schecked\s*=/.test(attrs)) {
+        throw new RoseError(
+          'E-TEMPLATE',
+          `${filePath}: a bind:group input cannot also carry checked=`,
+          { hint: 'the group state alone decides which inputs are checked' },
+        );
+      }
+      const setter = setterNames.get(name)!;
+      const hname = `__rvbg_${scopeKey.replace(/\W/g, '_')}_${groupCounter++}`;
+      const groupValue = JSON.stringify(vm[1] ?? vm[2]);
+      const checkedExpr = isArrayGroup
+        ? `${name}().includes(${groupValue})`
+        : `${name}() === ${groupValue}`;
+      const handlerBody = isArrayGroup
+        ? `${setter}(e.target.checked ? [...${name}(), ${groupValue}] : ${name}().filter((x) => x !== ${groupValue}))`
+        : `${setter}(e.target.value)`;
+      groupBindings.push({ event: 'change', fn: `${hname}: (e) => { ${handlerBody}; }` });
+      const newAttrs = attrs.replace(gm[0], ` checked={${checkedExpr}} data-on-change="${hname}"`);
+      out += bindExpanded.slice(pos, m.index) + `<${tag}${newAttrs}${selfClose}>`;
+      pos = m.index + whole.length;
+    }
+    if (pos === 0) return bindExpanded;
+    out += bindExpanded.slice(pos);
+    return out;
+  })();
+  const eventBindings = wired.bindings.concat(bindBindings, groupBindings);
+  const useExpanded = groupExpanded.replace(
+    /\suse:([\w-]+)(\s*=\s*\{([\s\S]*?)\})?/g,
+    (_w, name: string, hasParam: string | undefined, expr: string) =>
+      hasParam
+        ? ` data-use="${name}" data-use-param={JSON.stringify(${expr})}`
+        : ` data-use="${name}"`,
+  );
+  const classExpanded = expandClassDirectives(useExpanded, filePath);
+  const styleExpanded = expandStyleDirectives(classExpanded, filePath);
+  const keyExpanded = expandKeyBlocks(styleExpanded, filePath);
+  const elseExpanded = expandIfElse(keyExpanded);
+  const deferExpanded = expandDeferBlocks(elseExpanded);
   const ssrTemplate = rewriteQuotedExprAttrs(deferExpanded.template
-    .replace(SLOT_NAMED_RE, (_w, attrs) => `{__slot(${encodeSlotCall(attrs)})}`)
-    .replace(SLOT_RE, '{__slot__}'), comps);
+    .replace(SLOT_NAMED_RE, (_w, attrs, fallback) => {
+      const call = `{__slot(${encodeSlotCall(attrs)})}`;
+      if (fallback) {
+        if (/\{[^{}]*\}/.test(fallback)) {
+          throw new RoseError(
+            'E-TEMPLATE',
+            `${filePath}: slot fallback content must be static markup`,
+            { hint: 'a {expr} inside a slot fallback has no reactive scope here - render the dynamic part in the parent and pass it as the slot content' },
+          );
+        }
+        return `{__slot(${encodeSlotCall(attrs)}, ${JSON.stringify(fallback)})}`;
+      }
+      return call;
+    })
+    .replace(SLOT_RE, (_w, fallback) =>
+      fallback && fallback.trim()
+        ? `{__slotDefault(${JSON.stringify(fallback)})}`
+        : '{__slot__}'), comps);
   assertKnownDirectives(ssrTemplate, filePath);
   const compiledTemplate = compileTemplate(ssrTemplate, 'h', '__c', null, 0, true, comps);
   const compiledHead = headContent.trim() ? compileHead(headContent) : '';
@@ -1535,6 +1681,292 @@ function autoCall(expr: string): string {
 
 const DEFER_ENABLED = true;
 
+/**
+ * F4 ({#key} block): `{#key expr}body{/key}` re-creates the body whenever
+ * `expr` changes - the escape hatch for DOM whose local state must reset
+ * (a form re-keyed by its subject, a chart re-keyed by its dataset).
+ * Pure compiler sugar: it desugars to `{#each [expr] as __rvkv}body{/each}` -
+ * the each's items closure reads expr, so any dependency change re-runs the
+ * map and rebuilds every node, which IS key semantics. Zero runtime change.
+ * Unclosed blocks fail loudly here instead of rendering as prose.
+ */
+function expandKeyBlocks(template: string, filePath: string): string {
+  if (!template.includes('{#key')) return template;
+  for (let pass = 0; pass < 10; pass++) {
+    const OPEN_RE = /\{#key\s+([^}]+)\}/g;
+    OPEN_RE.lastIndex = 0;
+    const openM = OPEN_RE.exec(template);
+    if (!openM) return template;
+    const expr = openM[1].trim();
+    const bodyStart = openM.index + openM[0].length;
+    const TOK_RE = /\{[#\/](?:key|if|each|boundary|island)\b[^}]*\}/g;
+    TOK_RE.lastIndex = bodyStart;
+    let depth = 1;
+    let closeAt = -1;
+    let tm: RegExpExecArray | null;
+    while ((tm = TOK_RE.exec(template))) {
+      if (tm[0].startsWith('{#')) { depth++; continue; }
+      depth--;
+      if (depth === 0) { closeAt = tm.index; break; }
+    }
+    if (closeAt < 0) {
+      throw new RoseError(
+        'E-TEMPLATE',
+        `${filePath}: {#key ${expr}} is never closed`,
+        { hint: 'every {#key} needs its {/key}' },
+      );
+    }
+    template =
+      template.slice(0, openM.index) +
+      `{#each [${expr}] as __rvkv}` +
+      template.slice(bodyStart, closeAt) +
+      '{/each}' +
+      template.slice(closeAt + '{/key}'.length);
+  }
+  return template;
+}
+
+/**
+ * F2 (ergonomics): `{:else}` and `{:else if cond}` on {#if} blocks - the
+ * branch syntax every other template language has, retracted here after the
+ * author judged the earlier refusal over-strict. One pass walks every {#if}
+ * block, splits its TOP-LEVEL `{:else}` chain (nested blocks' elses are
+ * theirs), and re-emits the block as complementary {#if}s:
+ *   {#if A}a{:else}b{/if}   -> {#if A}a{/if}{#if !(A)}b{/if}
+ *   {#if A}a{:else if B}b{:else}c{/if}
+ *                           -> {#if A}a{/if}{#if !(A)}{#if B}b{/if}{#if !(B)}c{/if}{/if}
+ * Zero new runtime, zero new marker kinds: wire()/ifMark already adopt and
+ * flip both shapes, and each condition re-evaluates - free for the pure
+ * state reads that are the only legal condition kind here. Runs BEFORE
+ * defer expansion (so a {:else} inside a {#defer} body lands on expanded
+ * ground) and repeated until stable, because nested ifs with their own
+ * elses surface one level per pass. Defer bodies are transparent to the
+ * depth walk on purpose: {#defer} is not a block kind, and every {#if}
+ * inside it is balanced on its own.
+ */
+function expandIfElseOnce(template: string): { template: string; changed: boolean } {
+  const TOK_RE = /\{#(?:if|each|boundary|island)\b[^}]*\}|\{\/(?:if|each|boundary|island)\s*\}|\{:else(?:\s+if\s+[^}]*)?\}/g;
+  let out = '';
+  let pos = 0;
+  let changed = false;
+  for (;;) {
+    const openM = /\{#(if|each)\s+([^}]+)\}/g.exec(template.slice(pos));
+    if (!openM) { out += template.slice(pos); break; }
+    const kind = openM[1];
+    const head = openM[2];
+    const start = pos + openM.index;
+    const cond = kind === 'if' ? head.trim() : '';
+    const bodyStart = start + openM[0].length;
+    out += template.slice(pos, start);
+
+    TOK_RE.lastIndex = bodyStart;
+    let depth = 1;
+    let closeAt = -1;
+    let closeLen = 0;
+    const elses: Array<{ at: number; len: number; cond: string | null }> = [];
+    let tm: RegExpExecArray | null;
+    while ((tm = TOK_RE.exec(template))) {
+      const tok = tm[0];
+      if (tok.startsWith('{:else')) {
+        if (depth === 1) {
+          const condM = /^\{:else\s+if\s+([^}]*)\}$/.exec(tok);
+          elses.push({ at: tm.index, len: tok.length, cond: condM ? condM[1].trim() : null });
+        }
+        continue;
+      }
+      if (tok.startsWith('{#')) { depth++; continue; }
+      depth--;
+      if (depth === 0) { closeAt = tm.index; closeLen = tok.length; break; }
+    }
+    if (closeAt < 0 || elses.length === 0) {
+      out += template.slice(start, closeAt < 0 ? template.length : closeAt + closeLen);
+      if (closeAt < 0) break;
+      pos = closeAt + closeLen;
+      continue;
+    }
+    const body = template.slice(bodyStart, closeAt);
+    if (kind === 'each') {
+      const lastBare = [...elses].reverse().find((e) => e.cond === null);
+      if (!lastBare) {
+        out += template.slice(start, closeAt + closeLen);
+        pos = closeAt + closeLen;
+        continue;
+      }
+      const relLast = lastBare.at - bodyStart;
+      const eachBody = body.slice(0, relLast);
+      const elseBody = body.slice(relLast + lastBare.len);
+      const itemsExpr = head.replace(/\s+as\s+[\w,\s]*$/, '').trim();
+      out += template.slice(start, bodyStart) + eachBody + '{/each}'
+        + `{#if !(${itemsExpr}.length)}${elseBody}{/if}`;
+      pos = closeAt + closeLen;
+      changed = true;
+      continue;
+    }
+    const branches: Array<{ cond: string | null; body: string }> = [];
+    let cursor = 0;
+    for (let i = 0; i < elses.length; i++) {
+      const e = elses[i];
+      const rel = e.at - bodyStart;
+      branches.push({ cond: i === 0 ? null : elses[i - 1].cond, body: body.slice(cursor, rel) });
+      cursor = rel + e.len;
+    }
+    branches.push({ cond: elses[elses.length - 1].cond, body: body.slice(cursor) });
+    const first = branches.shift()!;
+    const build = (bs: Array<{ cond: string | null; body: string }>): string => {
+      if (!bs.length) return '';
+      const head = bs[0];
+      const rest = bs.slice(1);
+      if (head.cond == null) return head.body;
+      let s = `{#if ${head.cond}}${head.body}{/if}`;
+      if (rest.length) s += `{#if !(${head.cond})}` + build(rest) + `{/if}`;
+      return s;
+    };
+    let emitted = `{#if ${cond}}${first.body}{/if}`;
+    if (branches.length) emitted += `{#if !(${cond})}` + build(branches) + `{/if}`;
+    out += emitted;
+    pos = closeAt + closeLen;
+    changed = true;
+  }
+  return { template: out, changed };
+}
+
+/**
+ * F2c (class: directive): `class:NAME={expr}` merges with the tag's static
+ * class into ONE reactive class attribute whose closure concatenates the
+ * static value plus each conditional segment - one attrMark, one data-b
+ * marker, all conditions re-evaluated together on every toggle. This runs
+ * AFTER callifyTemplateExprs, so the expressions arrive pre-callified and
+ * are re-emitted verbatim inside a template literal. A tag that already
+ * carries a REACTIVE class={...} cannot merge (two writers, one attribute)
+ * and fails here, at the .rose file.
+ */
+function expandClassDirectives(template: string, filePath: string): string {
+  if (!template.includes('class:')) return template;
+  const TAG_RE = /<([a-zA-Z][^\s>/]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
+  let out = '';
+  let pos = 0;
+  let m: RegExpExecArray | null;
+  TAG_RE.lastIndex = 0;
+  while ((m = TAG_RE.exec(template))) {
+    const [whole, tag, attrs, selfClose] = m;
+    if (!attrs.includes('class:')) continue;
+    const pairs: Array<{ name: string; expr: string; start: number; end: number }> = [];
+    const NAME_RE = /\sclass:([\w-]+)\s*=\s*\{/g;
+    let nm: RegExpExecArray | null;
+    while ((nm = NAME_RE.exec(attrs))) {
+      let i = nm.index + nm[0].length;
+      let depth = 1;
+      while (i < attrs.length && depth > 0) {
+        const ch = attrs[i];
+        if (ch === '"' || ch === "'") { i = skipQuoted(attrs, i); continue; }
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+        i++;
+      }
+      if (depth !== 0) {
+        throw new RoseError('E-TEMPLATE', `${filePath}: class:${nm[1]}={...} is missing its closing brace`, { file: filePath, hint: 'the binding expression needs a matching } before the tag ends' });
+      }
+      pairs.push({ name: nm[1], expr: attrs.slice(nm.index + nm[0].length, i - 1), start: nm.index, end: i });
+    }
+    const clsRe = /(\sclass\s*=\s*)("([^"]*)"|'([^']*)'|\{[^}]*\})/;
+    const clsM = clsRe.exec(attrs);
+    if (clsM && clsM[2].startsWith('{')) {
+      throw new RoseError('E-TEMPLATE', `${filePath}: <${tag}> has both class={...} and class: directives`, { file: filePath, hint: 'merge them: move the dynamic part into a class:NAME={expr} and keep the rest in class="..."' });
+    }
+    const staticCls = clsM ? (clsM[3] ?? clsM[4] ?? '') : '';
+    let closure = `(${JSON.stringify(staticCls)}`;
+    for (const p of pairs) {
+      closure += `+((${p.expr})?${JSON.stringify(' ' + p.name)}:'')`;
+    }
+    closure += `)`;
+    let newAttrs = attrs;
+    for (let k = pairs.length - 1; k >= 0; k--) {
+      newAttrs = newAttrs.slice(0, pairs[k].start) + newAttrs.slice(pairs[k].end);
+    }
+    if (clsM) {
+      newAttrs = newAttrs.replace(clsRe, ` class={${closure}}`);
+    } else {
+      newAttrs = ` class={${closure}}` + newAttrs;
+    }
+    out += template.slice(pos, m.index) + `<${tag}${newAttrs}${selfClose}>`;
+    pos = m.index + whole.length;
+  }
+  if (pos === 0) return template;
+  out += template.slice(pos);
+  return out;
+}
+
+/**
+ * F2f (style: directive): `style:PROP={expr}` merges with the tag's static
+ * style into ONE reactive style attribute - the overrides are appended AFTER
+ * the static declarations, so CSS last-wins makes them authoritative, exactly
+ * the expected precedence. Same quote-aware tag scanner and same
+ * reactive-class={...} conflict rule as expandClassDirectives.
+ */
+function expandStyleDirectives(template: string, filePath: string): string {
+  if (!template.includes('style:')) return template;
+  const TAG_RE = /<([a-zA-Z][^\s>/]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
+  let out = '';
+  let pos = 0;
+  let m: RegExpExecArray | null;
+  TAG_RE.lastIndex = 0;
+  while ((m = TAG_RE.exec(template))) {
+    const [whole, tag, attrs, selfClose] = m;
+    if (!attrs.includes('style:')) continue;
+    const pairs: Array<{ prop: string; expr: string; start: number; end: number }> = [];
+    const NAME_RE = /\sstyle:([\w-]+)\s*=\s*\{/g;
+    let nm: RegExpExecArray | null;
+    while ((nm = NAME_RE.exec(attrs))) {
+      let i = nm.index + nm[0].length;
+      let depth = 1;
+      while (i < attrs.length && depth > 0) {
+        const ch = attrs[i];
+        if (ch === '"' || ch === "'") { i = skipQuoted(attrs, i); continue; }
+        if (ch === '{') depth++;
+        else if (ch === '}') depth--;
+        i++;
+      }
+      if (depth !== 0) {
+        throw new RoseError('E-TEMPLATE', `${filePath}: style:${nm[1]}={...} is missing its closing brace`, { file: filePath, hint: 'the binding expression needs a matching } before the tag ends' });
+      }
+      pairs.push({ prop: nm[1], expr: attrs.slice(nm.index + nm[0].length, i - 1), start: nm.index, end: i });
+    }
+    const styleRe = /(\sstyle\s*=\s*)("([^"]*)"|'([^']*)'|\{[^}]*\})/;
+    const stM = styleRe.exec(attrs);
+    if (stM && stM[2].startsWith('{')) {
+      throw new RoseError('E-TEMPLATE', `${filePath}: <${tag}> has both style={...} and style: directives`, { file: filePath, hint: 'keep the static declarations in style="..." and move the dynamic ones to style:PROP={expr}' });
+    }
+    const staticStyle = stM ? (stM[3] ?? stM[4] ?? '') : '';
+    let closure = `${JSON.stringify(staticStyle.endsWith(';') || staticStyle === '' ? staticStyle : staticStyle + ';')}`;
+    for (const p of pairs) {
+      closure += `+${JSON.stringify(p.prop + ':')}+(${p.expr})+';'`;
+    }
+    let newAttrs = attrs;
+    for (let k = pairs.length - 1; k >= 0; k--) {
+      newAttrs = newAttrs.slice(0, pairs[k].start) + newAttrs.slice(pairs[k].end);
+    }
+    if (stM) {
+      newAttrs = newAttrs.replace(styleRe, ` style={${closure}}`);
+    } else {
+      newAttrs = ` style={${closure}}` + newAttrs;
+    }
+    out += template.slice(pos, m.index) + `<${tag}${newAttrs}${selfClose}>`;
+    pos = m.index + whole.length;
+  }
+  if (pos === 0) return template;
+  out += template.slice(pos);
+  return out;
+}
+
+function expandIfElse(template: string): string {  for (let pass = 0; pass < 10; pass++) {
+    if (!/\{:else\b/.test(template)) return template;
+    const r = expandIfElseOnce(template);
+    template = r.template;
+    if (!r.changed) return template;
+  }
+  return template;
+}
+
 function expandDeferBlocks(template: string): { template: string; count: number; holds: number[] } {
   if (!DEFER_ENABLED) {
     const openRe = /\{#defer(?:\s+hold=\\d+)?\}/g;
@@ -1612,7 +2044,7 @@ function findBlock(src: string, kind: 'if' | 'each' | 'boundary' | 'island'): Re
       ? /\{#if\s+([^}]+)\}/g
       : kind === 'island'
         ? /\{#island(?:\s+name="([^"]*)")?(?:\s+hydrate="([^"]*)")?\s*\}/g
-        : /\{#each\s+([^}]+?)\s+as\s+(\w+)\}/g;
+        : /\{#each\s+([^}]+?)\s+as\s+(\w+)(?:\s*,\s*(\w+))?\}/g;
   const closeRe = new RegExp(`\\{/${kind}\\}`, 'g');
   let open: RegExpExecArray | null;
   while ((open = head.exec(src))) {
@@ -1636,7 +2068,7 @@ function findBlock(src: string, kind: 'if' | 'each' | 'boundary' | 'island'): Re
         const content = src.slice(afterOpen, nextClose.index);
         const groups = kind === 'boundary' ? [content]
           : kind === 'island' ? [open[1] ?? '', open[2] ?? '', content]
-          : kind === 'if' ? [open[1], content] : [open[1], open[2], content];
+          : kind === 'if' ? [open[1], content] : [open[1], open[2], open[3] ?? '', content];
         const arr = [src.slice(start, i), ...groups] as unknown as RegExpExecArray;
         (arr as any).index = start;
         return arr;
@@ -1750,21 +2182,21 @@ function assertKnownDirectives(template: string, filePath: string): void {
     if (word === 'else') {
       throw new RoseError(
         'E-TEMPLATE',
-        `${filePath}: {:else} is not rosefn syntax - rosefn has no else branch`,
-        { file: filePath, line: lineAt(template, m), hint: 'nest a second {#if}: {#if cond}A{/if}{#if !cond}B{/if} - the negation of the first condition IS the else' },
+        `${filePath}: a stray {:else} with no {#if} above it`,
+        { file: filePath, line: lineAt(template, m), hint: '{:else} / {:else if cond} belong inside an {#if} ... {/if} block - {#if cond}A{:else}B{/if}' },
       );
     }
     throw new RoseError(
       'E-TEMPLATE',
       `${filePath}: {:${word}} is not a rosefn directive`,
-      { file: filePath, line: lineAt(template, m), hint: "rosefn templates support {#if}, {#each} and {#boundary} - and there is no {:else}: nest a second {#if} with the negated condition" },
+      { file: filePath, line: lineAt(template, m), hint: 'rosefn templates support {#if}/{:else}, {#each} and {#boundary}' },
     );
   }
   const OPENER_RE = /\{#(if|each|boundary|island)\b([^}]*)\}/g;
   while ((m = OPENER_RE.exec(template))) {
     if (inRaw(m.index)) continue;
     const [, kind, head] = m;
-    if (kind === 'each' && !/\bas\s+(\w+)\s*$/.test(head)) {
+    if (kind === 'each' && !/\bas\s+(\w+)(?:\s*,\s*\w+)?\s*$/.test(head)) {
       throw new RoseError(
         'E-TEMPLATE',
         `${filePath}: {#each ${head.trim()}} is missing its item name`,
@@ -1921,25 +2353,28 @@ function compileTemplate(
       }
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
     } else if (earliest.type === 'each') {
-      const [, items, item, content] = earliest.match;
+      const [, items, item, index, content] = earliest.match;
       const before = remaining.substring(0, earliest.index);
       if (before) result += emitChunk(before, acc, closes, scope);
       const call = autoCall(items);
       const id = nextId();
       const itemRe = new RegExp(`\\b${item}\\b`, 'g');
+      const indexRe = index ? new RegExp(`\\b${index}\\b`, 'g') : null;
       let scoped = '';
       let lastSpan = 0;
       for (const s of templateExprSpans(content.trim())) {
-        scoped += content.trim().slice(lastSpan, s.start) + '{' + s.expr.replace(itemRe, '__s') + '}';
+        let expr = s.expr.replace(itemRe, '__s');
+        if (indexRe) expr = expr.replace(indexRe, '__i');
+        scoped += content.trim().slice(lastSpan, s.start) + '{' + expr + '}';
         lastSpan = s.end + 1;
       }
       scoped += content.trim().slice(lastSpan);
       const inner = compileTemplate(scoped, 'h', '__c', '__s', depth + 1, effMarkers, comps, islandDepth);
-      result += `const __b${id} = (__s, __c) => { let h = ''; ${inner} return h; };\n`;
+      result += `const __b${id} = (__s, __c${index ? ', __i' : ''}) => { let h = ''; ${inner} return h; };\n`;
       if (effMarkers) {
         result += `${acc} += eachMark(${closes}, () => (${call}), __b${id});\n`;
       } else {
-        result += `${acc} += (${call}).map((${item}) => __b${id}(${item}, [])).join('');\n`;
+        result += `${acc} += (${call}).map((${item}${index ? ', __i' : ''}) => __b${id}(${item}, []${index ? ', __i' : ''}))).join('');\n`;
       }
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
     } else if (earliest.type === 'boundary') {
@@ -1994,6 +2429,7 @@ function compileTemplate(
       const propsObj = parseCompAttrs(tag.attrs)
         .filter((a) => a.name !== 'slot')
         .map((a) => {
+          if (a.kind === 'spread') return `...(${a.value})`;
           const key = a.name.startsWith('on:') ? `on${capitalize(a.name.slice(3))}` : a.name;
           const val = a.kind === 'expr' ? `(${a.value})` : a.kind === 'str' ? JSON.stringify(a.value) : 'true';
           return `${JSON.stringify(key)}: ${val}`;
@@ -2024,10 +2460,18 @@ function compileTemplate(
         remaining = remaining.substring(earliest.index + earliest.match[0].length);
         continue;
       }
-      const slotCall = /^__slot\((['"])(\w+)\1, \[([\s\S]*)\]\)$/.exec(trimmed);
+      const slotDefault = /^__slotDefault\(("(?:[^"\\]|\\.)*")\)$/.exec(trimmed);
+      if (slotDefault) {
+        if (before) result += emitChunk(before, acc, closes, scope);
+        result += `${acc} += __slotDefault(children, ${slotDefault[1]});\n`;
+        remaining = remaining.substring(earliest.index + earliest.match[0].length);
+        continue;
+      }
+      const slotCall = /^__slot\((['"])(\w+)\1, \[([\s\S]*?)\](?:,\s*("(?:[^"\\]|\\.)*"))?\)$/.exec(trimmed);
       if (slotCall) {
         if (before) result += emitChunk(before, acc, closes, scope);
-        result += `${acc} += __slotBlock(${closes}, __sl, ${JSON.stringify(slotCall[2])}, [${slotCall[3]}]);\n`;
+        const fb = slotCall[4] ? `, ${slotCall[4]}` : '';
+        result += `${acc} += __slotBlock(${closes}, __sl, ${JSON.stringify(slotCall[2])}, [${slotCall[3]}]${fb});\n`;
         remaining = remaining.substring(earliest.index + earliest.match[0].length);
         continue;
       }
@@ -2129,13 +2573,19 @@ function findClose(src: string, from: number, name: string): number {
   return -1;
 }
 
-interface CompAttr { name: string; kind: 'expr' | 'str' | 'bool'; value: string }
+interface CompAttr { name: string; kind: 'expr' | 'str' | 'bool' | 'spread'; value: string }
 
 /** Parse a component tag's attributes into prop={expr} / prop="lit" / bool. */
 function parseCompAttrs(attrs: string): CompAttr[] {
   const out: CompAttr[] = [];
   let i = 0;
   while (i < attrs.length) {
+    const spread = /^\s*\{\.\.\.([^}]*)\}/.exec(attrs.slice(i));
+    if (spread) {
+      out.push({ name: '...', kind: 'spread', value: spread[1].trim() });
+      i += spread[0].length;
+      continue;
+    }
     const nm = /^\s*([\w:.-]+)/.exec(attrs.slice(i));
     if (!nm) break;
     i += nm[0].length;
@@ -2372,12 +2822,17 @@ function emitText(expr: string, acc: string, closes: string, scope: string | nul
 }
 
 /** Emit a reactive attribute through the runtime's attrMark(). */
+const BOOLEAN_ATTRS = new Set(['checked', 'disabled', 'readonly', 'required', 'selected', 'multiple', 'autofocus', 'open']);
+
 function emitAttr(attr: string, expr: string, acc: string, closes: string, scope: string | null, markers = true): string {
   if (!markers) {
     return `${acc} += '${attr}="' + esc(${expr}) + '"';\n`;
   }
   const fn = scope ? `(${scope}) => (${expr})` : `() => (${expr})`;
   const arg = scope ? `, ${scope}` : '';
+  if (BOOLEAN_ATTRS.has(attr)) {
+    return `${acc} += boolAttrMark(${closes}, ${fn}, '${attr}'${arg});\n`;
+  }
   return `${acc} += attrMark(${closes}, ${fn}, '${attr}'${arg});\n`;
 }
 
@@ -2389,7 +2844,7 @@ function compileSlot(acc: string): string {
   return `${acc} += String(children);\n`;
 }
 
-const RUNTIME_IMPORTS = `import { state, setState, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound } from './runtime.js';`;
+const RUNTIME_IMPORTS = `import { state, setState, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound } from './runtime.js';`;
 
 const API_RUNTIME_HELPERS = RUNTIME_IMPORTS
   .replace(/^import\s*\{/, '')
@@ -2418,7 +2873,16 @@ const SLOT_HELPER = `const __slot = (sl, name, pairs) => {
   for (let i = 0; i < pairs.length; i++) o[pairs[i][0]] = pairs[i][1];
   return { o, fn };
 };
-const __slotBlock = (closes, sl, name, pairs) => slotBlockMark(closes, __slot(sl, name, pairs));`;
+const __slotBlock = (closes, sl, name, pairs, fallback) => {
+  const hit = __slot(sl, name, pairs);
+  if (hit) return slotBlockMark(closes, hit);
+  return fallback || '';
+};
+const __slotDefault = (children, fallback) => {
+  const c = children == null ? '' : String(children);
+  if (c.trim()) return c;
+  return fallback || '';
+};`;
 
 function generateSSR(script: string, templateFn: string, stateDeclsCode: string, exports = '', headFn = '', props: Array<{ name: string; def: string | null }> = [], namedSlots = false, imports = '', isComponent = false, guard = '', hasActions = false, dataDeclsCode = ''): string {
   const headCode = headFn
