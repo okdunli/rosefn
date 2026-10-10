@@ -170,7 +170,7 @@ if (__state.__notFound) {
 }
 `, { minify: true }).code;
 
-const CSP_TAIL = `style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`;
+const CSP_TAIL = `style-src 'unsafe-inline'; img-src 'self' data: https://fastly.picsum.photos; font-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`;
 let cspCache: { for: string | null; value: string } | null = null;
 const EXTERNAL_BOOTSTRAP = `\nimport { start, prefetch, postForm, prefetchStats } from '/client.js';\n${BOOTSTRAP}`;
 function inlineScript(client: string): string {
