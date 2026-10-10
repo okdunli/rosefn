@@ -919,14 +919,31 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
       }
       res.statusCode = 500;
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.end('<h1>500</h1><p>Something went wrong rendering this page.</p>');
+      const devErr = err as { file?: string; line?: number | string; hint?: string };
+      let devDetail = '';
+      if (process.env.ROSEFN_DEV === '1' && err) {
+        const stack = err instanceof Error ? (err.stack || '').split('\n').slice(1, 7).join('\n') : '';
+        devDetail =
+          '<div style="margin:24px auto;max-width:860px;font:13px/1.6 ui-monospace,monospace;background:#1b1b1f;color:#e6e6ea;border:1px solid #3a3a42;border-radius:10px;padding:20px 24px;text-align:left;white-space:pre-wrap;word-break:break-word">' +
+          '<div style="font:600 15px/1.4 system-ui,sans-serif;color:#ff8b8b">Render failed: ' + escapeHtml(req.url || '') + '</div>' +
+          '<div style="margin:10px 0 0;color:#ffd479">' + escapeHtml(err instanceof Error ? err.message : err) + '</div>' +
+          (devErr.file ? '<div style="margin:6px 0 0;color:#9ad1ff">' + escapeHtml(devErr.file) + (devErr.line != null ? ':' + devErr.line : '') + '</div>' : '') +
+          (devErr.hint ? '<div style="margin:10px 0 0;color:#9fe8b0">Fix: ' + escapeHtml(devErr.hint) + '</div>' : '') +
+          (stack ? '<pre style="margin:12px 0 0;color:#8f8f9a">' + escapeHtml(stack) + '</pre>' : '') +
+          '</div>';
+      }
+      res.end('<h1>500</h1><p>Something went wrong rendering this page.</p>' + devDetail);
     });
   };
 }
 
+/** HTML-escape for the dev error overlay (F10). */
+function escapeHtml(v: unknown): string {
+  return String(v ?? '').replace(/[<>&"]/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[ch] as string));
+}
+
 /** Strip the query string: routing matches the pathname, handlers read the full URL. */
-function pathnameOf(url: string | undefined): string {
-  try {
+function pathnameOf(url: string | undefined): string {  try {
     return new URL(url || '/', 'http://localhost').pathname;
   } catch {
     return (url || '/').split('?')[0];
@@ -1044,6 +1061,7 @@ function projectTag(): string {
 
 async function dev(): Promise<void> {
   devMode = true;
+  process.env.ROSEFN_DEV = '1';
   console.log(`🌹 Rosefn v${version()}${projectTag()} dev server starting...`);
   try {
     await build();
