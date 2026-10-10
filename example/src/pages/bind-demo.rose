@@ -8,6 +8,11 @@
   // F17: keydown is NOT one of the delegated four (click/input/change/submit),
   // so this handler only runs because wire() binds it directly on the input.
   function noteKey(e) { $setState('lastKey', e.key || ''); }
+  // F18: |window moves the binding off the element onto window itself
+  // (Escape-to-close, scroll, resize) - keyup so it cannot cross-talk with
+  // the keydown assertion above.
+  let winKey = $state('');
+  function noteWinKey(e) { $setState('winKey', e.key || ''); }
 </script>
 
 <div class="bind-demo">
@@ -38,4 +43,6 @@
   <button on:click={clear}>Clear</button>
   <input class="key-probe" on:keydown={noteKey} placeholder="press a key">
   <p>Last key: {lastKey() || 'none'}</p>
+  <div class="win-probe" on:keyup|window={noteWinKey}></div>
+  <p>Win key: {winKey() || 'none'}</p>
 </div>
