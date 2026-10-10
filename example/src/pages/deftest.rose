@@ -10,4 +10,9 @@
   <p>延迟渲染：大块内容</p>
   {/defer}
   <p>页面尾部</p>
+  <ul class="deftest-list">
+    {#each ['One', 'Two', 'Three', 'Four'] as item}
+      <li class="deftest-item" transition:stagger>{item}</li>
+    {/each}
+  </ul>
 </div>
