@@ -1139,9 +1139,15 @@ async function serve(): Promise<void> {
     }
   }).catch(() => {});
   const baseHandler = withAccessLog(serveStatic(OUT_DIR, true), `w${process.pid}`);
+  let dynRouteSet: Set<string> | null = null;
+  const dynRoutesOf = (): Set<string> => {
+    const list = (serverModule?.dynamicRoutes as string[] | undefined) || [];
+    if (!dynRouteSet || dynRouteSet.size !== list.length) dynRouteSet = new Set(list);
+    return dynRouteSet;
+  };
   const server = http.createServer(async (req: any, res: any) => {
     try {
-      if ((req.method === 'GET' || req.method === 'HEAD') && (serverModule?.dynamicRoutes as string[] | undefined)?.includes(pathnameOf(req.url || '/'))) {
+      if ((req.method === 'GET' || req.method === 'HEAD') && dynRoutesOf().has(pathnameOf(req.url || '/'))) {
         const handle = await edgeReady;
         const url = 'http://' + (req.headers.host || `localhost:${PORT}`) + (req.url || '/');
         const response = await handle(new Request(url, { method: req.method, headers: req.headers }));
