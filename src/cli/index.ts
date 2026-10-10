@@ -332,7 +332,7 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
   };
 
   for (const info of routes) {
-    if ((ssrModule.dynamicRoutes as string[]).includes(info.routePath)) {
+    if (((ssrModule.prerenderSkipRoutes as string[]) ?? []).includes(info.routePath)) {
       console.log(`dynamic route ${info.routePath}: per-request state (getContext/$store), rendered on demand`);
       continue;
     }

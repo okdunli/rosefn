@@ -40,8 +40,18 @@ const ready = createEdgeHandler(dist).then(async (h) => {
   try {
     mod = await import(new URL('./server.js', import.meta.url).href);
     warmList = ['/', ...((mod.dynamicRoutes as string[]) || []).filter((r: string) => !r.includes(':'))];
+    mod.invalidateRenderCache?.();
   } catch { /* warm list stays just the home route */ }
 });
+
+ready.then(async (h) => {
+  for (const r of warmList) {
+    try {
+      const res = await h(new Request('http://localhost' + r));
+      await res.arrayBuffer();
+    } catch { /* a warm-up failure just means that route renders cold */ }
+  }
+}).catch(() => {});
 
 const hotCache = new Map<string, { raw: Buffer; br: Buffer; gzip: Buffer; headers: Record<string, string>; etag: string; fetchedAt: number; refreshing?: boolean }>();
 const HOT_TTL = 10_000;
@@ -266,6 +276,11 @@ http.createServer(async (req, res) => {
   try {
     await ready;
     if (handleRevalidate(req, res)) return;
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      hotCache.clear();
+      const fn = (mod as any).invalidateRenderCache;
+      if (typeof fn === 'function') fn();
+    }
     if (hotCache.size > 0 && tryHot(req, res)) return;
     if (req.method === 'GET' && !req.headers.cookie && hotCache.size === 0) {
       for (const r of warmList) warmHot(r, '');
@@ -322,3 +337,5 @@ http.createServer(async (req, res) => {
 }).listen(port, () => {
   console.log(`🌹 rosefn prod server on http://localhost:${port}`);
 });
+
+void mod?.invalidateRenderCache;
