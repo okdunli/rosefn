@@ -1,6 +1,6 @@
 
-export type RoutePath = "/" | "/:lang/about" | "/about" | "/admin" | "/api/demo-auth" | "/api/demo-validate" | "/api/echo" | "/api/hello" | "/api/login" | "/api/posts" | "/api/secret" | "/bare" | "/blog/:id" | "/broken" | "/buffered" | "/content-demo" | "/deftest" | "/docs" | "/feed" | "/fresh" | "/garden" | "/guarded" | "/kvdemo" | "/mirror404" | "/search" | "/sign" | "/thorn" | "/vault";
-export const routePatterns = ["/","/:lang/about","/about","/admin","/api/demo-auth","/api/demo-validate","/api/echo","/api/hello","/api/login","/api/posts","/api/secret","/bare","/blog/:id","/broken","/buffered","/content-demo","/deftest","/docs","/feed","/fresh","/garden","/guarded","/kvdemo","/mirror404","/search","/sign","/thorn","/vault"] as const;
+export type RoutePath = "/" | "/:lang/about" | "/about" | "/admin" | "/api/demo-auth" | "/api/demo-validate" | "/api/echo" | "/api/hello" | "/api/login" | "/api/posts" | "/api/secret" | "/bare" | "/blog/:id" | "/broken" | "/buffered" | "/content-demo" | "/deftest" | "/docs" | "/feed" | "/fresh" | "/garden" | "/guarded" | "/island-demo" | "/kvdemo" | "/mirror404" | "/search" | "/sign" | "/thorn" | "/vault";
+export const routePatterns = ["/","/:lang/about","/about","/admin","/api/demo-auth","/api/demo-validate","/api/echo","/api/hello","/api/login","/api/posts","/api/secret","/bare","/blog/:id","/broken","/buffered","/content-demo","/deftest","/docs","/feed","/fresh","/garden","/guarded","/island-demo","/kvdemo","/mirror404","/search","/sign","/thorn","/vault"] as const;
 export type RouteParams = {
   "/:lang/about": { lang: string | number };
   "/blog/:id": { id: string | number };

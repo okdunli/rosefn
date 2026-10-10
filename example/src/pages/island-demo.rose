@@ -1,0 +1,27 @@
+<script>
+  let who = $state('World');
+  let count = $state(0);
+  function inc() { $setState('count', count() + 1); }
+  function reset() { $setState('count', 0); }
+</script>
+
+<head>
+  <title>Islands Demo - Rosefn</title>
+  <meta name="description" content="Partial hydration via islands: static HTML ships zero client JS, only the interactive region hydrates.">
+</head>
+
+<div class="island-demo">
+  <h1>Islands (T3)</h1>
+  <p>This paragraph is <strong>outside</strong> any <code>&#123;#island&#125;</code>: it ships as static HTML with no reactive markers, so it needs zero client JS and never hydrates.</p>
+
+  {#island name="counter"}
+    <div class="counter">
+      <p>Hello {who()}!</p>
+      <p>Count: {count()}</p>
+      <button on:click={inc}>Increment</button>
+      <button on:click={reset}>Reset</button>
+    </div>
+  {/island}
+
+  <p>This paragraph is <strong>also outside</strong> the island: still static, still hydration-free. The two buttons above are the only interactive region on the page.</p>
+</div>

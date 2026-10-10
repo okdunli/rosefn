@@ -335,6 +335,13 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
 
   const ownsHead = root === document.getElementById('app');
 
+  if (ownsHead) {
+    const islandEls = Array.from(
+      (holder as Element).querySelectorAll('[data-rv-island]')
+    ).filter((el) => !(el.parentElement && el.parentElement.closest('[data-rv-island]')));
+    for (const isl of islandEls) wire(isl, closes, scope);
+  }
+
   for (const c of comments) {
     if (nested.has(c) || wired.has(c) || !c.parentNode) continue;
     const m = (c.nodeValue ?? '').match(MARK_RE);
