@@ -211,6 +211,8 @@ const END_RE = /^\u27e6\/([milh]):(\d+)\u27e7$/;
 
 const wired = new WeakSet<Node>();
 
+const pendingIslandObservers = new Set<IntersectionObserver>();
+
 /** Parse an html string into a DocumentFragment. */
 export function tpl(html: string): DocumentFragment {
   const t = document.createElement('template');
@@ -335,11 +337,31 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
 
   const ownsHead = root === document.getElementById('app');
 
+  let islandSkip = false;
   if (ownsHead) {
     const islandEls = Array.from(
       (holder as Element).querySelectorAll('[data-rv-island]')
     ).filter((el) => !(el.parentElement && el.parentElement.closest('[data-rv-island]')));
-    for (const isl of islandEls) wire(isl, closes, scope);
+    islandSkip = islandEls.length > 0;
+    for (const isl of islandEls) {
+      const fire = () => wire(isl, closes, scope);
+      const mode = isl.getAttribute('data-rv-island-hydrate');
+      if (mode === 'visible' && typeof IntersectionObserver !== 'undefined') {
+        const io = new IntersectionObserver((entries) => {
+          if (entries.some((en) => en.isIntersecting)) {
+            io.disconnect();
+            pendingIslandObservers.delete(io);
+            fire();
+          }
+        });
+        io.observe(isl);
+        pendingIslandObservers.add(io);
+      } else if (mode === 'idle' && typeof (globalThis as { requestIdleCallback?: unknown }).requestIdleCallback === 'function') {
+        (globalThis as { requestIdleCallback: (cb: () => void) => void }).requestIdleCallback(() => fire());
+      } else {
+        fire();
+      }
+    }
   }
 
   for (const c of comments) {
@@ -348,6 +370,8 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
     if (!m) continue;
     const kind = m[1];
     const idx = +m[2];
+
+    if (islandSkip && kind !== 'h' && (c.parentNode as Element).closest?.('[data-rv-island]')) continue;
 
     if (kind === 'h' && !ownsHead) continue;
     wired.add(c);
@@ -464,6 +488,7 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
 
   const els = (holder as Element).querySelectorAll('[data-b]');
   els.forEach((el) => {
+    if (islandSkip && el.closest('[data-rv-island]')) return;
     const spec = el.getAttribute('data-b')!;
     const sep = spec.indexOf(':');
     const idx = +spec.slice(0, sep);
@@ -484,6 +509,8 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
 export function resetEffects(): void {
   cleanups.forEach((fn) => fn());
   cleanups.clear();
+  pendingIslandObservers.forEach((io) => io.disconnect());
+  pendingIslandObservers.clear();
 }
 
 let dataCache = new Map<string, Promise<unknown>>();
