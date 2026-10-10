@@ -12,7 +12,7 @@ const COMPONENT_RE = /<script>([\s\S]*?)<\/script>/;
 const TEMPLATE_RE = /<template>([\s\S]*?)<\/template>/;
 const HEAD_RE = /<head>([\s\S]*?)<\/head>/;
 const STYLE_RE = /<style>([\s\S]*?)<\/style>/;
-const DECL_RE = /(?:let|const|var)\s+(\w+)[^=]*=\s*\$(state|data)\b/g;
+const DECL_RE = /(?:let|const|var)\s+(\w+)[^=]*=\s*\$(state|data|kv)\b/g;
 const DECL_CAST_RE = /^\s+as\s+[^;\n]+/;
 const SETSTATE_RE = /\$setState\(([^,]+),\s*([^)]+)\)/g;
 const EVENT_RE = /on:(\w+)=\{([^}]+)\}/g;
@@ -55,6 +55,8 @@ export interface CompileResult {
   usesContext?: boolean;
   /** the component exports `revalidate = N` (ISR window in seconds) */
   revalidate?: number;
+  /** the component exports `cache = N` (per-request render memo, seconds) */
+  cache?: number;
   /** the component exports `csr = false` (document ships without the client bundle) */
   csr?: boolean;
   /**
@@ -147,7 +149,7 @@ export interface RouteInfo {
 
 interface Decl {
   name: string;
-  kind: 'state' | 'data';
+  kind: 'state' | 'data' | 'kv';
   expr: string;
   start: number;
   end: number;
@@ -913,6 +915,8 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const hasParams = /(?:^|\n)\s*export\s+(?:(?:const|let|var)\s+|(?:async\s+)?function\s+)params\b/.test(rawScript);
   const revalidateMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+revalidate\s*=\s*(\d+)\s*;?/);
   const revalidate = revalidateMatch ? Number(revalidateMatch[1]) : undefined;
+  const cacheMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+cache\s*=\s*(\d+)\s*;?/);
+  const cacheSeconds = cacheMatch ? Number(cacheMatch[1]) : undefined;
   const prefetchMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+prefetch\s*=\s*['"`](\w+)['"`]\s*;?/);
   const prefetch = prefetchMatch ? prefetchMatch[1] : undefined;
   if (prefetch && !['off', 'hover', 'viewport', 'all'].includes(prefetch)) {
@@ -1022,6 +1026,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   }
   const lifecycle = rawScript.match(/\b(?:onMount|onCleanup|refresh|adopt|\$action|\$setState)\s*\(/);
   if (lifecycle) clientReasons.push(`${lifecycle[0].replace(/\s*\($/, '')}()`);
+  if (source.includes('{#defer')) clientReasons.push('{#defer} progressive content');
   const needsClient = clientReasons.length > 0;
 
   const jsWarnings: string[] = [];
@@ -1053,7 +1058,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
     : inlineImages(rawTemplate, publicDir);
 
   const decls = extractDecls(script);
-  const stateDecls = decls.filter((d) => d.kind === 'state');
+  const stateDecls = decls.filter((d) => d.kind === 'state' || d.kind === 'kv');
 
   const setterNames = new Map<string, string>();
   stateDecls.forEach((s) => setterNames.set(s.name, `set${capitalize(s.name)}`));
@@ -1065,6 +1070,14 @@ export async function compileComponent(filePath: string, publicDir: string, scop
     }
     const isFn = d.expr.includes('=>') || d.expr.startsWith('function');
     const fn = isFn ? d.expr : `() => (${d.expr})`;
+    if (d.kind === 'kv') {
+      const mTtl = /^(.*)\s*,\s*(\d+)\s*$/s.exec(d.expr);
+      const fnExpr = mTtl ? mTtl[1] : d.expr;
+      const ttl = mTtl ? mTtl[2] : '300';
+      return `const __had_${d.name} = hasState(${JSON.stringify(key)});
+const [${d.name}, set${capitalize(d.name)}] = state(${JSON.stringify(key)}, null);
+if (!__had_${d.name}) set${capitalize(d.name)}(await globalThis.__rosefnKvApi.kvMemo(${JSON.stringify('__kvh:' + scopeKey + ':' + d.name)}, ${fnExpr}, ${ttl}));`;
+    }
     return `const __had_${d.name} = hasState(${JSON.stringify(key)});
 const [${d.name}, set${capitalize(d.name)}] = state(${JSON.stringify(key)}, null);
 if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
@@ -1093,7 +1106,10 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   const dataDeclsCode = nestedDecls.filter((d) => d.kind === 'data').map(declCode).join('\n');
 
   const templateCalled = callifyTemplateExprs(template, stateDecls.map((s) => s.name));
-  const wired = wireEventBindings(templateCalled, actionNames);
+  const imgDefaulted = templateCalled
+    .replace(/<img\b(?![^>]*?\sloading=)/gi, '<img loading="lazy"')
+    .replace(/<img\b(?![^>]*?\sdecoding=)/gi, '<img decoding="async"')
+  const wired = wireEventBindings(imgDefaulted, actionNames);
   const eventBindings = wired.bindings;
 
   const stateKeys = decls.map((d) => d.name);
@@ -1103,7 +1119,8 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
     const hit = registry.get(abs)!;
     return [r.name, { index: hit.index, slots: hit.slots }] as const;
   }));
-  const ssrTemplate = rewriteQuotedExprAttrs(wired.template
+  const deferExpanded = expandDeferBlocks(wired.template);
+  const ssrTemplate = rewriteQuotedExprAttrs(deferExpanded.template
     .replace(SLOT_NAMED_RE, (_w, attrs) => `{__slot(${encodeSlotCall(attrs)})}`)
     .replace(SLOT_RE, '{__slot__}'), comps);
   assertKnownDirectives(ssrTemplate, filePath);
@@ -1116,8 +1133,8 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   const isMiddleware = path.basename(filePath) === '_middleware.rose';
   const ssr = isMiddleware
     ? `${RUNTIME_IMPORTS}\n\n${importStmts}\n\n${ssrExports}\n${ssrGuard}\n\n${cleanScript}\n`
-    : generateSSR(cleanScript, compiledTemplate, stateDeclsCode, ssrExports, compiledHead, props, hasNamedSlots, importStmts, isComponent, ssrGuard, actions.length > 0, dataDeclsCode);
-  const client = generateClient(cleanScript, compiledTemplate, stateDeclsCode, eventBindings, exportStmts, compiledHead, props, hasNamedSlots, importStmts, isComponent, dataDeclsCode);
+    : generateSSR(cleanScript + deferBootCode(deferExpanded.count, deferExpanded.holds), compiledTemplate, stateDeclsCode, ssrExports, compiledHead, props, hasNamedSlots, importStmts, isComponent, ssrGuard, actions.length > 0, dataDeclsCode);
+  const client = generateClient(cleanScript + deferBootCode(deferExpanded.count, deferExpanded.holds), compiledTemplate, stateDeclsCode, eventBindings, exportStmts, compiledHead, props, hasNamedSlots, importStmts, isComponent, dataDeclsCode);
 
   return {
     ssr: rewriteRoseImports(ssr, 'ssr'),
@@ -1129,6 +1146,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
     hasParams,
     usesContext,
     revalidate,
+    cache: cacheSeconds,
     csr,
     shell,
     buffer,
@@ -1514,6 +1532,79 @@ function autoCall(expr: string): string {
  * Returns a RegExpExecArray-shaped value (index + capture groups in the
  * same order the old regexes produced) so the call sites are unchanged.
  */
+
+const DEFER_ENABLED = true;
+
+function expandDeferBlocks(template: string): { template: string; count: number; holds: number[] } {
+  if (!DEFER_ENABLED) {
+    const openRe = /\{#defer(?:\s+hold=\\d+)?\}/g;
+    let out = '';
+    let dpos = 0;
+    for (;;) {
+      openRe.lastIndex = dpos;
+      const openM = openRe.exec(template);
+      if (!openM) break;
+      const openAt = openM.index;
+      const openLen = openM[0].length;
+      const closeAt = template.indexOf('{/defer}', openAt + openLen);
+      if (closeAt < 0) break;
+      out += template.slice(dpos, openAt) + template.slice(openAt + openLen, closeAt);
+      dpos = closeAt + 8;
+    }
+    return { template: dpos === 0 ? template : out, count: 0, holds: [] };
+  }
+  let count = 0;
+  const holds: number[] = [];
+  let out = '';
+  let pos = 0;
+  const openRe = /\{#defer(?:\s+hold=(\d+))?\}/g;
+  for (;;) {
+    openRe.lastIndex = pos;
+    const openM = openRe.exec(template);
+    if (!openM) break;
+    const openAt = openM.index;
+    const openLen = openM[0].length;
+    const hold = openM[1] ? Number(openM[1]) : 0;
+    let depth = 1;
+    let i = openAt + openLen;
+    let closeAt = -1;
+    while (i < template.length) {
+      openRe.lastIndex = i;
+      const nextOpenM = openRe.exec(template);
+      const nextOpen = nextOpenM ? nextOpenM.index : -1;
+      const nextClose = template.indexOf('{/defer}', i);
+      if (nextClose < 0) break;
+      if (nextOpen >= 0 && nextOpen < nextClose) { depth++; i = nextOpen + nextOpenM![0].length; continue; }
+      depth--;
+      if (depth === 0) { closeAt = nextClose; break; }
+      i = nextClose + 8;
+    }
+    if (closeAt < 0) break;
+    const content = template.slice(openAt + openLen, closeAt);
+    holds.push(hold);
+    const n = ++count;
+    out += template.slice(pos, openAt);
+    out += '{#if __rvDefer' + n + '()}' + content + '{/if}' + '\n' +
+           '{#if !__rvDefer' + n + '()}<div class="rv-defer-loading"></div>{/if}';
+    pos = closeAt + 8;
+  }
+  if (count === 0) return { template, count: 0, holds: [] };
+  out += template.slice(pos);
+  return { template: out, count, holds };
+}
+
+function deferBootCode(count: number, holds: number[] = []): string {
+  let code = '';
+  for (let n = 1; n <= count; n++) {
+    code += 'const [__rvDefer' + n + ', set__rvDefer' + n + '] = state("__rvdefer' + n + '", false);\n';
+    const hold = holds[n - 1] || 0;
+    code += hold > 0
+      ? 'onMount(function () { setTimeout(function () { set__rvDefer' + n + '(true); }, ' + hold + '); });\n'
+      : 'onMount(function () { requestAnimationFrame(function () { requestAnimationFrame(function () { set__rvDefer' + n + '(true); }); }); });\n';
+  }
+  return code;
+}
+
 function findBlock(src: string, kind: 'if' | 'each' | 'boundary'): RegExpExecArray | null {
   const head = kind === 'boundary'
     ? /\{#boundary\}/g
@@ -2176,6 +2267,9 @@ const IMG_MIME: Record<string, string> = {
 };
 const INLINE_IMG_MAX = 4096;
 
+import { readImageSize } from "../cli/image-size";
+import { scanContentDir, renderMarkdown, buildRss } from "../cli/content";
+
 function inlineImages(template: string, publicDir: string): string {
   return template.replace(IMG_RE, (tag) => {
     const src = tag.match(/\bsrc="(\/[^"{}]+)"/);
@@ -2189,7 +2283,13 @@ function inlineImages(template: string, publicDir: string): string {
     } catch {
       return tag;
     }
-    if (file.length > INLINE_IMG_MAX) return tag;
+    if (file.length > INLINE_IMG_MAX) {
+      const dims = readImageSize(path.join(publicDir, src[1]));
+      if (dims && !/\swidth=/.test(tag) && !/\sheight=/.test(tag)) {
+        return tag.replace(/<img\b/, `<img width="${dims.width}" height="${dims.height}"`);
+      }
+      return tag;
+    }
     const uri = ext === '.svg'
       ? `data:image/svg+xml,${file.toString('utf-8').replace(/%/g, '%25').replace(/#/g, '%23').replace(/"/g, '%22')}`
       : `data:${mime};base64,${file.toString('base64')}`;
@@ -2565,6 +2665,9 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
   const buildDir = path.join(outDir, '.build');
   await fs.promises.rm(buildDir, { recursive: true, force: true });
   await fs.promises.mkdir(buildDir, { recursive: true });
+  const contentSrcCands = [path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli', 'content.ts'), path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'cli', 'content.ts')];
+  const contentSrc = contentSrcCands.find((c) => fs.existsSync(c)) ?? contentSrcCands[0];
+  fs.copyFileSync(contentSrc, path.join(buildDir, 'content-md.ts'));
 
   const runtimePlugins = plugins.filter((p) => p && (p.onRequest || p.onResponse));
   if (runtimePlugins.length > 0) {
@@ -2694,13 +2797,13 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
       const dir = path.posix.dirname(rel);
       const prefix = dir === '.' ? '/' : '/' + dir;
       const flags = routeShellOff(infos, compiled, i) ? ', { shell: false }' : '';
-      return { prefix, render: split ? loaderOf(i) : compose(i), flags };
+      return { prefix, render: compose(i), flags };
     })
     .sort((a, b) => b.prefix.length - a.prefix.length);
   const notFoundTable = `[\n${notFoundEntries.map((e) => `  ['${e.prefix}', ${e.render}${e.flags}],`).join('\n')}\n]`;
 
   const errIdx = infos.findIndex((info) => info.isError);
-  const errorRender = errIdx >= 0 ? (split ? loaderOf(errIdx) : compose(errIdx)) : 'null';
+  const errorRender = errIdx >= 0 ? compose(errIdx) : 'null';
 
   const middlewareIdx = infos.findIndex((info) => info.isMiddleware);
 
@@ -2737,6 +2840,8 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
 
   const serverEntry = `
 ${serverImports}
+import { renderMarkdown } from './content-md.ts';
+import crypto from 'node:crypto';
 import { setState, clearRequestState, serializeState, resetRequestContext, setRequestQuery, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta } from './runtime.js';
 ${runtimePlugins.length > 0
     ? `import { hooks as __pluginHooks, hasRequestHooks as __hasRequestHooks, hasResponseHooks as __hasResponseHooks } from './plugins.js';`
@@ -2830,6 +2935,235 @@ export const apiPrerender = {
 export const revalidate = [
   ${pages.filter(({ i }) => compiled[i].revalidate !== undefined && !compiled[i].usesContext).map(({ info, i }) => `{ pattern: '${info.pattern}', seconds: ${compiled[i].revalidate} }`).join(',\n  ')}
 ];
+
+// Per-request render memo (export const cache = N): a dynamic route's whole renderPage result is memoized for N seconds.
+export const routeCaches = [
+  ${pages.filter(({ i }) => compiled[i].cache !== undefined).map(({ info, i }) => `{ pattern: '${info.pattern}', seconds: ${compiled[i].cache} }`).join(',\n  ')}
+];
+const __dynCache = new Map();
+export function invalidateRenderCache(): void {
+  __dynCache.clear();
+}
+// Application KV cache primitive (server-side, per-worker in-memory): a zero-dependency store for expensive computations.
+const __kvStore = new Map<string, { v: unknown; exp: number }>();
+// Content collections: src/content/<coll>/*.md scanned once at build time,
+
+const contentCollections = ${JSON.stringify(scanContentDir(path.join(root, 'src', 'content')))};
+export const kv = {
+  get(key: string): unknown {
+    const e = __kvStore.get(key);
+    if (!e) return undefined;
+    if (e.exp < Date.now()) { __kvStore.delete(key); return undefined; }
+    return e.v;
+  },
+  set(key: string, value: unknown, ttlSeconds = 300): void {
+    if (__kvStore.size > 1000) {
+      const cutoff = Date.now();
+      for (const [k, e] of __kvStore) { if (e.exp < cutoff) __kvStore.delete(k); }
+      if (__kvStore.size > 2000) __kvStore.clear(); 
+    }
+    __kvStore.set(key, { v: value, exp: Date.now() + ttlSeconds * 1000 });
+  },
+  del(key: string): void { __kvStore.delete(key); },
+  has(key: string): boolean {
+    const e = __kvStore.get(key);
+    return !!e && e.exp >= Date.now();
+  },
+};
+globalThis.__rosefnKvApi = { kv, kvMemo: $kv };
+globalThis.__rosefnContent = {
+  list: (coll: string, filter?: { tag: string }) => {
+    let items = contentCollections[coll] ?? [];
+    if (filter?.tag) items = items.filter((e) => ((e.frontmatter.tags as string[] | undefined) ?? []).includes(filter.tag));
+    return items.map((e) => ({ slug: e.slug, ...e.frontmatter }));
+  },
+  rss: (coll: string, opts: { title: string; origin: string; description?: string }) => {
+    return buildRss(contentCollections[coll] ?? [], opts);
+  },
+  get: (coll: string, slug: string, vars?: Record<string, unknown>) => {
+    const e = (contentCollections[coll] ?? []).find((x) => x.slug === slug);
+    if (!e) return null;
+    return { slug: e.slug, ...e.frontmatter, html: renderMarkdown(e.body, vars), toc: e.toc, readingTime: e.readingTime, wordCount: e.wordCount, excerpt: e.excerpt };
+  },
+};
+
+const v = {
+  validate(body: Record<string, unknown>, rules: Record<string, string[]>): { ok: boolean; errors: Record<string, string>; values: Record<string, unknown> } {
+    const errors: Record<string, string> = {};
+    const values: Record<string, unknown> = {};
+    for (const [field, ruleList] of Object.entries(rules)) {
+      let val = body[field];
+      for (const rule of ruleList) {
+        if (val === undefined || val === null || val === "") {
+          if (rule === "required") errors[field] = field + " is required";
+          else if (rule.startsWith("default:")) val = rule.slice(8);
+          continue;
+        }
+        if (rule === "string") val = String(val);
+        else if (rule === "trim") val = String(val).trim();
+        else if (rule === "number") {
+          const num = Number(val);
+          if (Number.isNaN(num)) errors[field] = field + " must be a number";
+          else val = num;
+        } else if (rule === "email") {
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(val))) errors[field] = field + " must be a valid email";
+        } else if (rule.startsWith("min:")) {
+          const min = Number(rule.slice(4));
+          if (typeof val === "number" ? val < min : String(val).length < min) errors[field] = field + " must be at least " + min;
+        } else if (rule.startsWith("max:")) {
+          const max = Number(rule.slice(4));
+          if (typeof val === "number" ? val > max : String(val).length > max) errors[field] = field + " must be at most " + max;
+        }
+      }
+      values[field] = val;
+    }
+    return { ok: Object.keys(errors).length === 0, errors, values };
+  },
+};
+
+const jobs = {
+  _timers: new Map<string, ReturnType<typeof setInterval>>(),
+  every(name: string, seconds: number, fn: () => void | Promise<void>): void {
+    if (this._timers.has(name)) return;
+    const t = setInterval(() => { Promise.resolve(fn()).catch(() => {}); }, seconds * 1000);
+    this._timers.set(name, t as any);
+  },
+  cancel(name: string): void {
+    const t = this._timers.get(name);
+    if (t) { clearInterval(t); this._timers.delete(name); }
+  },
+  cancelAll(): void { for (const t of this._timers.values()) clearInterval(t); this._timers.clear(); }
+};
+
+function sse(handler: (send: (event: string, data: unknown) => void) => Promise<void> | void): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      let closed = false;
+      const send = (event: string, data: unknown) => {
+        if (closed) return;
+        controller.enqueue(encoder.encode("event: " + event + "\\ndata: " + JSON.stringify(data) + "\\n\\n"));
+      };
+      try {
+        await handler(send);
+      } finally {
+        closed = true;
+        try { controller.close(); } catch {  }
+      }
+    },
+  });
+  return new Response(stream, {
+    headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", "connection": "keep-alive" },
+  });
+}
+globalThis.__rosefnExtras = { v, jobs, sse };
+const auth = {
+  hashPassword(password: string): string {
+    const salt = crypto.randomBytes(16).toString("hex");
+    const hash = crypto.scryptSync(password, salt, 32).toString("hex");
+    return salt + ":" + hash;
+  },
+  verifyPassword(password: string, stored: string): boolean {
+    const [salt, hash] = stored.split(":");
+    if (!salt || !hash) return false;
+    return crypto.timingSafeEqual(Buffer.from(hash, "hex"), crypto.scryptSync(password, salt, 32));
+  },
+  signSession(data: Record<string, unknown>, secret: string, ttlSeconds = 86400): string {
+    const payload = Buffer.from(JSON.stringify({ ...data, exp: Date.now() + ttlSeconds * 1000 })).toString("base64url");
+    const sig = crypto.createHmac("sha256", secret).update(payload).digest("base64url");
+    return payload + "." + sig;
+  },
+  verifySession<T = Record<string, unknown>>(token: string, secret: string): T | null {
+    const dot = token.lastIndexOf(".");
+    if (dot < 0) return null;
+    const payload = token.slice(0, dot);
+    const sig = token.slice(dot + 1);
+    const expect = crypto.createHmac("sha256", secret).update(payload).digest("base64url");
+    try {
+      if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expect))) return null;
+    } catch { return null; }
+    try {
+      const data = JSON.parse(Buffer.from(payload, "base64url").toString());
+      if (data.exp < Date.now()) return null;
+      return data as T;
+    } catch { return null; }
+  },
+  csrfToken(secret: string, sessionId: string): string {
+    return crypto.createHmac("sha256", secret).update(sessionId).digest("hex");
+  },
+  verifyCsrf(token: string, secret: string, sessionId: string): boolean {
+    try {
+      return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(this.csrfToken(secret, sessionId)));
+    } catch { return false; }
+  },
+};
+globalThis.__rosefnAuth = auth;
+
+export async function $kv(key: string, compute: () => unknown | Promise<unknown>, ttlSeconds = 300): Promise<unknown> {
+  const hit = kv.get(key);
+  if (hit !== undefined) return hit;
+  const v = await compute();
+  if (v !== undefined) kv.set(key, v, ttlSeconds);
+  return v;
+}
+export function isCachedRoute(pathname: string): boolean {
+  return routeCaches.some((r) => matchRoute(r.pattern, pathname));
+}
+export function invalidatePath(pathname: string): number {
+  let n = 0;
+  for (const key of [...__dynCache.keys()]) {
+    if (key.startsWith(pathname + '|')) { __dynCache.delete(key); n++; }
+  }
+  return n;
+}
+export function peekRenderCache(pathname: string, cookieHeader: string): ReturnType<typeof renderPage> | null {
+  const cfg = routeCaches.find((r) => matchRoute(r.pattern, pathname));
+  if (!cfg) return null;
+  let h = 0x811c9dc5;
+  const c = cookieHeader || '';
+  for (let i = 0; i < c.length; i++) {
+    h ^= c.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  const hit = __dynCache.get(pathname + '|' + h.toString(16));
+  return hit && hit.expires > Date.now() ? hit.page : null;
+}
+export async function renderPageCached(pathname: string, cookieHeader: string): Promise<ReturnType<typeof renderPage>> {
+  const cfg = routeCaches.find((r) => matchRoute(r.pattern, pathname));
+  if (!cfg) return renderPage(pathname);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < cookieHeader.length; i++) {
+    h ^= cookieHeader.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  const key = pathname + '|' + h.toString(16);
+  const hit = __dynCache.get(key);
+  if (hit && hit.expires > Date.now()) {
+    __dynCache.delete(key);
+    __dynCache.set(key, hit);
+    return hit.page;
+  }
+  // Stale-while-revalidate: an EXPIRED entry still answers instantly while one background render refreshes it - the TTL boundary never spikes.
+  if (hit && !hit.refreshing) {
+    hit.refreshing = true;
+    renderPage(pathname).then((fresh: any) => {
+      if (fresh.status === 200 && !fresh.redirect) {
+        __dynCache.set(key, { page: fresh, expires: Date.now() + cfg.seconds * 1000 });
+      } else {
+        __dynCache.delete(key);
+      }
+    }).catch(() => { __dynCache.delete(key); });
+    return hit.page;
+  }
+  const page = await renderPage(pathname);
+  if (page.status === 200 && !page.redirect) {
+    __dynCache.set(key, { page, expires: Date.now() + cfg.seconds * 1000 });
+    if (__dynCache.size > 300) {
+      __dynCache.delete(__dynCache.keys().next().value as string);
+    }
+  }
+  return page;
+}
 
 // Pages/_middleware.rose: a Web-standard request handler that runs before every render on the server (pages, POSTs, api calls alike).
 export const middleware = ${middlewareIdx >= 0 ? 'middlewareMod.handle ?? null' : 'null'};
@@ -2945,7 +3279,14 @@ export function docAttrs(pathname) {
 
 // Paint a fallback page (404/500) and serialize its state.
 async function renderFallback(pathname, render) {
-  const { html, head } = extractHead(await render([], ''));
+  // Split mode: the not-found entry's render is a loader object — resolve it through getRender (which memoizes the composed function) exactly like.
+  let fn = render;
+  if (typeof fn !== 'function' && fn && typeof fn.load === 'function') {
+    
+    // { render } once the route's chunk graph is loaded
+    fn = (await fn.load()).render;
+  }
+  const { html, head } = extractHead(await fn([], ''));
   const state = JSON.stringify({ __route: pathname, ...JSON.parse(serializeState()) });
   return { html, state, head, ...docAttrs(pathname) };
 }
@@ -3178,6 +3519,43 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
   return 404;
 }
 `;
+  try {
+    const patterns = [...pages, ...apiRoutes].map(({ info }) => info.pattern);
+    const uniq = [...new Set(patterns)].sort();
+    const lit = uniq.map((p) => JSON.stringify(p)).join(" | ") || "'/'";
+    const paramsOf = (pattern: string): string[] =>
+      (pattern.match(/:[\w]+|\*\*[\w]+|\*[\w]+/g) ?? []).map((m) => m.replace(/^[*:]+/, ""));
+    const paramSig = uniq
+      .map((p) => {
+        const ps = paramsOf(p);
+        if (!ps.length) return "";
+        return "  " + JSON.stringify(p) + ": { " + ps.map((n) => n + ": string | number").join("; ") + " };\n";
+      })
+      .join("");
+    const outDirTs = path.join(root, "src", ".rosefn");
+    await fs.promises.mkdir(outDirTs, { recursive: true });
+    const srcLines = [
+      "// GENERATED by rosefn build - do not edit.",
+      "export type RoutePath = " + lit + ";",
+      "export const routePatterns = " + JSON.stringify(uniq) + " as const;",
+      "export type RouteParams = {",
+      paramSig,
+      "};",
+      "/** Build a URL from a route pattern and its params. */",
+      "export function url(",
+      "  path: RoutePath,",
+      "  params: RouteParams[keyof RouteParams] = {} as never,",
+      "): string {",
+      "  let out = path as string;",
+      "  for (const [k, v] of Object.entries(params as Record<string, string | number>)) {",
+      "    out = out.replace(new RegExp('[:*]+' + k, 'g'), String(v));",
+      "  }",
+      "  return out;",
+      "}",
+    ].join("\n") + "\n";
+    await fs.promises.writeFile(path.join(outDirTs, "routes.ts"), srcLines);
+  } catch { /* types are a convenience: never fail the build over them */ }
+
   await fs.promises.writeFile(path.join(buildDir, 'server-entry.js'), serverEntry);
   await esbuild.build({
     entryPoints: [path.join(buildDir, 'server-entry.js')],
@@ -3186,6 +3564,25 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
     format: 'esm',
     platform: 'node',
     write: true,
+    ...TS_LOADER,
+  });
+
+  await esbuild.build({
+    entryPoints: [(() => {
+      const here = path.dirname(fileURLToPath(import.meta.url));
+      for (const cand of [path.join(here, '..', 'cli', 'prod-server.ts'), path.join(here, '..', 'src', 'cli', 'prod-server.ts')]) {
+        if (fs.existsSync(cand)) return cand;
+      }
+      return path.join(here, '..', 'cli', 'prod-server.ts');
+    })()],
+    bundle: true,
+    outfile: path.join(outDir, 'prod.mjs'),
+    format: 'esm',
+    platform: 'node',
+    write: true,
+    banner: {
+      js: "import { createRequire } from 'node:module'; import { fileURLToPath as __f2p } from 'node:url'; import { dirname as __dn } from 'node:path'; const require = createRequire(import.meta.url); const __filename = __f2p(import.meta.url); const __dirname = __dn(__filename);"
+    },
     ...TS_LOADER,
   });
 
@@ -3530,6 +3927,7 @@ ${langDirBlock}
           if (err && err.__rosefn === 'redirect') { signal = err.path; return; }
           
           
+          console.error('Rosefn: client render failed for', pathname, err instanceof Error ? err.message : err);
           broken = true;
           return;
         }
@@ -3539,6 +3937,8 @@ ${langDirBlock}
         flushMounts();
       });
       if (signal === 'notFound') {
+        // T17: a client-side render of a $data route without a prefetch entry has no data source (the server fills the context bag) - the correct.
+        if (!initial) { try { location.assign(pathname); return; } catch {  } }
         await paintFallback(container, notFoundFor(pathname), '<h1>404</h1><p>Page not found</p>');
         return;
       }
@@ -3625,6 +4025,7 @@ setRefreshHook(async () => {
       format: 'esm',
       platform: 'browser',
       minify: true,
+
       write: true,
       ...TS_LOADER,
     });
