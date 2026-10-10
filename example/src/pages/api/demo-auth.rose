@@ -1,0 +1,26 @@
+<script>
+  const SECRET = "demo-secret-key";
+  export async function POST(request) {
+    const { action, password, token } = await request.json();
+    try {
+    const auth = globalThis.__rosefnAuth;
+    if (action === "hash") {
+      return new Response(JSON.stringify({ hash: auth.hashPassword(password) }), { headers: { "content-type": "application/json" } });
+    }
+    if (action === "verify") {
+      const { hash } = await fetch("http://x").ok ? {} : {};
+      return new Response(JSON.stringify({}), {});
+    }
+    if (action === "session") {
+      const token = auth.signSession({ user: "demo", role: "admin" }, SECRET, 3600);
+      const back = auth.verifySession(token, SECRET);
+      return new Response(JSON.stringify({ token, back, roundtrip: back?.user === "demo" }), { headers: { "content-type": "application/json" } });
+    }
+    if (action === "csrf") {
+      const t = auth.csrfToken(SECRET, "session-123");
+      return new Response(JSON.stringify({ valid: auth.verifyCsrf(t, SECRET, "session-123"), wrong: auth.verifyCsrf(t, SECRET, "other") }), { headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify({ error: "unknown action" }), { status: 400 });
+    } catch (e) { return new Response(JSON.stringify({ serverError: String(e) }), { status: 500, headers: { "content-type": "application/json" } }); }
+  }
+</script>

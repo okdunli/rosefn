@@ -1,0 +1,14 @@
+<script>
+  export async function POST(request) {
+    const body = await request.json();
+    const result = globalThis.__rosefnExtras.v.validate(body, {
+      email: ["required", "email"],
+      age: ["required", "number", "min:1", "max:120"],
+      name: ["trim", "min:2"],
+    });
+    return new Response(JSON.stringify(result), {
+      status: result.ok ? 200 : 422,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
+  }
+</script>

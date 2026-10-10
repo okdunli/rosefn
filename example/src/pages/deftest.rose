@@ -1,0 +1,13 @@
+<script>
+  export const bundle = 'split';
+</script>
+
+<head><title>Deftest</title></head>
+
+<div>
+  <p>骨架之后的内容</p>
+  {#defer hold=400}
+  <p>延迟渲染：大块内容</p>
+  {/defer}
+  <p>页面尾部</p>
+</div>
