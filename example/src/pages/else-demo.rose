@@ -1,0 +1,22 @@
+<script>
+  let mode = $state('list');
+  let count = $state(3);
+</script>
+
+<div class="else-demo">
+  <h1>Branch demo</h1>
+  {#if mode === 'list'}
+  <ul>
+    <li>alpha</li>
+    <li>beta</li>
+  </ul>
+  {:else if mode === 'grid'}
+  <p class="grid-view">grid view</p>
+  {:else}
+  <p class="no-view">nothing selected</p>
+  {/if}
+  <p>count guard: {#if count > 2}plenty{:else}few{/if}</p>
+  <button on:click={() => $setState('mode', 'grid')}>grid</button>
+  <button on:click={() => $setState('mode', 'none')}>none</button>
+  <button on:click={() => $setState('count', 1)}>fewer</button>
+</div>

@@ -1,17 +1,4 @@
-/**
- * The canonical .rose authoring contract, printed by `rosefn prompt`.
- *
- * Why a command and not a doc page: the audience is as often an AI agent as
- * a human, and the agent needs the contract at the moment it writes code,
- * not a URL to go read. One command, stdout, no network - the same shape as
- * every other tool an agent already shells out to.
- *
- * The content is the compiler's actual rules, in the order a page meets
- * them: file layout, the script block, the template, head and styles,
- * events and actions, the exports, the npm boundary, and the error
- * contract. Anything the compiler REFUSES is listed as a rule here, so a
- * correct page compiles on the first try.
- */
+// The canonical .rose authoring contract, printed by `rosefn prompt`.
 export const AI_PROMPT = `# Rosefn authoring contract (printed by \`rosefn prompt\`)
 
 Rosefn is a zero-hydration web framework: a .rose file compiles to a server
@@ -65,8 +52,26 @@ Rules the compiler enforces (breaking one fails the build):
   the value down as a prop.
 - Template interpolation {expr} is HTML-escaped. {@html expr} is the explicit
   trusted-HTML escape hatch - use it only for content you control.
-- Blocks: {#if cond}...{/if}, {#each items as item}...{/each},
-  {#boundary}...{/boundary}. There is NO {:else} - nest a second {#if}.
+- Blocks: {#if cond}...{:else if cond2}...{:else}...{/if},
+  {#each items as item, i}...{:else}...{/each} (i is the zero-based index, the
+  {:else} renders when the list is empty), {#key expr}...{/key} (re-creates the
+  body whenever expr changes), {#boundary}...{/boundary},
+  {#island name="x"}...{/island} (partial hydration) and {#defer}...{/defer}
+  (progressive render; hold=N keeps the skeleton up at least N ms).
+  {:else} / {:else if} must sit inside an {#if} block.
+- Two-way binding: <input bind:value={q}> / <input type="checkbox"
+  bind:checked={on}> / <select bind:value={s}>. Numeric inputs coerce through
+  valueAsNumber. Radio groups: <input type="radio" value="free"
+  bind:group={plan}> - the group state holds the selected value and every
+  radio's checked state follows it.
+- Conditional attributes: class:NAME={expr} and style:PROP={expr} merge with
+  the tag's static class/style into one reactive attribute.
+- Boolean attributes (checked/disabled/...) are presence-correct: a false
+  expression omits the attribute entirely.
+- use:NAME attaches a registered element action: directives.NAME = (el, param)
+  => { ...; return { update: (p) => ..., destroy: () => ... } } (or return a
+  cleanup function). A reactive param: use:tooltip={text} - the action's
+  update half re-runs when text changes; the param arrives JSON-parsed.
 - A <slot> with attributes is a named slot and must declare its name:
   <slot name="row" item={post} />. A named slot must be a DIRECT child of the
   component tag - never inside another element or an {#if}/{#each} block.
@@ -83,6 +88,8 @@ Rules the compiler enforces (breaking one fails the build):
 
 - on:click={handler} wires a client event. The handler is a named function from
   the script or an inline arrow: on:click={() => $setState('n', n() + 1)}.
+  Modifiers ride the event: on:submit|preventDefault={save} (supported:
+  |preventDefault, |stopPropagation).
 - A server action is an exported async function. Call it from a native form
   (method="POST", no JS needed - progressive enhancement) or from any event
   (on:click={like} - one POST, in-place adopt). Its return value is an

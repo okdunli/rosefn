@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createEdgeHandler } from './edge.ts';
 
@@ -291,6 +292,13 @@ http.createServer(async (req, res) => {
     const accept = String(req.headers['accept-encoding'] ?? '');
     if (response.body && htmlDoc && (accept.includes('br') || accept.includes('gzip'))) {
       const raw = Buffer.from(await response.arrayBuffer());
+      const etag = 'W/"' + createHash('sha1').update(raw).digest('base64url').slice(0, 24) + '"';
+      if (req.method === 'GET' && req.headers['if-none-match'] === etag) {
+        res.statusCode = 304;
+        res.end();
+        return;
+      }
+      res.setHeader('ETag', etag);
       res.setHeader('Content-Length', String(raw.length));
       if (accept.includes('br')) {
         res.setHeader('Content-Encoding', 'br');
