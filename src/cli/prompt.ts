@@ -54,7 +54,9 @@ Rules the compiler enforces (breaking one fails the build):
   synchronously inside its parent. Fetch in the page or the middleware and pass
   the value down as a prop.
 - Template interpolation {expr} is HTML-escaped. {@html expr} is the explicit
-  trusted-HTML escape hatch - use it only for content you control. {@const name
+  trusted-HTML escape hatch - use it only for content you control.
+  {@debug a, b} logs those values (as they are AT that point in the render);
+  bare {@debug} also breaks into the debugger. Neither emits HTML. {@const name
   = expr} is a template-level binding: it evaluates once and is visible to every
   expression that follows in the same scope (use it to name a computed value
   inside {#each} without re-evaluating, or to shorten a long expression).
@@ -66,9 +68,13 @@ Rules the compiler enforces (breaking one fails the build):
   {#key expr}...{/key} (re-creates the
   body whenever expr changes), {#boundary}...{:fallback}...{/boundary} (the
   fallback renders on a throw; {$boundaryError()?.message} reads the caught
-  error), {#island name="x"}...{/island} (partial hydration) and
+  error),   {#island name="x"}...{/island} (partial hydration) and
   {#defer}...{/defer} (progressive render; hold=N keeps the skeleton up at
-  least N ms). {:else} / {:else if} must sit inside an {#if} block.
+  least N ms), and {#await promise}...{:then value}...{:catch error}...{/await}
+  (the server renders the pending branch, the client flips to the resolved
+  value once the promise settles, or to the caught error if it rejects; the
+  {:then} / {:catch} names are in scope only inside their branch, and {:catch}
+  is optional). {:else} / {:else if} must sit inside an {#if} block.
 - Two-way binding: <input bind:value={q}> / <input type="checkbox"
   bind:checked={on}> / <select bind:value={s}>. Numeric inputs coerce through
   valueAsNumber. Radio groups: <input type="radio" value="free"
@@ -86,7 +92,10 @@ Rules the compiler enforces (breaking one fails the build):
   update half re-runs when text changes; the param arrives JSON-parsed.
 - A <slot> with attributes is a named slot and must declare its name:
   <slot name="row" item={post} />. A named slot must be a DIRECT child of the
-  component tag - never inside another element or an {#if}/{#each} block.
+  component tag, OR wrapped by a single {#if}/{#each}/{#boundary} block (F21:
+  the block is reconstructed around the slot and the lifted content reads the
+  parent scope, so a gated slot still projects). A named slot inside a plain
+  wrapper element (a <div>, not a block) is still a build error.
 - Every component tag needs its matching close tag (or self-closes with />).
 - In <head>: <title>, <meta>, <link>, <style>, <script>, <noscript> all pass
   through. A <style> inside <head> is document CSS; a <style> in the body is
