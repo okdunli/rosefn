@@ -1364,6 +1364,21 @@ export function extractExports(script: string): { clean: string; exports: string
   return { clean: out, exports: stmts.join('\n'), actions, props, guard: guards.join('\n') };
 }
 
+const REGEX_PRECEDERS = new Set('(,=:[!&|?{};+-*%<>~^'.split(''));
+function isRegexStart(src: string, i: number): boolean {
+  let j = i - 1;
+  while (j >= 0 && /\s/.test(src[j])) j--;
+  if (j < 0) return true;
+  const p = src[j];
+  if (REGEX_PRECEDERS.has(p)) return true;
+  if (/[A-Za-z0-9_$]/.test(p)) {
+    const w = /([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(src.slice(0, j + 1));
+    if (!w) return false;
+    return ['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else'].includes(w[1]);
+  }
+  return false;
+}
+
 function extractDecls(script: string): Decl[] {
   const decls: Decl[] = [];
   DECL_RE.lastIndex = 0;
@@ -1450,6 +1465,21 @@ function braceDepthAt(src: string, index: number): number {
     if (ch === '/' && src[i + 1] === '*') {
       const close = src.indexOf('*/', i + 2);
       i = close === -1 ? src.length : close + 2;
+      continue;
+    }
+    if (ch === '/' && isRegexStart(src, i)) {
+      i++;
+      let inClass = false;
+      while (i < index) {
+        const c2 = src[i];
+        if (c2 === '\\') { i += 2; continue; }
+        if (inClass) { if (c2 === ']') inClass = false; i++; continue; }
+        if (c2 === '[') { inClass = true; i++; continue; }
+        if (c2 === '/') { i++; break; }
+        if (c2 === '\n') break;
+        i++;
+      }
+      while (i < index && /[a-z]/.test(src[i])) i++;
       continue;
     }
     if (ch === '{') depth++;
