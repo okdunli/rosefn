@@ -275,6 +275,13 @@ const HEAD_ATTR = 'data-rosefn-head';
 export const handlers: Record<string, (e: Event) => void> =
   (globalThis as { __rosefn_handlers?: Record<string, (e: Event) => void> }).__rosefn_handlers ??= {};
 
+let actionDispatch: ((name: string, e: Event) => void) | null = null;
+export function setActionDispatcher(fn: (name: string, e: Event) => void): void {
+  actionDispatch = fn;
+}
+
+const directBound = new WeakMap<Element, Set<string>>();
+
 /**
  * F5: `use:NAME` element actions - the plugin point for DOM behaviors
  * (tooltips, dropdowns, canvas glue) that themes and plugins register once
@@ -621,6 +628,39 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
     setState(key, el);
     created.push(() => setState(key, null));
   });
+
+  const DELEGATED_SET = new Set(['click', 'input', 'change', 'submit']);
+  const evRoot = holder as Element;
+  const evTargets = [evRoot, ...Array.from(evRoot.querySelectorAll('*'))];
+  for (const el of evTargets) {
+    if (!el.getAttributeNames) continue;
+    if (islandSkip && el.closest && el.closest('[data-rv-island]')) continue;
+    for (const an of el.getAttributeNames()) {
+      if (!an.startsWith('data-on-')) continue;
+      const ev = an.slice('data-on-'.length);
+      if (DELEGATED_SET.has(ev)) continue;
+      let seen = directBound.get(el);
+      if (!seen) directBound.set(el, (seen = new Set()));
+      if (seen.has(ev)) continue;
+      seen.add(ev);
+      const spec = el.getAttribute(an)!;
+      const listener = (e: Event) => {
+        if (!el.hasAttribute(an)) return;
+        if (spec.startsWith('$action:')) {
+          if (actionDispatch) actionDispatch(spec.slice('$action:'.length), e);
+          return;
+        }
+        const h = handlers[spec];
+        if (h) h(e);
+      };
+      el.addEventListener(ev, listener);
+      created.push(() => {
+        el.removeEventListener(ev, listener);
+        const s = directBound.get(el);
+        if (s) s.delete(ev);
+      });
+    }
+  }
 
   if (holder !== root) {
     while (holder.firstChild) root.appendChild(holder.firstChild);

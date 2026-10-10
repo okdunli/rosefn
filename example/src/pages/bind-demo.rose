@@ -3,7 +3,11 @@
   let subscribed = $state(false);
   let plan = $state('free');
   let colors = $state([]);
+  let lastKey = $state('');
   function clear() { $setState('name', ''); }
+  // F17: keydown is NOT one of the delegated four (click/input/change/submit),
+  // so this handler only runs because wire() binds it directly on the input.
+  function noteKey(e) { $setState('lastKey', e.key || ''); }
 </script>
 
 <div class="bind-demo">
@@ -32,4 +36,6 @@
     <option value="pro">Pro plan</option>
   </select>
   <button on:click={clear}>Clear</button>
+  <input class="key-probe" on:keydown={noteKey} placeholder="press a key">
+  <p>Last key: {lastKey() || 'none'}</p>
 </div>

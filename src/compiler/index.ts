@@ -4298,7 +4298,7 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
 
   const clientEntry = `
 ${clientImports}
-import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState, setFxOwner, resetContainerFx, esc } from './runtime.js';
+import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setActionDispatcher, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState, setFxOwner, resetContainerFx, esc } from './runtime.js';
 
 // I18n: the dictionaries baked at build time - the client renders any PRELOADED locale from the bundle.
 setLocales(${clientLocalesJson}, '${defaultLocale}');
@@ -4519,6 +4519,8 @@ export async function $action(name, e) {
   const box = e && e.target && e.target.closest ? e.target.closest('[data-rosefn]') : null;
   return postForm(body, box || undefined, box ? box.getAttribute('data-rosefn') : undefined);
 }
+// F17: hand the dispatcher to the runtime, so wire() can serve a server action bound to a non-delegated event (on:keydown="$action:save") the same way.
+setActionDispatcher($action);
 
 export { postForm };
 

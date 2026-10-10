@@ -98,8 +98,12 @@ Rules the compiler enforces (breaking one fails the build):
 
 ## Events and server actions
 
-- on:click={handler} wires a client event. The handler is a named function from
-  the script or an inline arrow: on:click={() => $setState('n', n() + 1)}.
+- on:EVENT={handler} wires a client event - ANY event, not just click. The
+  handler is a named function from the script or an inline arrow:
+  on:click={() => $setState('n', n() + 1)}, on:keydown={noteKey}.
+  click/input/change/submit ride one delegated listener per event type; every
+  other event (keydown, focus, scroll, mouseenter, ...) is bound directly on
+  the element by wire(), so no handler is ever silently dead.
   Modifiers ride the event: on:submit|preventDefault={save} (supported:
   |preventDefault, |stopPropagation, |self - only when the event target IS the
   bound element, |once - unbind after the first run). capture/passive are NOT
