@@ -5,10 +5,12 @@ import { join } from 'path';
 import { buildShell, shellOpen, clientScriptTag, securityHeaders, mintNonce } from './shell.js';
 
 type ServerModule = {
-  renderPage(pathname: string, form?: FormData): Promise<{ html: string; state: string; head: string[]; status?: number; csr?: boolean; lang?: string; dir?: string }>;
+  renderPage(pathname: string, form?: FormData): Promise<{ html: string; state: string; head: string[]; status?: number; csr?: boolean; shell?: boolean; lang?: string; dir?: string }>;
   renderPageStream(pathname: string, write: (chunk: string) => void, shellOpen: string, clientTag: string): Promise<number>;
   canStream(pathname: string): boolean;
   isNoJs(pathname: string): boolean;
+  /** the matched route exported `shell = false` - the streaming shell must ask before it flushes */
+  shellOff?(pathname: string): boolean;
   /** P0-2: routes that exported `buffer = true` - buffered, never streamed */
   isBuffered(pathname: string): boolean;
   isApi(pathname: string): boolean;
@@ -155,7 +157,7 @@ export async function createEdgeHandler(
           await mod.renderPageStream(
             pathname,
             (chunk) => controller.enqueue(encoder.encode(chunk)),
-            shellOpen(styles, doc.lang, doc.dir),
+            shellOpen(styles, doc.lang, doc.dir, !mod.shellOff?.(pathname)),
             clientScriptTag(client, nonce)
           );
           controller.close();
@@ -165,7 +167,7 @@ export async function createEdgeHandler(
     }
     const page = await mod.renderPage(pathname, form);
     const nonce = mod.cspNonce?.(pathname) ? mintNonce() : '';
-    const html = buildShell(page.html, page.state, client, page.head, styles, page.csr !== false, page.lang, page.dir, nonce);
+    const html = buildShell(page.html, page.state, client, page.head, styles, page.csr !== false, page.lang, page.dir, nonce, page.shell !== false);
     const buffered = new Response(html, {
       status: page.status ?? 200,
       headers: { 'content-type': 'text/html; charset=utf-8', ...pageHeaders(pathname, nonce) }

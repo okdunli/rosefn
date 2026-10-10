@@ -1,37 +1,4 @@
-/**
- * rosefn/test - the public testing surface.
- *
- * The framework's own suites proved the pipeline; this module lets a PROJECT
- * prove its own. Two halves, one entry point:
- *
- *   const c = await test('src/components/Counter.rose', { props: { start: 5 } });
- *   const r = await c.get();                 // the server half: rendered HTML + state
- *   r.html.includes('5');
- *   const after = await c.post({ name: 'Ada' });   // a server action / form POST
- *
- *   const dom = new JSDOM('<!DOCTYPE html><html><body><div id="app"></div></body></html>');
- *   const p = await test('src/pages/sign.rose', { dom }).then((a) => a.mount());
- *   await p.click('button');                 // a real event -> fine-grained patch
- *   p.text('p');
- *   p.requestCount();                        // the zero-request story, asserted
- *
- * The design rule: NO second implementation of anything. The
- * harness compiles a throwaway project with the SAME compiler the app uses,
- * then drives the SAME server bundle and client bundle the app ships. There
- * is nothing here that can pass while the real app fails, because there is
- * nothing here that is not the real app.
- *
- * A `.rose` component is not independently renderable in rosefn's
- * architecture - it compiles INTO the app's bundles - so a component test
- * builds the project it lives in with one synthesized page that renders it
- * with the given props. That page is the only thing added; every other route
- * of the app still exists, so navigation and api routes are testable too.
- *
- * Vitest/jest compatible: every entry point is an async function returning
- * plain data. No test-runner dependency, no globals beyond the DOM ones a
- * browser has (and those are grafted from the window `mount()` runs in, so
- * jsdom, happy-dom and vitest's jsdom environment all work unchanged).
- */
+
 
 import * as fs from 'fs';
 import * as os from 'os';
@@ -55,6 +22,8 @@ export interface TestResult {
   state: Record<string, unknown>;
   head: string[];
   csr?: boolean;
+  /** the route exported `shell = false`: the document keeps the bundle but drops the #app wrapper + STYLES_MIN */
+  shell?: boolean;
   lang: string;
   dir: string;
   /** the complete document, byte-identical to what the servers send */
@@ -99,12 +68,7 @@ export interface TestOptions {
   dir?: string;
   /** keep the built dir and print its path, for inspecting the artifacts */
   keep?: boolean;
-  /**
-   * A DOM for `mount()`: a jsdom `new JSDOM()` instance or its `.window`
-   * (happy-dom's Window works too - anything with `.window`). Omit it under
-   * a jsdom test environment (vitest's `environment: 'jsdom'`), where the
-   * globals are already there.
-   */
+  
   dom?: unknown;
 }
 
@@ -123,9 +87,6 @@ export interface TestApp {
   mount(req?: TestRequest): Promise<TestHandle>;
 }
 
-// The globals a browser has and a Node test process does not. `mount()`
-// grafts them from the document it parses, exactly like the repo's own
-// client suite does - the bundle runs in Node's realm, so it reads THESE.
 const GRAFTED = ['document', 'Node', 'NodeFilter', 'FormData', 'DOMParser', 'location', 'fetch', 'Event', 'CustomEvent', 'MutationObserver', 'requestAnimationFrame'] as const;
 
 /** Absolute path of the project root that owns `file` (the dir holding src/pages). */
@@ -184,11 +145,6 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
   const rel = path.relative(root, target).replace(/\\/g, '/');
   const isComponent = rel.startsWith('src/components/');
 
-  // The fixture project: the app's own sources (so every route, component,
-  // config and public asset resolves exactly as it does for the app) plus,
-  // for a component target, one page that renders it with the given props.
-  // Copying is deliberate: a component is compiled INTO an app, so the
-  // honest way to render one is to build the app it lives in.
   const dir = opts.dir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'rosefn-test-'));
   for (const item of ['src', 'public']) {
     const from = path.join(root, item);
@@ -213,9 +169,6 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
   const outDir = path.join(dir, 'dist');
   await buildProject(dir, outDir);
 
-  // The two bundles the app ships - the same ones the servers run. Imported
-  // once per test() call: the server module holds module state (stores,
-  // actions' effects) across requests, exactly like a running server.
   const serverUrl = pathToFileURL(path.join(outDir, 'server.js')).href;
   const clientUrl = pathToFileURL(path.join(outDir, 'client.js')).href;
   const mod = await import(serverUrl);
@@ -227,9 +180,6 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
 
   if (opts.keep) console.log(`rosefn/test: built ${target} -> ${outDir}`);
   if (!opts.dir && !opts.keep) {
-    // a temp fixture is not the developer's to clean up by hand. On exit,
-    // not now: the locale packs and chunks below are read from disk while
-    // the mounted half runs, and Windows keeps a handle on imported files.
     process.once('exit', () => {
       try {
         fs.rmSync(dir, { recursive: true, force: true });
@@ -244,9 +194,10 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
     state: page.state ? JSON.parse(page.state) : {},
     head: page.head ?? [],
     csr: page.csr,
+    shell: page.shell,
     lang: page.lang ?? 'en',
     dir: page.dir ?? '',
-    document: buildShell(page.html, page.state, clientSource, page.head ?? [], styles, page.csr !== false, page.lang ?? 'en', page.dir ?? ''),
+    document: buildShell(page.html, page.state, clientSource, page.head ?? [], styles, page.csr !== false, page.lang ?? 'en', page.dir ?? '', '', page.shell !== false),
     redirect,
   });
 
@@ -254,15 +205,10 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
   const toRequest = (pathname: string, req: TestRequest = {}, body?: FormData) => {
     const headers = new Headers(req.headers ?? {});
     for (const [k, v] of Object.entries(req.cookies ?? {})) headers.append('cookie', `${k}=${v}`);
-    return new Request(`http://localhost${pathname}`, { method: body ? 'POST' : 'GET', headers, body });
+    return new Request(`http://localhost${pathname}`, { method: req.method ?? 'GET', headers, body: body ?? undefined });
   };
 
-  /**
-   * One request through the real server pipeline: middleware first (it can
-   * short-circuit - a redirect, an auth wall), then the render. This is the
-   * order the servers use, so a middleware's effect is visible here or it is
-   * not visible at all.
-   */
+  // One request through the real server pipeline: middleware first (it can short-circuit - a redirect, an auth wall), then the render.
   const request = async (pathname: string, req: TestRequest, body?: FormData): Promise<TestResult> => {
     if (mod.middleware) {
       const mw = await mod.runMiddleware(toRequest(pathname, req, body), body);
@@ -272,18 +218,10 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
     return result(page);
   };
 
-  // The client half's request counter and fetch proxy: the bundle POSTs to
-  // location.pathname like a browser, and the answer is the same document
-  // the Node server would send - so an action's adopt is tested against the
-  // real render, not a mock.
   let requests = 0;
   let currentRoute = route;
 
   const mount = async (req: TestRequest = {}): Promise<TestHandle> => {
-    // The window the bundle will live in: the caller's DOM, or the ambient
-    // one under a jsdom test environment. Everything below is grafted from
-    // it, because the bundle runs in Node's realm and reads THESE globals -
-    // the same arrangement the repo's own client suite uses.
     const win = ((opts.dom as any)?.window ?? opts.dom ?? globalThis) as any;
     if (!win?.document || !win?.DOMParser) {
       throw new Error('rosefn/test: mount() needs a DOM. Pass one - test("src/components/Counter.rose", { dom: new JSDOM() }) - or run under a jsdom environment.');
@@ -292,9 +230,6 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
 
     const doc = win.document;
     const app = doc.getElementById('app') ?? doc.body;
-    // reuse the state element across mounts of the same document: a second
-    // one would lose getElementById's first-match race and the client would
-    // resume the FIRST mount's state
     let stateEl = doc.getElementById('__rosefn_state');
     if (!stateEl) {
       stateEl = doc.createElement('script');
@@ -312,8 +247,6 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
     (globalThis as any).location = { pathname: currentRoute, href: `http://localhost${currentRoute}` };
     (globalThis as any).fetch = async (url: string | URL, init: any) => {
       const pathname = String(url).startsWith('http') ? new URL(String(url)).pathname : String(url);
-      // an i18n route's runtime language pack: the same request the browser
-      // makes, served from the file this build wrote
       if (pathname.startsWith('/locales/') && pathname.endsWith('.json')) {
         const file = path.join(outDir, pathname.slice(1));
         if (!fs.existsSync(file)) return { ok: false, json: async () => ({}) };
@@ -370,8 +303,6 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
       },
       requestCount: () => requests,
     };
-    // The graft is intentional and documented: a second mount() re-grafts
-    // over the first. `restore` puts the process back the way it was.
     (handle as any).restore = () => { for (const [k, v] of saved) (globalThis as any)[k] = v; };
     return handle;
   };
@@ -387,8 +318,6 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
       return request(pathname, req, body);
     },
     api: async (method: string, pathname: string, req: TestRequest = {}) => {
-      // the middleware runs first here too - the servers do, and an api
-      // route's auth usually lives in it
       if (mod.middleware) {
         const mw = await mod.runMiddleware(toRequest(pathname, req));
         if (mw) return { status: mw.status, body: await mw.text(), headers: { location: mw.headers.get('location') ?? '' } };
@@ -398,7 +327,7 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
       let body: unknown = text;
       try {
         body = JSON.parse(text);
-      } catch { /* not JSON: hand back the raw text */ }
+      } catch {  }
       const headers: Record<string, string> = {};
       res.headers.forEach((v: string, k: string) => { headers[k] = v; });
       return { status: res.status, body, headers };

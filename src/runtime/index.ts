@@ -118,12 +118,12 @@ type Close = (s?: unknown) => unknown;
 
 export function textMark(closes: Close[], fn: Close, pair?: boolean, arg?: unknown): string {
   const i = closes.push(fn) - 1;
-  return `<!--\u27e6m:${i}\u27e7-->` + esc(closes[i](arg)) + (pair ? `<!--\u27e6/m:${i}\u27e7-->` : '');
+  return `<!--\u27e6m:${i}\u27e7-->` + esc(fn(arg)) + (pair ? `<!--\u27e6/m:${i}\u27e7-->` : '');
 }
 
 export function attrMark(closes: Close[], fn: Close, name: string, arg?: unknown): string {
   const i = closes.push(fn) - 1;
-  return `${name}="${esc(closes[i](arg))}" data-b="${i}:${name}"`;
+  return `${name}="${esc(fn(arg))}" data-b="${i}:${name}"`;
 }
 
 export function ifMark(
@@ -132,29 +132,25 @@ export function ifMark(
   fn: (s: unknown, c: Close[]) => unknown,
   scope?: unknown
 ): string {
-  const i = closes.length;
   let snap: { html: string; closes: Close[] } | null = null;
-  closes.push(() => {
+  const i = closes.push(() => {
     if (!cond()) {
       snap = null;
       return null;
     }
     if (!snap) {
-      const c: Close[] = [];
-      snap = { html: String(fn(scope, c)), closes: c };
+      snap = { html: String(fn(scope, closes)), closes };
     }
     return snap;
-  });
+  }) - 1;
   const r = closes[i]() as { html: string } | null;
   return `<!--\u27e6i:${i}\u27e7-->` + (r ? r.html : '') + `<!--\u27e6/i:${i}\u27e7-->`;
 }
 
 export function eachMark(closes: Close[], items: Close, fn: (s: unknown, c: Close[]) => unknown): string {
-  const i = closes.length;
-  closes.push(() => (items() as unknown[]).map((v) => {
-    const c: Close[] = [];
-    return { html: String(fn(v, c)), closes: c, scope: v };
-  }));
+  const i = closes.push(() => (items() as unknown[]).map((v) => {
+    return { html: String(fn(v, closes)), closes, scope: v };
+  })) - 1;
   let h = `<!--\u27e6l:${i}\u27e7-->`;
   for (const r of closes[i]() as Array<{ html: string }>) h += r.html;
   return h + `<!--\u27e6/l:${i}\u27e7-->`;
@@ -176,15 +172,38 @@ export function headMark(closes: Close[], fn: Close): string {
  * changes. Reusing that machinery costs this function and nothing else: no
  * new marker kind, no new wire branch, no bytes in a document that never
  * uses it. The close returns the same {html, closes} shape an {#if} block
- * does, with an EMPTY closes array - trusted HTML is opaque markup, the
- * compiler never scans inside it, so there are no inner markers to wire.
- * `arg` is the enclosing block's scope value, exactly as textMark takes it:
- * a `{@html row.body}` inside an {#each} resolves against the row.
+ * does, with the RENDER's array - trusted html is usually opaque markup
+ * with no markers inside, but when a loader's value was itself rendered
+ * inside this same pass (a theme skin built from another composable) the
+ * markers it carries belong to this array, and a nested wire() pass must be
+ * able to resolve them. `arg` is the enclosing block's scope value, exactly
+ * as textMark takes it: a `{@html row.body}` inside an {#each} resolves
+ * against the row.
  */
 export function rawMark(closes: Close[], fn: Close, arg?: unknown): string {
-  const i = closes.push((s?: unknown) => ({ html: String((fn as (a?: unknown) => unknown)(s) ?? ''), closes: [] })) - 1;
+  const i = closes.push((s?: unknown) => ({ html: String((fn as (a?: unknown) => unknown)(s) ?? ''), closes })) - 1;
   const r = closes[i](arg) as { html: string };
   return `<!--\u27e6i:${i}\u27e7-->` + r.html + `<!--\u27e6/i:${i}\u27e7-->`;
+}
+
+/**
+ * A named slot's block. The child rendered its slot content into the
+ * render's shared array scoped to the slot object; the block wraps it in
+ * markers from the SAME index space, so the ids stay unique across the whole
+ * composition (a plain <slot/> inlines the children html directly and needs
+ * none of this). Lives here rather than in the compiler's emitted helper
+ * string so the array is the one the rest of the render uses.
+ */
+export function slotBlockMark(
+  closes: Close[],
+  hit: { o: Record<string, unknown>; fn: (o: unknown, c: Close[]) => unknown } | null
+): string {
+  if (!hit) return '';
+  const i = closes.push(() => {
+    if (!hit) return null;
+    return { html: String(hit.fn(hit.o, closes)), closes, scope: hit.o };
+  }) - 1;
+  return `<!--\u27e6i:${i}\u27e7-->` + String(hit.fn(hit.o, closes)) + `<!--\u27e6/i:${i}\u27e7-->`;
 }
 
 const MARK_RE = /^\u27e6([milh]):(\d+)\u27e7$/;
@@ -278,10 +297,11 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
   while (walker.nextNode()) comments.push(walker.currentNode as Comment);
 
   const nested = new Set<Comment>();
+  const headPair = new Set<Comment>();
   const open: number[] = [];
   for (let i = 0; i < comments.length; i++) {
     const m = (comments[i].nodeValue ?? '').match(MARK_RE);
-    if (m && (m[1] === 'i' || m[1] === 'l')) {
+    if (m && (m[1] === 'i' || m[1] === 'l' || m[1] === 'h')) {
       open.push(i);
       continue;
     }
@@ -294,9 +314,15 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
       if (om[1] + om[2] === key) { at = k; break; }
     }
     if (at < 0) continue;
+    const om = (comments[open[at]].nodeValue ?? '').match(MARK_RE)!;
+    if (om[1] === 'h') {
+      headPair.add(comments[open[at]]);
+      headPair.add(comments[i]);
+    }
     for (let k = open[at] + 1; k < i; k++) nested.add(comments[k]);
     open.length = at;
   }
+  for (const c of headPair) nested.delete(c);
 
   const ends = new Map<number, Comment>();
   for (const c of comments) {
@@ -307,13 +333,17 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
 
   const headBlocks: Array<{ idx: number; start: Comment; end: Comment; nodes: ChildNode[] }> = [];
 
+  const ownsHead = root === document.getElementById('app');
+
   for (const c of comments) {
     if (nested.has(c) || wired.has(c) || !c.parentNode) continue;
-    wired.add(c);
     const m = (c.nodeValue ?? '').match(MARK_RE);
     if (!m) continue;
     const kind = m[1];
     const idx = +m[2];
+
+    if (kind === 'h' && !ownsHead) continue;
+    wired.add(c);
 
     if (kind === 'h') {
       const end = ends.get(idx);
