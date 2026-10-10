@@ -2481,8 +2481,8 @@ function compileTemplate(
       result += fbBlock;
       result += `let __bd${id} = '';\n`;
       result += catchesAction
-        ? `try { $actionErrorOrThrow(); __bd${id} = __b${id}(${closes}); } catch (e) { __bd${id} = ${fbBlock ? `__bf${id}(${closes})` : '$boundaryFallback(e)'}; }\n`
-        : `try { __bd${id} = __b${id}(${closes}); } catch { __bd${id} = ${fbBlock ? `__bf${id}(${closes})` : JSON.stringify(BOUNDARY_FALLBACK)}; }\n`;
+        ? `try { $actionErrorOrThrow(); __bd${id} = __b${id}(${closes}); } catch (e) { $setBoundaryError(e); __bd${id} = ${fbBlock ? `__bf${id}(${closes})` : '$boundaryFallback(e)'}; }\n`
+        : `try { __bd${id} = __b${id}(${closes}); } catch (e) { $setBoundaryError(e); __bd${id} = ${fbBlock ? `__bf${id}(${closes})` : JSON.stringify(BOUNDARY_FALLBACK)}; }\n`;
       result += `${acc} += __bd${id};\n`;
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
     } else if (earliest.type === 'comp') {
@@ -2938,7 +2938,7 @@ function compileSlot(acc: string): string {
   return `${acc} += String(children);\n`;
 }
 
-const RUNTIME_IMPORTS = `import { state, setState, persistState, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound } from './runtime.js';`;
+const RUNTIME_IMPORTS = `import { state, setState, persistState, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $setBoundaryError, $boundaryError, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound } from './runtime.js';`;
 
 const API_RUNTIME_HELPERS = RUNTIME_IMPORTS
   .replace(/^import\s*\{/, '')

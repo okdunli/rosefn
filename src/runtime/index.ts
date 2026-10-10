@@ -70,6 +70,16 @@ export function persistState<T>(key: string, initial: T): [() => T, (v: T) => vo
   return [get, set];
 }
 
+let lastBoundaryError: Error | null = null;
+
+export function $setBoundaryError(e: unknown): void {
+  lastBoundaryError = e instanceof Error ? e : new Error(String(e));
+}
+
+export function $boundaryError(): Error | null {
+  return lastBoundaryError;
+}
+
 const cleanups = new Set<Cleanup>();
 
 let fxOwner: object | null = null;

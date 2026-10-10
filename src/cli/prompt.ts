@@ -58,10 +58,11 @@ Rules the compiler enforces (breaking one fails the build):
 - Blocks: {#if cond}...{:else if cond2}...{:else}...{/if},
   {#each items as item, i}...{:else}...{/each} (i is the zero-based index, the
   {:else} renders when the list is empty), {#key expr}...{/key} (re-creates the
-  body whenever expr changes), {#boundary}...{/boundary},
-  {#island name="x"}...{/island} (partial hydration) and {#defer}...{/defer}
-  (progressive render; hold=N keeps the skeleton up at least N ms).
-  {:else} / {:else if} must sit inside an {#if} block.
+  body whenever expr changes), {#boundary}...{:fallback}...{/boundary} (the
+  fallback renders on a throw; {$boundaryError()?.message} reads the caught
+  error), {#island name="x"}...{/island} (partial hydration) and
+  {#defer}...{/defer} (progressive render; hold=N keeps the skeleton up at
+  least N ms). {:else} / {:else if} must sit inside an {#if} block.
 - Two-way binding: <input bind:value={q}> / <input type="checkbox"
   bind:checked={on}> / <select bind:value={s}>. Numeric inputs coerce through
   valueAsNumber. Radio groups: <input type="radio" value="free"
