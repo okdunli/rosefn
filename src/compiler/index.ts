@@ -12,7 +12,7 @@ const COMPONENT_RE = /<script>([\s\S]*?)<\/script>/;
 const TEMPLATE_RE = /<template>([\s\S]*?)<\/template>/;
 const HEAD_RE = /<head>([\s\S]*?)<\/head>/;
 const STYLE_RE = /<style>([\s\S]*?)<\/style>/;
-const DECL_RE = /(?:let|const|var)\s+(\w+)[^=]*=\s*\$(state|data|kv)\b/g;
+const DECL_RE = /(?:let|const|var)\s+(\w+)[^=]*=\s*\$(state|data|kv|persist)\b/g;
 const DECL_CAST_RE = /^\s+as\s+[^;\n]+/;
 const SETSTATE_RE = /\$setState\(([^,]+),\s*([^)]+)\)/g;
 const EVENT_RE = /on:(\w+)=\{([^}]+)\}/g;
@@ -149,7 +149,7 @@ export interface RouteInfo {
 
 interface Decl {
   name: string;
-  kind: 'state' | 'data' | 'kv';
+  kind: 'state' | 'data' | 'kv' | 'persist';
   expr: string;
   start: number;
   end: number;
@@ -1087,7 +1087,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
     : inlineImages(rawTemplate, publicDir);
 
   const decls = extractDecls(script);
-  const stateDecls = decls.filter((d) => d.kind === 'state' || d.kind === 'kv');
+  const stateDecls = decls.filter((d) => d.kind === 'state' || d.kind === 'kv' || d.kind === 'persist');
 
   const setterNames = new Map<string, string>();
   stateDecls.forEach((s) => setterNames.set(s.name, `set${capitalize(s.name)}`));
@@ -1099,6 +1099,9 @@ export async function compileComponent(filePath: string, publicDir: string, scop
     }
     const isFn = d.expr.includes('=>') || d.expr.startsWith('function');
     const fn = isFn ? d.expr : `() => (${d.expr})`;
+    if (d.kind === 'persist') {
+      return `const [${d.name}, ${setterNames.get(d.name)!}] = persistState(${JSON.stringify(key)}, ${d.expr});`;
+    }
     if (d.kind === 'kv') {
       const mTtl = /^(.*)\s*,\s*(\d+)\s*$/s.exec(d.expr);
       const fnExpr = mTtl ? mTtl[1] : d.expr;
@@ -1250,8 +1253,9 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   const keyExpanded = expandKeyBlocks(styleExpanded, filePath);
   const elseExpanded = expandIfElse(keyExpanded);
   const deferExpanded = expandDeferBlocks(elseExpanded);
-  const ssrTemplate = rewriteQuotedExprAttrs(deferExpanded.template
-    .replace(SLOT_NAMED_RE, (_w, attrs, fallback) => {
+  const fbExpanded = expandBoundaryFallbacks(deferExpanded.template, filePath);
+  const ssrTemplate = rewriteQuotedExprAttrs(fbExpanded
+    .replace(SLOT_NAMED_RE, (_w: unknown, attrs: string, fallback: string) => {
       const call = `{__slot(${encodeSlotCall(attrs)})}`;
       if (fallback) {
         if (/\{[^{}]*\}/.test(fallback)) {
@@ -1265,7 +1269,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
       }
       return call;
     })
-    .replace(SLOT_RE, (_w, fallback) =>
+    .replace(SLOT_RE, (_w: unknown, fallback: string) =>
       fallback && fallback.trim()
         ? `{__slotDefault(${JSON.stringify(fallback)})}`
         : '{__slot__}'), comps);
@@ -1580,7 +1584,7 @@ function extractDecls(script: string): Decl[] {
     if (script[end] === ';') end++;
     decls.push({
       name: m[1],
-      kind: m[2] as 'state' | 'data',
+      kind: m[2] as 'state' | 'data' | 'persist',
       expr: script.slice(open, i - 1).trim(),
       start: m.index,
       end,
@@ -1958,6 +1962,77 @@ function expandStyleDirectives(template: string, filePath: string): string {
   return out;
 }
 
+/**
+ * F11 (boundary {:fallback}): extracts each {#boundary} block's top-level
+ * `{:fallback}` segment and encodes it as a base64 `__fb` attribute on the
+ * boundary opener — base64 so the encoded markup survives every `[^}]*`
+ * attr scan downstream. The dispatch decodes it and compiles the fallback
+ * like any block (reactive exprs supported). Nested boundaries surface one
+ * level per pass; a stray {:fallback} is left for assertKnownDirectives.
+ */
+function expandBoundaryFallbacks(template: string, filePath: string): string {
+  if (!template.includes('{:fallback')) return template;
+  for (let pass = 0; pass < 10; pass++) {
+    const TOK_RE = /\{#boundary\}|\{\/boundary\}|\{:fallback\}/g;
+    let out = '';
+    let pos = 0;
+    let changed = false;
+    let tm: RegExpExecArray | null;
+    while ((tm = TOK_RE.exec(template))) {
+      if (tm[0] !== '{#boundary}') continue;
+      const start = tm.index;
+      const bodyStart = start + tm[0].length;
+      let depth = 1;
+      let closeAt = -1;
+      let tm2: RegExpExecArray | null;
+      while ((tm2 = TOK_RE.exec(template))) {
+        if (tm2[0] === '{#boundary}') { depth++; continue; }
+        if (tm2[0] === '{/boundary}') { depth--; if (depth === 0) { closeAt = tm2.index; break; } }
+      }
+      if (closeAt < 0) break;
+      const body = template.slice(bodyStart, closeAt);
+      const BTOK2 = /\{#(boundary|if|each|key|island)(?:\s+[^}]*)?\}|\{\/(?:boundary|if|each|key|island)\s*\}|\{:fallback\}/g;
+      const kindStack = ['boundary'];
+      let d = 1;
+      let fbAt = -1;
+      let fbLen = 0;
+      let tm3: RegExpExecArray | null;
+      BTOK2.lastIndex = 0;
+      while ((tm3 = BTOK2.exec(body))) {
+        const tok = tm3[0];
+        if (tok === '{:fallback}') {
+          const top = kindStack[kindStack.length - 1];
+          if (top !== 'boundary') {
+            throw new RoseError(
+              'E-TEMPLATE',
+              `${filePath}: {:fallback} must sit directly inside a {#boundary} block`,
+              { hint: 'move it out of the {#if}/{#each} it sits in, or keep the conditional fallback in the parent' },
+            );
+          }
+          if (fbAt >= 0) {
+            throw new RoseError('E-TEMPLATE', `${filePath}: a {#boundary} can carry only one {:fallback}`, { hint: 'remove the extra {:fallback} segment' });
+          }
+          fbAt = tm3.index;
+          fbLen = tok.length;
+          continue;
+        }
+        if (tok.startsWith('{#')) { d++; kindStack.push(tok.slice(2, tok.length - 1).trim().split(/\s/)[0]); continue; }
+        d--; kindStack.pop();
+      }
+      if (fbAt < 0) continue;
+      const custom = body.slice(0, fbAt);
+      const fbMarkup = body.slice(fbAt + fbLen);
+      const b64 = Buffer.from(fbMarkup, 'utf-8').toString('base64');
+      out += template.slice(pos, start) + `{#boundary __fb="${b64}"}` + custom + '{/boundary}';
+      pos = closeAt + '{/boundary}'.length;
+      changed = true;
+    }
+    if (!changed) break;
+    template = out + template.slice(pos);
+  }
+  return template;
+}
+
 function expandIfElse(template: string): string {  for (let pass = 0; pass < 10; pass++) {
     if (!/\{:else\b/.test(template)) return template;
     const r = expandIfElseOnce(template);
@@ -2039,7 +2114,7 @@ function deferBootCode(count: number, holds: number[] = []): string {
 
 function findBlock(src: string, kind: 'if' | 'each' | 'boundary' | 'island'): RegExpExecArray | null {
   const head = kind === 'boundary'
-    ? /\{#boundary\}/g
+    ? /\{#boundary(?:\s+([^}]*))?\}/g
     : kind === 'if'
       ? /\{#if\s+([^}]+)\}/g
       : kind === 'island'
@@ -2066,7 +2141,7 @@ function findBlock(src: string, kind: 'if' | 'each' | 'boundary' | 'island'): Re
       i = nextClose.index + nextClose[0].length;
       if (--depth === 0) {
         const content = src.slice(afterOpen, nextClose.index);
-        const groups = kind === 'boundary' ? [content]
+        const groups = kind === 'boundary' ? [open[1] ?? '', content]
           : kind === 'island' ? [open[1] ?? '', open[2] ?? '', content]
           : kind === 'if' ? [open[1], content] : [open[1], open[2], open[3] ?? '', content];
         const arr = [src.slice(start, i), ...groups] as unknown as RegExpExecArray;
@@ -2184,6 +2259,13 @@ function assertKnownDirectives(template: string, filePath: string): void {
         'E-TEMPLATE',
         `${filePath}: a stray {:else} with no {#if} above it`,
         { file: filePath, line: lineAt(template, m), hint: '{:else} / {:else if cond} belong inside an {#if} ... {/if} block - {#if cond}A{:else}B{/if}' },
+      );
+    }
+    if (word === 'fallback') {
+      throw new RoseError(
+        'E-TEMPLATE',
+        `${filePath}: a stray {:fallback} with no {#boundary} above it`,
+        { file: filePath, line: lineAt(template, m), hint: '{:fallback} belongs directly inside a {#boundary} ... {/boundary} block' },
       );
     }
     throw new RoseError(
@@ -2378,17 +2460,29 @@ function compileTemplate(
       }
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
     } else if (earliest.type === 'boundary') {
-      const [, content] = earliest.match;
+      const [, fbAttr, content] = earliest.match;
+      let fallbackSrc = '';
+      if (fbAttr) {
+        const fbM = /__fb="([A-Za-z0-9+/=]*)"/.exec(fbAttr);
+        if (fbM) fallbackSrc = Buffer.from(fbM[1], 'base64').toString('utf-8');
+      }
+      const custom = content;
       const before = remaining.substring(0, earliest.index);
       if (before) result += emitChunk(before, acc, closes, scope);
       const id = nextId();
-      const catchesAction = /\$action:|<form[\s>]/.test(content);
-      const inner = compileTemplate(content.trim(), 'h', closes, scope, depth + 1, effMarkers, comps, islandDepth);
+      const catchesAction = /\$action:|<form[\s>]/.test(custom);
+      const inner = compileTemplate(custom.trim(), 'h', closes, scope, depth + 1, effMarkers, comps, islandDepth);
       result += `const __b${id} = (__c) => { let h = ''; ${inner} return h; };\n`;
+      let fbBlock = '';
+      if (fallbackSrc.trim()) {
+        const fbInner = compileTemplate(fallbackSrc.trim(), 'h', closes, scope, depth + 1, effMarkers, comps, islandDepth);
+        fbBlock = `const __bf${id} = (__c) => { let h = ''; ${fbInner} return h; };\n`;
+      }
+      result += fbBlock;
       result += `let __bd${id} = '';\n`;
       result += catchesAction
-        ? `try { $actionErrorOrThrow(); __bd${id} = __b${id}(${closes}); } catch (e) { __bd${id} = $boundaryFallback(e); }\n`
-        : `try { __bd${id} = __b${id}(${closes}); } catch { __bd${id} = ${JSON.stringify(BOUNDARY_FALLBACK)}; }\n`;
+        ? `try { $actionErrorOrThrow(); __bd${id} = __b${id}(${closes}); } catch (e) { __bd${id} = ${fbBlock ? `__bf${id}(${closes})` : '$boundaryFallback(e)'}; }\n`
+        : `try { __bd${id} = __b${id}(${closes}); } catch { __bd${id} = ${fbBlock ? `__bf${id}(${closes})` : JSON.stringify(BOUNDARY_FALLBACK)}; }\n`;
       result += `${acc} += __bd${id};\n`;
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
     } else if (earliest.type === 'comp') {
@@ -2844,7 +2938,7 @@ function compileSlot(acc: string): string {
   return `${acc} += String(children);\n`;
 }
 
-const RUNTIME_IMPORTS = `import { state, setState, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound } from './runtime.js';`;
+const RUNTIME_IMPORTS = `import { state, setState, persistState, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound } from './runtime.js';`;
 
 const API_RUNTIME_HELPERS = RUNTIME_IMPORTS
   .replace(/^import\s*\{/, '')
@@ -3364,7 +3458,7 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
 ${serverImports}
 import { renderMarkdown } from './content-md.ts';
 import crypto from 'node:crypto';
-import { setState, clearRequestState, serializeState, resetRequestContext, setRequestQuery, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta } from './runtime.js';
+import { setState, persistState, clearRequestState, serializeState, resetRequestContext, setRequestQuery, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta, esc } from './runtime.js';
 ${runtimePlugins.length > 0
     ? `import { hooks as __pluginHooks, hasRequestHooks as __hasRequestHooks, hasResponseHooks as __hasResponseHooks } from './plugins.js';`
 : `// no plugin declares a runtime hook, so there is no plugins
@@ -3915,8 +4009,27 @@ export async function renderPage(pathname, form) {
           return await notFoundPage(pathname);
         }
         console.error('Rosefn: render failed for', pathname, err instanceof Error ? err.message : err);
-        if (errorPage) return { ...(await renderFallback(pathname, errorPage)), status: 500 };
-        return { html: '<h1>500</h1><p>Something went wrong rendering this page.</p>', state: '{}', head: [], status: 500, ...docAttrs(pathname) };
+        // F10: in dev the response body carries the real error — message, file:line and the fix hint.
+        let devDetail = '';
+        if (process.env.ROSEFN_DEV === '1' && err) {
+          const msg = esc(err instanceof Error ? err.message : String(err));
+          const file = esc(String(err.file || ''));
+          const line = err.line != null ? esc(String(err.line)) : '';
+          const hint = esc(String(err.hint || ''));
+          const stack = esc(err instanceof Error ? (err.stack || '').split('\\n').slice(1, 7).join('\\n') : '');
+          devDetail = '<div style="margin:24px auto;max-width:860px;font:13px/1.6 ui-monospace,monospace;background:#1b1b1f;color:#e6e6ea;border:1px solid #3a3a42;border-radius:10px;padding:20px 24px;text-align:left;white-space:pre-wrap;word-break:break-word">'
+            + '<div style="font:600 15px/1.4 system-ui,sans-serif;color:#ff8b8b">Render failed: ' + esc(pathname) + '</div>'
+            + '<div style="margin:10px 0 0;color:#ffd479">' + msg + '</div>'
+            + (file ? '<div style="margin:6px 0 0;color:#9ad1ff">' + file + (line ? ':' + line : '') + '</div>' : '')
+            + (hint ? '<div style="margin:10px 0 0;color:#9fe8b0">Fix: ' + hint + '</div>' : '')
+            + (stack ? '<pre style="margin:12px 0 0;color:#8f8f9a">' + stack + '</pre>' : '')
+            + '</div>';
+        }
+        if (errorPage) {
+          const fb = await renderFallback(pathname, errorPage);
+          return { ...fb, html: fb.html + devDetail, status: 500 };
+        }
+        return { html: '<h1>500</h1><p>Something went wrong rendering this page.</p>' + devDetail, state: '{}', head: [], status: 500, ...docAttrs(pathname) };
       }
       // __route tells the bootstrap which route this document was rendered for.
       const state = JSON.stringify({ __route: pathname, ...JSON.parse(serializeState()) });
@@ -4023,7 +4136,24 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
       } catch (err) {
         
         console.error('Rosefn: render failed for', pathname, err instanceof Error ? err.message : err);
-        html = errorPage ? extractHead(await errorPage([], '')).html : '<h1>500</h1><p>Something went wrong rendering this page.</p>';
+        // F10: dev carries the real error in the body here too — the shell
+        // is out, so the detail rides after the error page body.
+        let devDetail = '';
+        if (process.env.ROSEFN_DEV === '1' && err) {
+          const msg = esc(err instanceof Error ? err.message : String(err));
+          const file = esc(String(err.file || ''));
+          const line = err.line != null ? esc(String(err.line)) : '';
+          const hint = esc(String(err.hint || ''));
+          const stack = esc(err instanceof Error ? (err.stack || '').split('\\n').slice(1, 7).join('\\n') : '');
+          devDetail = '<div style="margin:24px auto;max-width:860px;font:13px/1.6 ui-monospace,monospace;background:#1b1b1f;color:#e6e6ea;border:1px solid #3a3a42;border-radius:10px;padding:20px 24px;text-align:left;white-space:pre-wrap;word-break:break-word">'
+            + '<div style="font:600 15px/1.4 system-ui,sans-serif;color:#ff8b8b">Render failed: ' + esc(pathname) + '</div>'
+            + '<div style="margin:10px 0 0;color:#ffd479">' + msg + '</div>'
+            + (file ? '<div style="margin:6px 0 0;color:#9ad1ff">' + file + (line ? ':' + line : '') + '</div>' : '')
+            + (hint ? '<div style="margin:10px 0 0;color:#9fe8b0">Fix: ' + hint + '</div>' : '')
+            + (stack ? '<pre style="margin:12px 0 0;color:#8f8f9a">' + stack + '</pre>' : '')
+            + '</div>';
+        }
+        html = errorPage ? extractHead(await errorPage([], '')).html + devDetail : '<h1>500</h1><p>Something went wrong rendering this page.</p>' + devDetail;
       }
       write(html);
  // Csr: false ( auto since #29): a no-JS route's document ends here - no state script, no inlined bundle.
@@ -4150,7 +4280,7 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
 
   const clientEntry = `
 ${clientImports}
-import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState, setFxOwner, resetContainerFx } from './runtime.js';
+import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState, setFxOwner, resetContainerFx, esc } from './runtime.js';
 
 // I18n: the dictionaries baked at build time - the client renders any PRELOADED locale from the bundle.
 setLocales(${clientLocalesJson}, '${defaultLocale}');

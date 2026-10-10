@@ -43,6 +43,9 @@ Rules the compiler enforces (breaking one fails the build):
   type arguments ($state<Post[]>([])) are all erased from the shipped bundles.
 - $state / $data declarations are top-level statements. The declared name IS the
   getter: write count() in the template and the script, never bare count.
+  $persist is $state backed by localStorage: let theme = $persist('light') —
+  the value survives reloads (SSR renders the initial; the client re-seeds
+  from storage at boot).
 - A route param (pages/blog/[id].rose) is read as state too: declare it
   (\`let id = $state('1')\`) and read id() - the server overwrites the default
   with the URL's value, and export const params = { id: [...] } bakes those

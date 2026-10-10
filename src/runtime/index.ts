@@ -28,6 +28,7 @@ export function state<T>(key: string, initial: T): [() => T, (v: T) => void] {
   const setter = (v: T) => {
     e.value = v;
     e.subs.forEach((fn: Subscriber) => fn());
+    if (persistedKeys.has(key)) writeStorage(key, v);
   };
 
   return [getter, setter];
@@ -41,6 +42,32 @@ export function setState<T>(key: string, value: T): void {
   const e = entry(key, value);
   e.value = value;
   e.subs.forEach((fn: Subscriber) => fn());
+  if (persistedKeys.has(key)) writeStorage(key, value);
+}
+
+const persistedKeys = new Set<string>();
+
+function writeStorage(key: string, v: unknown): void {
+  try {
+    (globalThis as { localStorage?: Storage }).localStorage?.setItem('rosefn:' + key, JSON.stringify(v));
+  } catch { /* no storage / private mode / quota: persistence is best-effort */ }
+}
+
+// F9 ($persist): `let theme = $persist('dark')` — like $state, but the value survives reloads.
+export function persistState<T>(key: string, initial: T): [() => T, (v: T) => void] {
+  persistedKeys.add(key);
+  let seeded = initial;
+  let hasStored = false;
+  try {
+    const raw = (globalThis as { localStorage?: Storage }).localStorage?.getItem('rosefn:' + key);
+    if (raw != null) {
+      seeded = JSON.parse(raw) as T;
+      hasStored = true;
+    }
+  } catch {  }
+  const [get, set] = state(key, seeded);
+  if (hasStored) set(seeded);
+  return [get, set];
 }
 
 const cleanups = new Set<Cleanup>();

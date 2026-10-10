@@ -1,0 +1,11 @@
+<script>
+  let theme = $persist('light');
+  function toggle() { $setState('theme', theme() === 'light' ? 'dark' : 'light'); }
+</script>
+
+<div class="persist-demo">
+  <h1>Persisted state</h1>
+  <p>Theme: {theme()}</p>
+  <button on:click={toggle}>Toggle theme</button>
+  <p>The theme survives a reload (localStorage-backed $persist).</p>
+</div>
