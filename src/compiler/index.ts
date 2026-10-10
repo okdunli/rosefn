@@ -1605,12 +1605,14 @@ function deferBootCode(count: number, holds: number[] = []): string {
   return code;
 }
 
-function findBlock(src: string, kind: 'if' | 'each' | 'boundary'): RegExpExecArray | null {
+function findBlock(src: string, kind: 'if' | 'each' | 'boundary' | 'island'): RegExpExecArray | null {
   const head = kind === 'boundary'
     ? /\{#boundary\}/g
     : kind === 'if'
       ? /\{#if\s+([^}]+)\}/g
-      : /\{#each\s+([^}]+?)\s+as\s+(\w+)\}/g;
+      : kind === 'island'
+        ? /\{#island(?:\s+name="([^"]*)")?\s*\}/g
+        : /\{#each\s+([^}]+?)\s+as\s+(\w+)\}/g;
   const closeRe = new RegExp(`\\{/${kind}\\}`, 'g');
   let open: RegExpExecArray | null;
   while ((open = head.exec(src))) {
@@ -1632,7 +1634,9 @@ function findBlock(src: string, kind: 'if' | 'each' | 'boundary'): RegExpExecArr
       i = nextClose.index + nextClose[0].length;
       if (--depth === 0) {
         const content = src.slice(afterOpen, nextClose.index);
-        const groups = kind === 'boundary' ? [content] : kind === 'if' ? [open[1], content] : [open[1], open[2], content];
+        const groups = kind === 'boundary' ? [content]
+          : kind === 'island' ? [open[1] ?? '', content]
+          : kind === 'if' ? [open[1], content] : [open[1], open[2], content];
         const arr = [src.slice(start, i), ...groups] as unknown as RegExpExecArray;
         (arr as any).index = start;
         return arr;
@@ -1712,7 +1716,7 @@ function compileHead(head: string): string {
  * Adversarial probing found all three in one afternoon; a template compiler
  * that emits broken code silently is the worst failure mode it has.
  */
-const KNOWN_CLOSERS = new Set(['if', 'each', 'boundary']);
+const KNOWN_CLOSERS = new Set(['if', 'each', 'boundary', 'island']);
 function assertKnownDirectives(template: string, filePath: string): void {
   const rawRanges: Array<[number, number]> = [];
   const RAW_OPEN = /<(style|script|noscript)\b[^>]*>/gi;
@@ -1756,7 +1760,7 @@ function assertKnownDirectives(template: string, filePath: string): void {
       { file: filePath, line: lineAt(template, m), hint: "rosefn templates support {#if}, {#each} and {#boundary} - and there is no {:else}: nest a second {#if} with the negated condition" },
     );
   }
-  const OPENER_RE = /\{#(if|each|boundary)\b([^}]*)\}/g;
+  const OPENER_RE = /\{#(if|each|boundary|island)\b([^}]*)\}/g;
   while ((m = OPENER_RE.exec(template))) {
     if (inRaw(m.index)) continue;
     const [, kind, head] = m;
@@ -1841,11 +1845,15 @@ function compileTemplate(
   scope: string | null,
   depth: number,
   markers = true,
-  comps: Map<string, { index: number; slots: Array<{ name: string; props: string[] }> }> = new Map()
+  comps: Map<string, { index: number; slots: Array<{ name: string; props: string[] }> }> = new Map(),
+  islandDepth = 0
 ): string {
   let result = '';
   let remaining = template;
   let blockId = 0;
+
+  const islandsMode = /\{#island\b/.test(template);
+  const effMarkers = markers && (!islandsMode || islandDepth > 0);
 
   const nextId = () => `${depth}_${blockId++}`;
 
@@ -1858,11 +1866,13 @@ function compileTemplate(
       ? Object.assign([remaining.slice(firstExpr.start, firstExpr.end + 1), firstExpr.expr], { index: firstExpr.start }) as unknown as RegExpExecArray
       : null;
     const compTag = comps.size > 0 ? findCompTag(remaining, comps) : null;
+    const islandMatch = findBlock(remaining, 'island');
 
     const candidates: Array<{ type: string; match: RegExpExecArray; index: number; tag?: CompTag }> = [];
     if (ifMatch?.index !== undefined) candidates.push({ type: 'if', match: ifMatch, index: ifMatch.index });
     if (eachMatch?.index !== undefined) candidates.push({ type: 'each', match: eachMatch, index: eachMatch.index });
     if (boundaryMatch?.index !== undefined) candidates.push({ type: 'boundary', match: boundaryMatch, index: boundaryMatch.index });
+    if (islandMatch?.index !== undefined) candidates.push({ type: 'island', match: islandMatch, index: islandMatch.index });
     if (exprMatch?.index !== undefined) candidates.push({ type: 'expr', match: exprMatch, index: exprMatch.index });
     if (compTag) candidates.push({ type: 'comp', match: exprMatch!, index: compTag.start, tag: compTag });
     const earliest = candidates.length > 0
@@ -1902,9 +1912,9 @@ function compileTemplate(
       const call = autoCall(cond);
       const id = nextId();
       const innerScope = scope ?? '__s';
-      const inner = compileTemplate(content.trim(), 'h', '__c', innerScope, depth + 1, markers, comps);
+      const inner = compileTemplate(content.trim(), 'h', '__c', innerScope, depth + 1, effMarkers, comps, islandDepth);
       result += `const __b${id} = (__s, __c) => { let h = ''; ${inner} return h; };\n`;
-      if (markers) {
+      if (effMarkers) {
         result += `${acc} += ifMark(${closes}, () => (${call}), __b${id}${scope ? `, ${scope}` : ''});\n`;
       } else {
         result += `${acc} += (${call}) ? __b${id}(${scope ?? 'undefined'}, []) : '';\n`;
@@ -1924,9 +1934,9 @@ function compileTemplate(
         lastSpan = s.end + 1;
       }
       scoped += content.trim().slice(lastSpan);
-      const inner = compileTemplate(scoped, 'h', '__c', '__s', depth + 1, markers, comps);
+      const inner = compileTemplate(scoped, 'h', '__c', '__s', depth + 1, effMarkers, comps, islandDepth);
       result += `const __b${id} = (__s, __c) => { let h = ''; ${inner} return h; };\n`;
-      if (markers) {
+      if (effMarkers) {
         result += `${acc} += eachMark(${closes}, () => (${call}), __b${id});\n`;
       } else {
         result += `${acc} += (${call}).map((${item}) => __b${id}(${item}, [])).join('');\n`;
@@ -1938,7 +1948,7 @@ function compileTemplate(
       if (before) result += emitChunk(before, acc, closes, scope);
       const id = nextId();
       const catchesAction = /\$action:|<form[\s>]/.test(content);
-      const inner = compileTemplate(content.trim(), 'h', closes, scope, depth + 1, markers, comps);
+      const inner = compileTemplate(content.trim(), 'h', closes, scope, depth + 1, effMarkers, comps, islandDepth);
       result += `const __b${id} = (__c) => { let h = ''; ${inner} return h; };\n`;
       result += `let __bd${id} = '';\n`;
       result += catchesAction
@@ -1964,7 +1974,7 @@ function compileTemplate(
       const { def, named } = splitSlots(childrenSrc);
       const hasChildren = def.trim().length > 0;
       if (hasChildren) {
-        result += `const __ch${id} = (__s, __c) => { let h = ''; ${compileTemplate(def, 'h', '__c', scope, depth + 1, markers, comps)} return h; };\n`;
+        result += `const __ch${id} = (__s, __c) => { let h = ''; ${compileTemplate(def, 'h', '__c', scope, depth + 1, effMarkers, comps, islandDepth)} return h; };\n`;
       }
       const slotFns = named.map(([nm, src]) => {
         const decl = entry.slots.find((s) => s.name === nm);
@@ -1979,7 +1989,7 @@ function compileTemplate(
           }
           content = out + content.slice(lastSpan);
         }
-        return `${JSON.stringify(nm)}: (__s, __c) => { let h = ''; ${compileTemplate(content, 'h', '__c', '__s', depth + 1, markers, comps)} return h; }`;
+        return `${JSON.stringify(nm)}: (__s, __c) => { let h = ''; ${compileTemplate(content, 'h', '__c', '__s', depth + 1, effMarkers, comps, islandDepth)} return h; }`;
       });
       const propsObj = parseCompAttrs(tag.attrs)
         .filter((a) => a.name !== 'slot')
@@ -1992,6 +2002,15 @@ function compileTemplate(
       const childrenArg = hasChildren ? `__ch${id}(${scope ?? 'undefined'}, ${closes})` : `''`;
       result += `${acc} += ${tag.name}(${closes}, ${childrenArg}, { ${propsObj} }, { ${slotFns.join(', ')} });\n`;
       remaining = rest;
+    } else if (earliest.type === 'island') {
+      const [, name, content] = earliest.match;
+      const before = remaining.substring(0, earliest.index);
+      if (before) result += emitChunk(before, acc, closes, scope);
+      result += `${acc} += ${JSON.stringify(`<div data-rv-island="${name || ''}">`)};\n`;
+      const inner = compileTemplate(content.trim(), 'h', '__c', scope, depth + 1, markers, comps, islandDepth + 1);
+      result += inner;
+      result += `${acc} += '</div>';\n`;
+      remaining = remaining.substring(earliest.index + earliest.match[0].length);
     } else {
       const [, expr] = earliest.match;
       const trimmed = expr.trim();
@@ -2013,7 +2032,7 @@ function compileTemplate(
       if (rawMatch) {
         if (before) result += emitChunk(before, acc, closes, scope);
         const expr = rawMatch[1].trim();
-        if (!markers) {
+        if (!effMarkers) {
           result += `${acc} += String(${expr} ?? '');\n`;
         } else {
           const fn = scope ? `(${scope}) => (${expr})` : `() => (${expr})`;
@@ -2026,12 +2045,12 @@ function compileTemplate(
       if (attrMatch) {
         const lit = before.slice(0, before.length - attrMatch[0].length);
         if (lit) result += emitChunk(lit, acc, closes, scope);
-        result += emitAttr(attrMatch[1], trimmed, acc, closes, scope, markers);
+        result += emitAttr(attrMatch[1], trimmed, acc, closes, scope, effMarkers);
       } else {
         if (before) result += emitChunk(before, acc, closes, scope);
         const after = remaining.substring(earliest.index + earliest.match[0].length);
         const pair = after.length > 0 && !/^<[a-zA-Z/!]/.test(after) && !after.startsWith('{');
-        result += emitText(trimmed, acc, closes, scope, markers, pair);
+        result += emitText(trimmed, acc, closes, scope, effMarkers, pair);
       }
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
     }
@@ -2277,23 +2296,24 @@ function inlineImages(template: string, publicDir: string): string {
     const ext = path.extname(src[1]).toLowerCase();
     const mime = IMG_MIME[ext];
     if (!mime) return tag;
+    const filePath = path.join(publicDir, src[1]);
     let file: Buffer;
     try {
-      file = fs.readFileSync(path.join(publicDir, src[1]));
+      file = fs.readFileSync(filePath);
     } catch {
       return tag;
     }
+    const authorDims = /\swidth=/.test(tag) || /\sheight=/.test(tag);
+    const dims = authorDims ? null : readImageSize(filePath);
+    const withDims = (t: string): string =>
+      dims ? t.replace(/<img\b/, `<img width="${dims.width}" height="${dims.height}"`) : t;
     if (file.length > INLINE_IMG_MAX) {
-      const dims = readImageSize(path.join(publicDir, src[1]));
-      if (dims && !/\swidth=/.test(tag) && !/\sheight=/.test(tag)) {
-        return tag.replace(/<img\b/, `<img width="${dims.width}" height="${dims.height}"`);
-      }
-      return tag;
+      return withDims(tag);
     }
     const uri = ext === '.svg'
       ? `data:image/svg+xml,${file.toString('utf-8').replace(/%/g, '%25').replace(/#/g, '%23').replace(/"/g, '%22')}`
       : `data:${mime};base64,${file.toString('base64')}`;
-    return tag.replace(src[0], `src="${uri}"`);
+    return withDims(tag.replace(src[0], `src="${uri}"`));
   });
 }
 
