@@ -46,6 +46,9 @@ Rules the compiler enforces (breaking one fails the build):
   $persist is $state backed by localStorage: let theme = $persist('light') —
   the value survives reloads (SSR renders the initial; the client re-seeds
   from storage at boot).
+  $derived is computed state: let sq = $derived(n * n) — a read-only getter
+  that recomputes from the signals its expression reads; $setState on it is a
+  build error. Top-level only (in a function body, use a plain const arrow).
 - A route param (pages/blog/[id].rose) is read as state too: declare it
   (\`let id = $state('1')\`) and read id() - the server overwrites the default
   with the URL's value, and export const params = { id: [...] } bakes those
@@ -75,6 +78,27 @@ Rules the compiler enforces (breaking one fails the build):
   value once the promise settles, or to the caught error if it rejects; the
   {:then} / {:catch} names are in scope only inside their branch, and {:catch}
   is optional). {:else} / {:else if} must sit inside an {#if} block.
+- Keyed each: {#each todos() as t (t.id)} — the key makes wire() reconcile:
+  rows whose key and rendered html are unchanged KEEP their DOM nodes (focus,
+  unbound input text, loaded images survive; reorders become moves). Rows
+  with handlers/actions/refs/transitions/components rebuild fresh. The key
+  needs a named item — {#each xs as x (x.id)}, not a destructuring pattern.
+- Snippets: {#snippet name(a, b)}...{/snippet} defines a parameterized
+  fragment; {@render name(x, y)} calls it and inlines the markup. Define the
+  snippet BEFORE the render call (top-down execution order — the compiler
+  rejects the reverse). Reactive content inside works per call.
+- Transitions: transition:fade (both directions), in:fade (enter only),
+  out:fade (mounts at rest, leave only). Built-ins: fade, slide, fly, zoom,
+  slide-up/down/left/right, stagger; params via transition:fade={300} or the
+  bare name (300 ms default). Custom: register
+  globalThis.__rosefnTransitions.NAME = (el, duration, phase) => cleanup? —
+  a transition:NAME that is not a built-in falls through to it (phase
+  'both'/'in'/'out'; built-ins always win).
+- Scoped CSS: component <style> rules scope under the component. Use
+  :global(X) to unscope one compound (.card :global(.md)); a selector made
+  only of :global(...) groups emits fully unscoped (:global(body){...}).
+- <select multiple bind:value={arr}> binds an ARRAY of selected values
+  (declare $state([])); state changes drive option.selected properties.
 - Two-way binding: <input bind:value={q}> / <input type="checkbox"
   bind:checked={on}> / <select bind:value={s}>. Numeric inputs coerce through
   valueAsNumber. Radio groups: <input type="radio" value="free"
