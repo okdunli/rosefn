@@ -140,11 +140,18 @@ export async function createEdgeHandler(
       if (mw) return hookCtx ? mod.runResponseHooks(hookCtx, mw) : mw;
     }
     if (mod.isApi(pathname)) {
+      if (request.method !== 'GET') {
+        const fn = (mod as any).invalidateRenderCache;
+        if (typeof fn === 'function') fn();
+      }
       const apiRes = await mod.handleApi(request.method, pathname, request);
       return hookCtx ? mod.runResponseHooks(hookCtx, apiRes) : apiRes;
     }
     const form = request.method === 'POST' ? await request.formData() : undefined;
-    if (form) (mod as any).invalidateRenderCache?.();
+    if (form) {
+      const fn = (mod as any).invalidateRenderCache;
+      if (typeof fn === 'function') fn();
+    }
     if (!form && !broken.has(pathname) && !mod.isBuffered?.(pathname) && mod.canStream(pathname) && !mod.isNoJs(pathname)) {
       const nonce = mod.cspNonce?.(pathname) ? mintNonce() : '';
       const streamed = new Response(null, {
