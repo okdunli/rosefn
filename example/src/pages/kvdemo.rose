@@ -1,0 +1,9 @@
+<script>
+  // $kv demo: the timestamp is computed once per TTL window — every request
+  // in that window sees the same number, then it recomputes.
+  let stamp = $kv(() => Date.now(), 60);
+</script>
+
+<h1>$kv demo</h1>
+<p>Stamp: {stamp}</p>
+<p>Two requests inside the TTL window share one stamp.</p>

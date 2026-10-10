@@ -1,0 +1,16 @@
+<script>
+  const docEntry = globalThis.__rosefnContent.get("docs", "getting-started");
+  const docList = () => globalThis.__rosefnContent.list("docs");
+</script>
+
+<h1>Docs</h1>
+<ul>
+  {#each docList() as d}
+  <li>{d.title}</li>
+  {/each}
+</ul>
+<p>Reading time: {docEntry.readingTime} min · {docEntry.wordCount} words</p>
+{#each docEntry.toc as t}
+<a href={"#" + t.id}>{t.text}</a>
+{/each}
+<div>{@html globalThis.__rosefnContent.get("docs", "getting-started", { siteName: "Rosefn", version: "0.4.8" }).html}</div>
