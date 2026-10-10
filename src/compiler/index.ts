@@ -1073,6 +1073,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const lifecycle = rawScript.match(/\b(?:onMount|onCleanup|refresh|adopt|\$action|\$setState)\s*\(/);
   if (lifecycle) clientReasons.push(`${lifecycle[0].replace(/\s*\($/, '')}()`);
   if (source.includes('{#defer')) clientReasons.push('{#defer} progressive content');
+  if (source.includes('{#await')) clientReasons.push('{#await} async block');
   const needsClient = clientReasons.length > 0;
 
   const jsWarnings: string[] = [];
@@ -1268,10 +1269,13 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   );
   const classExpanded = expandClassDirectives(useExpanded, filePath);
   const styleExpanded = expandStyleDirectives(classExpanded, filePath);
-  const keyExpanded = expandKeyBlocks(styleExpanded, filePath);
+  const transExpanded = expandTransitionDirectives(styleExpanded, filePath);
+  const animExpanded = expandAnimateDirectives(transExpanded, filePath);
+  const keyExpanded = expandKeyBlocks(animExpanded, filePath);
   const elseExpanded = expandIfElse(keyExpanded);
   const deferExpanded = expandDeferBlocks(elseExpanded);
-  const fbExpanded = expandBoundaryFallbacks(deferExpanded.template, filePath);
+  const awaitExpanded = expandAwaitBlocks(deferExpanded.template, filePath);
+  const fbExpanded = expandBoundaryFallbacks(awaitExpanded.template, filePath);
   const ssrTemplate = rewriteQuotedExprAttrs(fbExpanded
     .replace(SLOT_NAMED_RE, (_w: unknown, attrs: string, fallback: string) => {
       const call = `{__slot(${encodeSlotCall(attrs)})}`;
@@ -1299,10 +1303,12 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   const ssrExports = actions.length > 0 ? `${exportStmts}\n${actions.map((a) => a.stmt).join('\n')}` : exportStmts;
   const ssrGuard = guard ? `\n${guard}` : '';
   const isMiddleware = path.basename(filePath) === '_middleware.rose';
+  const bootCode = deferBootCode(deferExpanded.count, deferExpanded.holds)
+    + (awaitExpanded.blocks.length ? '\n' + awaitBootCode(awaitExpanded.blocks) : '');
   const ssr = isMiddleware
     ? `${RUNTIME_IMPORTS}\n\n${importStmts}\n\n${ssrExports}\n${ssrGuard}\n\n${cleanScript}\n`
-    : generateSSR(cleanScript + deferBootCode(deferExpanded.count, deferExpanded.holds), compiledTemplate, stateDeclsCode, ssrExports, compiledHead, props, hasNamedSlots, importStmts, isComponent, ssrGuard, actions.length > 0, dataDeclsCode);
-  const client = generateClient(cleanScript + deferBootCode(deferExpanded.count, deferExpanded.holds), compiledTemplate, stateDeclsCode, eventBindings, exportStmts, compiledHead, props, hasNamedSlots, importStmts, isComponent, dataDeclsCode);
+    : generateSSR(cleanScript + bootCode, compiledTemplate, stateDeclsCode, ssrExports, compiledHead, props, hasNamedSlots, importStmts, isComponent, ssrGuard, actions.length > 0, dataDeclsCode);
+  const client = generateClient(cleanScript + bootCode, compiledTemplate, stateDeclsCode, eventBindings, exportStmts, compiledHead, props, hasNamedSlots, importStmts, isComponent, dataDeclsCode);
 
   return {
     ssr: rewriteRoseImports(ssr, 'ssr'),
@@ -1925,6 +1931,151 @@ function expandClassDirectives(template: string, filePath: string): string {
  * the expected precedence. Same quote-aware tag scanner and same
  * reactive-class={...} conflict rule as expandClassDirectives.
  */
+
+/**
+ * F20: `transition:fn` - enter/leave transitions.
+ *
+ * A `transition:fn` directive on an element tells the runtime to animate it
+ * in (on mount) and out (on unmount). The directive is parsed here at build
+ * time and emitted as a `data-transition` attribute the runtime reads to
+ * pick the transition effect. Built-in transitions (fade, slide, fly) are
+ * registered in the runtime and applied through the `transition()` helper.
+ *
+ * Syntax: `transition:fn` or `transition:fn={params}`.
+ *
+ * Example: `<div transition:fade>` or `<div transition:fade={duration: 300}>`.
+ */
+function expandTransitionDirectives(template: string, filePath: string): string {
+  if (!template.includes('transition:')) return template;
+  const TAG_RE = /<([a-zA-Z][^\s>/]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
+  let out = '';
+  let pos = 0;
+  let m: RegExpExecArray | null;
+  TAG_RE.lastIndex = 0;
+  while ((m = TAG_RE.exec(template))) {
+    const [whole, tag, attrs, selfClose] = m;
+    if (!attrs.includes('transition:')) continue;
+    const pairs: Array<{ name: string; params: string; start: number; end: number }> = [];
+    const NAME_RE = /\stransition:([\w-]+)(?:\s*=\s*\{)?/g;
+    let nm: RegExpExecArray | null;
+    while ((nm = NAME_RE.exec(attrs))) {
+      let start = nm.index;
+      let end = nm.index + nm[0].length;
+      let params = '';
+      if (nm[0].endsWith('{')) {
+        let depth = 1;
+        let i = end;
+        while (i < attrs.length && depth > 0) {
+          const ch = attrs[i];
+          if (ch === '"' || ch === "'") { i = skipQuoted(attrs, i); continue; }
+          if (ch === '{') depth++;
+          else if (ch === '}') depth--;
+          i++;
+        }
+        if (depth !== 0) {
+          throw new RoseError('E-TEMPLATE', `${filePath}: transition:${nm[1]}={...} is missing its closing brace`, { file: filePath, hint: 'the transition params expression needs a matching } before the tag ends' });
+        }
+        params = attrs.slice(end, i - 1);
+        end = i;
+      }
+      pairs.push({ name: nm[1], params, start, end });
+    }
+    let transitionValue = '';
+    for (const p of pairs) {
+      if (transitionValue) transitionValue += '|';
+      transitionValue += p.name + (p.params ? ':' + p.params : '');
+    }
+    let newAttrs = attrs;
+    for (let k = pairs.length - 1; k >= 0; k--) {
+      newAttrs = newAttrs.slice(0, pairs[k].start) + newAttrs.slice(pairs[k].end);
+    }
+    const transRe = /\sdata-transition\s*=\s*("([^"]*)"|'([^']*)'|\{[^}]*\})/;
+    const tm = transRe.exec(newAttrs);
+    if (tm) {
+      const existing = tm[2] ?? tm[3] ?? '';
+      newAttrs = newAttrs.replace(transRe, ` data-transition="${existing}${transitionValue ? (existing ? '|' : '') + transitionValue : ""}"`);
+    } else {
+      newAttrs = ` data-transition="${transitionValue}"` + newAttrs;
+    }
+    out += template.slice(pos, m.index) + `<${tag}${newAttrs}${selfClose}>`;
+    pos = m.index + whole.length;
+  }
+  out += template.slice(pos);
+  return out;
+}
+
+/**
+ * F21: `animate:fn` - FLIP (First/Last/Invert/Play) animations.
+ *
+ * A `animate:fn` directive on an element tells the runtime to animate it
+ * when its position changes (e.g., list reordering). The directive is parsed
+ * here at build time and emitted as a `data-animate` attribute the runtime
+ * reads to pick the animation effect. Built-in animations (flip) are
+ * registered in the runtime and applied through the `animate()` helper.
+ *
+ * Syntax: `animate:fn` or `animate:fn={params}`.
+ *
+ * Example: `<div animate:flip>` or `<div animate:flip={duration: 300}>`.
+ */
+function expandAnimateDirectives(template: string, filePath: string): string {
+  if (!template.includes('animate:')) return template;
+  const TAG_RE = /<([a-zA-Z][^\s>/]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
+  let out = '';
+  let pos = 0;
+  let m: RegExpExecArray | null;
+  TAG_RE.lastIndex = 0;
+  while ((m = TAG_RE.exec(template))) {
+    const [whole, tag, attrs, selfClose] = m;
+    if (!attrs.includes('animate:')) continue;
+    const pairs: Array<{ name: string; params: string; start: number; end: number }> = [];
+    const NAME_RE = /\sanimate:([\w-]+)(?:\s*=\s*\{)?/g;
+    let nm: RegExpExecArray | null;
+    while ((nm = NAME_RE.exec(attrs))) {
+      let start = nm.index;
+      let end = nm.index + nm[0].length;
+      let params = '';
+      if (nm[0].endsWith('{')) {
+        let depth = 1;
+        let i = end;
+        while (i < attrs.length && depth > 0) {
+          const ch = attrs[i];
+          if (ch === '"' || ch === "'") { i = skipQuoted(attrs, i); continue; }
+          if (ch === '{') depth++;
+          else if (ch === '}') depth--;
+          i++;
+        }
+        if (depth !== 0) {
+          throw new RoseError('E-TEMPLATE', `${filePath}: animate:${nm[1]}={...} is missing its closing brace`, { file: filePath, hint: 'the animate params expression needs a matching } before the tag ends' });
+        }
+        params = attrs.slice(end, i - 1);
+        end = i;
+      }
+      pairs.push({ name: nm[1], params, start, end });
+    }
+    let animateValue = '';
+    for (const p of pairs) {
+      if (animateValue) animateValue += '|';
+      animateValue += p.name + (p.params ? ':' + p.params : '');
+    }
+    let newAttrs = attrs;
+    for (let k = pairs.length - 1; k >= 0; k--) {
+      newAttrs = newAttrs.slice(0, pairs[k].start) + newAttrs.slice(pairs[k].end);
+    }
+    const animRe = /\sdata-animate\s*=\s*("([^"]*)"|'([^']*)'|\{[^}]*\})/;
+    const am = animRe.exec(newAttrs);
+    if (am) {
+      const existing = am[2] ?? am[3] ?? '';
+      newAttrs = newAttrs.replace(animRe, ` data-animate="${existing}${animateValue ? (existing ? '|' : '') + animateValue : ""}"`);
+    } else {
+      newAttrs = ` data-animate="${animateValue}"` + newAttrs;
+    }
+    out += template.slice(pos, m.index) + `<${tag}${newAttrs}${selfClose}>`;
+    pos = m.index + whole.length;
+  }
+  out += template.slice(pos);
+  return out;
+}
+
 function expandStyleDirectives(template: string, filePath: string): string {
   if (!template.includes('style:')) return template;
   const TAG_RE = /<([a-zA-Z][^\s>/]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
@@ -2061,6 +2212,7 @@ function expandIfElse(template: string): string {  for (let pass = 0; pass < 10;
 }
 
 function expandDeferBlocks(template: string): { template: string; count: number; holds: number[] } {
+
   if (!DEFER_ENABLED) {
     const openRe = /\{#defer(?:\s+hold=\\d+)?\}/g;
     let out = '';
@@ -2130,14 +2282,118 @@ function deferBootCode(count: number, holds: number[] = []): string {
   return code;
 }
 
-function findBlock(src: string, kind: 'if' | 'each' | 'boundary' | 'island'): RegExpExecArray | null {
+interface AwaitBlock { n: number; expr: string; thenVar: string; catchVar: string }
+function expandAwaitBlocks(template: string, filePath: string): { template: string; blocks: AwaitBlock[] } {
+  let out = '';
+  let pos = 0;
+  let n = 0;
+  const blocks: AwaitBlock[] = [];
+  for (;;) {
+    const openAt = template.indexOf('{#await', pos);
+    if (openAt < 0) break;
+    let i = openAt + 7;
+    let brace = 1;
+    while (i < template.length && brace > 0) {
+      const c = template[i];
+      if (c === '{') brace++;
+      else if (c === '}') brace--;
+      i++;
+    }
+    if (brace !== 0) break;
+    const openLen = i - openAt;
+    const expr = template.slice(openAt + 7, i - 1).trim();
+    if (!expr) {
+      throw new RoseError('E-TEMPLATE', `${filePath}: {#await} needs a promise expression`, {
+        file: filePath, hint: 'write {#await fetchUsers()}...{:then users}...{/await}' });
+    }
+    const blockOpenRe = /\{\#(if|each|boundary|island|await)\b/g;
+    const blockCloseRe = /\{\/(if|each|boundary|island|await)\}/g;
+    const thenRe = /\{:then\b([^}]*)\}/g;
+    const catchRe = /\{:catch\b([^}]*)\}/g;
+    let d = 1;
+    let j = i;
+    let thenAt = -1, catchAt = -1, closeAt = -1;
+    let thenRaw = '', catchRaw = '';
+    for (;;) {
+      blockOpenRe.lastIndex = j;
+      blockCloseRe.lastIndex = j;
+      thenRe.lastIndex = j;
+      catchRe.lastIndex = j;
+      const nextOpen = blockOpenRe.exec(template);
+      const nextClose = blockCloseRe.exec(template);
+      const nextThen = thenRe.exec(template);
+      const nextCatch = catchRe.exec(template);
+      let nearestPos = Infinity, kind = '', m: RegExpExecArray | null = null;
+      const consider = (mm: RegExpExecArray | null, k: string) => {
+        if (mm && mm.index < nearestPos) { nearestPos = mm.index; kind = k; m = mm; }
+      };
+      consider(nextOpen, 'open'); consider(nextClose, 'close');
+      consider(nextThen, 'then'); consider(nextCatch, 'catch');
+      if (!m) break;
+      if (kind === 'open') { d++; j = m.index + m[0].length; continue; }
+      if (kind === 'close') {
+        if (d === 1 && m[1] === 'await') { closeAt = m.index; break; }
+        d--; j = m.index + m[0].length; continue;
+      }
+      if (d === 1) {
+        if (kind === 'then' && thenAt < 0) { thenAt = m.index; thenRaw = m[1]; }
+        else if (kind === 'catch' && catchAt < 0) { catchAt = m.index; catchRaw = m[1]; }
+      }
+      j = m.index + m[0].length;
+    }
+    if (closeAt < 0 || thenAt < 0) break;
+    const thenTokenEnd = thenAt + 7 + thenRaw.length;
+    const catchTokenEnd = catchAt >= 0 ? catchAt + 7 + catchRaw.length : -1;
+    const pending = template.slice(i, thenAt);
+    const thenBody = template.slice(thenTokenEnd, catchAt >= 0 ? catchAt : closeAt);
+    const catchBody = catchAt >= 0 ? template.slice(catchTokenEnd, closeAt) : '';
+    const thenVarRaw = thenRaw.trim();
+    const catchVarRaw = catchRaw.trim();
+    const thenVar = /^\w+$/.test(thenVarRaw) ? thenVarRaw : `__rvAwaitThen${n + 1}`;
+    const catchVar = catchAt >= 0 ? (/^\w+$/.test(catchVarRaw) ? catchVarRaw : `__rvAwaitCatch${n + 1}`) : '';
+    n++;
+    const nn = n;
+    const stateName = `__rvAwait${nn}`;
+    blocks.push({ n: nn, expr, thenVar, catchVar });
+    out += template.slice(pos, openAt);
+    out += `{#if ${stateName}().status === 'pending'}` + pending + '{/if}\n';
+    out += `{#each (${stateName}().status === 'resolved' ? [${stateName}().value] : []) as ${thenVar}}` + thenBody + '{/each}\n';
+    if (catchAt >= 0) {
+      out += `{#each (${stateName}().status === 'rejected' ? [${stateName}().error] : []) as ${catchVar}}` + catchBody + '{/each}\n';
+    }
+    pos = closeAt + 8;
+  }
+  if (n === 0) return { template, blocks };
+  out += template.slice(pos);
+  return { template: out, blocks };
+}
+
+function awaitBootCode(blocks: AwaitBlock[]): string {
+  let code = '';
+  for (const b of blocks) {
+    const stateName = `__rvAwait${b.n}`;
+    code += `const [${stateName}, set${stateName}] = state("__rvawait${b.n}", { status: 'pending', value: null, error: null });\n`;
+    code += `onMount(function () {\n`;
+    code += `  Promise.resolve(${b.expr}).then(function (__rvAwaitVal) {\n`;
+    code += `    set${stateName}({ status: 'resolved', value: __rvAwaitVal });\n`;
+    code += `  }).catch(function (__rvAwaitErr) {\n`;
+    code += `    set${stateName}({ status: 'rejected', error: __rvAwaitErr });\n`;
+    code += `  });\n`;
+    code += `});\n`;
+  }
+  return code;
+}
+
+function findBlock(src: string, kind: 'if' | 'each' | 'boundary' | 'island' | 'snippet'): RegExpExecArray | null {
   const head = kind === 'boundary'
     ? /\{#boundary(?:\s+([^}]*))?\}/g
     : kind === 'if'
       ? /\{#if\s+([^}]+)\}/g
       : kind === 'island'
         ? /\{#island(?:\s+name="([^"]*)")?(?:\s+hydrate="([^"]*)")?\s*\}/g
-        : /\{#each\s+([^}]+?)\s+as\s+(\{[^{}]*\}|\[[^[\]]*\]|\w+)(?:\s*,\s*(\w+))?\}/g;
+        : kind === 'snippet'
+          ? /\{#snippet\s+(\w+)(?:\s*\(([^)]+)\))?\s*\}/g
+          : /\{#each\s+([^}]+?)\s+as\s+(\{[^{}]*\}|\[[^[\]]*\]|\w+)(?:\s*,\s*(\w+))?\}/g;
   const closeRe = new RegExp(`\\{/${kind}\\}`, 'g');
   let open: RegExpExecArray | null;
   while ((open = head.exec(src))) {
@@ -2241,7 +2497,19 @@ function compileHead(head: string): string {
  * Adversarial probing found all three in one afternoon; a template compiler
  * that emits broken code silently is the worst failure mode it has.
  */
-const KNOWN_CLOSERS = new Set(['if', 'each', 'boundary', 'island']);
+const KNOWN_CLOSERS = new Set(['if', 'each', 'boundary', 'island', 'await']);
+const __blockResCache = new Map<string, { open: RegExp; close: RegExp }>();
+function blockCloseRes(kind: string): { open: RegExp; close: RegExp } {
+  let hit = __blockResCache.get(kind);
+  if (!hit) {
+    hit = {
+      open: new RegExp(`\\{#${kind}\\b[^}]*\\}`, 'g'),
+      close: new RegExp(`\\{/${kind}\\}`, 'g'),
+    };
+    __blockResCache.set(kind, hit);
+  }
+  return hit;
+}
 function assertKnownDirectives(template: string, filePath: string): void {
   const rawRanges: Array<[number, number]> = [];
   const RAW_OPEN = /<(style|script|noscript)\b[^>]*>/gi;
@@ -2286,13 +2554,16 @@ function assertKnownDirectives(template: string, filePath: string): void {
         { file: filePath, line: lineAt(template, m), hint: '{:fallback} belongs directly inside a {#boundary} ... {/boundary} block' },
       );
     }
+    if (word === 'then' || word === 'catch') {
+      continue;
+    }
     throw new RoseError(
       'E-TEMPLATE',
       `${filePath}: {:${word}} is not a rosefn directive`,
       { file: filePath, line: lineAt(template, m), hint: 'rosefn templates support {#if}/{:else}, {#each} and {#boundary}' },
     );
   }
-  const OPENER_RE = /\{#(if|each|boundary|island)\b([^}]*)\}/g;
+  const OPENER_RE = /\{#(if|each|boundary|island|await)\b([^}]*)\}/g;
   while ((m = OPENER_RE.exec(template))) {
     if (inRaw(m.index)) continue;
     const [, kind, head] = m;
@@ -2303,8 +2574,7 @@ function assertKnownDirectives(template: string, filePath: string): void {
         { file: filePath, line: lineAt(template, m), hint: 'write {#each items() as item} - the name after `as` is what the block body reads (item.id, item.name)' },
       );
     }
-    const OPEN_RE = new RegExp(`\\{#${kind}\\b[^}]*\\}`, 'g');
-    const CLOSE_RE = new RegExp(`\\{/${kind}\\}`, 'g');
+    const { open: OPEN_RE, close: CLOSE_RE } = blockCloseRes(kind);
     let depth = 1;
     let i = m.index + m[0].length;
     for (;;) {
@@ -2399,6 +2669,7 @@ function compileTemplate(
       : null;
     const compTag = comps.size > 0 ? findCompTag(remaining, comps) : null;
     const islandMatch = findBlock(remaining, 'island');
+    const snippetMatch = findBlock(remaining, 'snippet');
 
     const candidates: Array<{ type: string; match: RegExpExecArray; index: number; tag?: CompTag }> = [];
     if (ifMatch?.index !== undefined) candidates.push({ type: 'if', match: ifMatch, index: ifMatch.index });
@@ -2407,6 +2678,7 @@ function compileTemplate(
     if (islandMatch?.index !== undefined) candidates.push({ type: 'island', match: islandMatch, index: islandMatch.index });
     if (exprMatch?.index !== undefined) candidates.push({ type: 'expr', match: exprMatch, index: exprMatch.index });
     if (compTag) candidates.push({ type: 'comp', match: exprMatch!, index: compTag.start, tag: compTag });
+    if (snippetMatch?.index !== undefined) candidates.push({ type: 'snippet', match: snippetMatch, index: snippetMatch.index });
     const earliest = candidates.length > 0
       ? candidates.reduce((a, b) => (a.index <= b.index ? a : b))
       : null;
@@ -2506,6 +2778,15 @@ function compileTemplate(
         : `try { __bd${id} = __b${id}(${closes}); } catch (e) { $setBoundaryError(e); __bd${id} = ${fbBlock ? `__bf${id}(${closes})` : JSON.stringify(BOUNDARY_FALLBACK)}; }\n`;
       result += `${acc} += __bd${id};\n`;
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
+    } else if (earliest.type === 'snippet') {
+      const [, name, params, content] = earliest.match;
+      const before = remaining.substring(0, earliest.index);
+      if (before) result += emitChunk(before, acc, closes, scope);
+      const id = nextId();
+      const paramList = params ? params.split(',').map(p => p.trim()).filter(Boolean).join(',') : '';
+      const inner = compileTemplate(content.trim(), 'h', '__c', '__s', depth + 1, effMarkers, comps, islandDepth);
+      result += `(__snip || (__snip = {})).${name} = (__s, __c${paramList ? ',' + paramList : ''}) => { let h = ''; ${inner} return h; };\n`;
+      remaining = remaining.substring(earliest.index + earliest.match[0].length);
     } else if (earliest.type === 'comp') {
       const tag = earliest.tag!;
       if (tag.start > 0) result += emitChunk(remaining.substring(0, tag.start), acc, closes, scope);
@@ -2539,7 +2820,7 @@ function compileTemplate(
           }
           content = out + content.slice(lastSpan);
         }
-        return `${JSON.stringify(nm)}: (__s, __c) => { let h = ''; ${compileTemplate(content, 'h', '__c', '__s', depth + 1, effMarkers, comps, islandDepth)} return h; }`;
+        return `${JSON.stringify(nm)}: (__s, __c) => { let h = ''; ${compileTemplate(content, 'h', '__c', scope, depth + 1, effMarkers, comps, islandDepth)} return h; }`;
       });
       const propsObj = parseCompAttrs(tag.attrs)
         .filter((a) => a.name !== 'slot')
@@ -2610,6 +2891,16 @@ function compileTemplate(
         remaining = remaining.substring(earliest.index + earliest.match[0].length);
         continue;
       }
+      const dbgMatch = /^@debug\b([\s\S]*)$/.exec(trimmed);
+      if (dbgMatch) {
+        if (before) result += emitChunk(before, acc, closes, scope);
+        const names = dbgMatch[1].trim().replace(/,$/, '');
+        result += names
+          ? `console.log('[rosefn:debug]', { ${names} });\n`
+          : `console.log('[rosefn:debug]'); debugger;\n`;
+        remaining = remaining.substring(earliest.index + earliest.match[0].length);
+        continue;
+      }
       const attrMatch = before.match(/([\w-]+)=\s*$/);
       if (attrMatch) {
         const lit = before.slice(0, before.length - attrMatch[0].length);
@@ -2640,7 +2931,11 @@ interface CompTag {
   selfClosing: boolean;
 }
 
-// Scan one tag from its `<` to its `>`, quote- and brace-aware so a `>` inside an attribute expression (`title={a > b}`) does not end the tag.
+/**
+ * Scan one tag from its `<` to its `>`, quote- and brace-aware so a `>` inside
+ * an attribute expression (`title={a > b}`) does not end the tag. Returns the
+ * index just past `>`, or -1 when the tag is never closed.
+ */
 function scanTagEnd(src: string, start: number): number {
   let j = start + 1;
   let quote = '';
@@ -2774,6 +3069,7 @@ function splitSlots(src: string): { def: string; named: Array<[string, string]> 
   let i = 0;
   let elemDepth = 0;
   let blockDepth = 0;
+  const blockStack: Array<{ header: string; type: string }> = [];
   while (i < src.length) {
     const lt = src.indexOf('<', i);
     const ob = src.indexOf('{#', i);
@@ -2788,8 +3084,14 @@ function splitSlots(src: string): { def: string; named: Array<[string, string]> 
     if (next === ob || next === cb) {
       const close = src.indexOf('}', next);
       const token = src.slice(next, close < 0 ? src.length : close + 1);
-      if (next === ob) blockDepth++;
-      else blockDepth = Math.max(0, blockDepth - 1);
+      if (next === ob) {
+        const m = /^\{#(\w+)/.exec(token);
+        blockStack.push({ header: token, type: m ? m[1] : '' });
+        blockDepth++;
+      } else {
+        blockDepth = Math.max(0, blockDepth - 1);
+        if (blockStack.length) blockStack.pop();
+      }
       def += token;
       i = next + token.length;
       continue;
@@ -2816,26 +3118,48 @@ function splitSlots(src: string): { def: string; named: Array<[string, string]> 
     }
     if (!selfClosing && !isVoid) elemDepth++;
     const slotName = /\bslot\s*=\s*["'](\w+)["']/.exec(tagText)?.[1];
-    if (slotName && (elemDepth !== 1 || blockDepth !== 0)) {
-      throw new RoseError('E-TEMPLATE', `slot="${slotName}" on <${nm[2]}> must be a direct child of the component - it is nested inside another element or an {#if}/{#each} block`, { hint: 'place <slot name="..."> directly inside the component tag - wrap the ELEMENTS around the slot, not the slot inside them' });
-    }
-    if (slotName) {
-      const stripped = tagText.replace(/\s*slot\s*=\s*["']\w+["']/, '');
+    if (slotName && elemDepth === 1 && blockDepth === 0) {
       if (selfClosing || isVoid) {
-        named.set(slotName, (named.get(slotName) ?? '') + stripped);
+        named.set(slotName, (named.get(slotName) ?? '') + tagText.replace(/\s*slot\s*=\s*["']\w+["']/, ''));
       } else {
         const closeIdx = findClose(src, end, nm[2]);
-        if (closeIdx < 0) throw new RoseError('E-TEMPLATE', `unclosed <${nm[2]}> inside slot="${slotName}"`, { hint: `add the matching </${nm[2]}> inside the slot content` });
+        if (closeIdx < 0) throw new RoseError('E-TEMPLATE', `unclosed <${nm[2]}> inside slot="${slotName}"`, { hint: `add the matching </${nm[2]}>` });
         const tail = `</${nm[2]}>`;
         const inner = src.slice(end, closeIdx);
         rejectNestedSlot(inner, slotName);
-        named.set(slotName, (named.get(slotName) ?? '') + stripped + inner + tail);
+        named.set(slotName, (named.get(slotName) ?? '') + tagText.replace(/\s*slot\s*=\s*["']\w+["']/, '') + inner + tail);
         elemDepth = Math.max(0, elemDepth - 1);
         i = closeIdx + tail.length;
         continue;
       }
       i = end;
       continue;
+    }
+    if (slotName && blockDepth > 0) {
+      const stripped = tagText.replace(/\s*slot\s*=\s*["']\w+["']/, '');
+      let lifted = '';
+      for (const b of blockStack) lifted += b.header;
+      lifted += stripped;
+      if (selfClosing || isVoid) {
+        for (let k = blockStack.length - 1; k >= 0; k--) lifted += `{/${blockStack[k].type}}`;
+        named.set(slotName, (named.get(slotName) ?? '') + lifted);
+        i = end;
+        continue;
+      }
+      const closeIdx = findClose(src, end, nm[2]);
+      if (closeIdx < 0) throw new RoseError('E-TEMPLATE', `unclosed <${nm[2]}> inside slot="${slotName}"`, { hint: `add the matching </${nm[2]}>` });
+      const tail = `</${nm[2]}>`;
+      lifted += src.slice(end, closeIdx) + tail;
+      for (let k = blockStack.length - 1; k >= 0; k--) lifted += `{/${blockStack[k].type}}`;
+      named.set(slotName, (named.get(slotName) ?? '') + lifted);
+      elemDepth = Math.max(0, elemDepth - 1);
+      i = closeIdx + tail.length;
+      continue;
+    }
+    if (slotName) {
+      throw new RoseError('E-TEMPLATE', `slot="${slotName}" on <${nm[2]}> must be a direct child of the component, or wrapped only by an {#if}/{#each}/{#boundary} block - it is nested inside another element`, {
+        hint: 'place the element with slot="..." directly inside the component tag, or inside a single {#if}/{#each} block - wrapping it in another element is not yet supported',
+      });
     }
     def += tagText;
     i = end;
@@ -2860,6 +3184,7 @@ const IMG_MIME: Record<string, string> = {
   '.ico': 'image/x-icon',
 };
 const INLINE_IMG_MAX = 4096;
+const INLINE_SVG_MAX = 16384;
 
 import { readImageSize } from "../cli/image-size";
 import { scanContentDir, renderMarkdown, buildRss } from "../cli/content";
@@ -2895,6 +3220,20 @@ function listImageVariants(publicDir: string, url: string): Array<{ url: string;
   return out.sort((a, b) => a.width - b.width);
 }
 
+const __imgReadCache = new Map<string, { mtime: number; buffer: Buffer; dims: { width: number; height: number } | null }>();
+function cachedImageRead(filePath: string): { buffer: Buffer; dims: { width: number; height: number } | null } | null {
+  let st: fs.Stats;
+  try { st = fs.statSync(filePath); } catch { return null; }
+  const hit = __imgReadCache.get(filePath);
+  if (hit && hit.mtime === st.mtimeMs) return { buffer: hit.buffer, dims: hit.dims };
+  let buffer: Buffer;
+  try { buffer = fs.readFileSync(filePath); } catch { return null; }
+  const dims = readImageSize(filePath);
+  const entry = { mtime: st.mtimeMs, buffer, dims };
+  __imgReadCache.set(filePath, entry);
+  return { buffer, dims: entry.dims };
+}
+
 function inlineImages(template: string, publicDir: string): string {
   return template.replace(IMG_RE, (tag) => {
     const src = tag.match(/\bsrc="(\/[^"{}]+)"/);
@@ -2903,17 +3242,15 @@ function inlineImages(template: string, publicDir: string): string {
     const mime = IMG_MIME[ext];
     if (!mime) return tag;
     const filePath = path.join(publicDir, src[1]);
-    let file: Buffer;
-    try {
-      file = fs.readFileSync(filePath);
-    } catch {
-      return tag;
-    }
+    const read = cachedImageRead(filePath);
+    if (!read) return tag;
+    const file = read.buffer;
     const authorDims = /\swidth=/.test(tag) || /\sheight=/.test(tag);
-    const dims = authorDims ? null : readImageSize(filePath);
+    const dims = authorDims ? null : read.dims;
     const withDims = (t: string): string =>
       dims ? t.replace(/<img\b/, `<img width="${dims.width}" height="${dims.height}"`) : t;
-    if (file.length > INLINE_IMG_MAX) {
+    const inlineMax = ext === '.svg' ? INLINE_SVG_MAX : INLINE_IMG_MAX;
+    if (file.length > inlineMax) {
       const hasSS = /\ssrcset=/.test(tag) || /\ssizes=/.test(tag);
       const variants = hasSS ? [] : listImageVariants(publicDir, src[1]);
       if (!variants.length) return withDims(tag);
@@ -3545,6 +3882,7 @@ if (typeof process !== 'undefined' && typeof process.send === 'function') {
   });
 }
 
+
 // (the cross-machine seam): the cluster relay above covers ONE machine.
 export function __installStoreTransport(send: (name: string, value: unknown) => void): void {
   setStoreTransport(send);
@@ -3565,6 +3903,11 @@ export const routeParams = {
 
 // Routes whose component reads the request context (getContext()), mutates a shared store ($store()), reads the query ($query(), P0-1)
 export const dynamicRoutes = [
+  ${pages.filter(({ i }) => compiled[i].usesContext || compiled[i].cspNonce || compiled[i].buffer || compiled[i].controlSignal || compiled[i].needsClient).map(({ info }) => `'${info.routePath}'`).join(',\n  ')}
+];
+
+// Routes that the prerender function should skip (not bake into static files).
+export const prerenderSkipRoutes = [
   ${pages.filter(({ i }) => compiled[i].usesContext || compiled[i].cspNonce || compiled[i].buffer || compiled[i].controlSignal).map(({ info }) => `'${info.routePath}'`).join(',\n  ')}
 ];
 
@@ -3588,6 +3931,9 @@ const __dynCache = new Map();
 export function invalidateRenderCache(): void {
   __dynCache.clear();
 }
+
+
+
 // Application KV cache primitive (server-side, per-worker in-memory): a zero-dependency store for expensive computations.
 const __kvStore = new Map<string, { v: unknown; exp: number }>();
 // Content collections: src/content/<coll>/*.md scanned once at build time,
@@ -4198,6 +4544,8 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
   }
   return 404;
 }
+// Prevent tree-shaking of invalidateRenderCache (called from prod-server.ts / edge.ts on non-GET writes).
+void invalidateRenderCache;
 `;
   try {
     const patterns = [...pages, ...apiRoutes].map(({ info }) => info.pattern);
