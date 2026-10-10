@@ -604,10 +604,7 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
     if (islandSkip && el.closest('[data-rv-island]')) return;
     const name = el.getAttribute('data-use')!;
     const fn = directives[name];
-    if (!fn) {
-      console.warn(`Rosefn: use:${name} has no registered action (directives.${name}?)`);
-      return;
-    }
+    if (!fn) return;
     const rawParam = el.getAttribute('data-use-param');
     let initial: unknown = rawParam ?? undefined;
     if (typeof initial === 'string') {
@@ -628,6 +625,532 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
     setState(key, el);
     created.push(() => setState(key, null));
   });
+
+  if ((holder as Element).querySelectorAll('[data-transition]').length > 0) {
+    const trans = (holder as Element).querySelectorAll('[data-transition]');
+    trans.forEach((el) => {
+      if (islandSkip && el.closest('[data-rv-island]')) return;
+      const transAttr = el.getAttribute('data-transition')!;
+      const parts = transAttr.split('|');
+      for (const part of parts) {
+        const [name, params] = part.split(':');
+        const duration = params ? Number(params) : 300;
+        if (name === 'fade') {
+          el.style.opacity = '0';
+          el.style.transition = `opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'slide') {
+          el.style.transform = 'translateY(20px)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'translateY(20px)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'fly') {
+          el.style.transform = 'translateX(-30px) rotate(-5deg)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'translateX(-30px) rotate(-5deg)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'zoom') {
+          el.style.transform = 'scale(0.8)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'scale(0.8)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'slide-up') {
+          el.style.transform = 'translateY(30px)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'translateY(30px)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'slide-down') {
+          el.style.transform = 'translateY(-30px)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'translateY(-30px)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'slide-left') {
+          el.style.transform = 'translateX(30px)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'translateX(30px)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'slide-right') {
+          el.style.transform = 'translateX(-30px)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'translateX(-30px)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'stagger') {
+          const parent = el.parentElement;
+          if (parent) {
+            const siblings = Array.from(parent.children);
+            const index = siblings.indexOf(el);
+            const delay = index * (duration / 10);
+            el.style.opacity = '0';
+            el.style.transform = 'translateY(10px)';
+            el.style.transition = `opacity ${duration}ms ease ${delay}ms, transform ${duration}ms ease ${delay}ms`;
+            requestAnimationFrame(() => {
+              requestAnimationFrame(() => {
+                el.style.opacity = '1';
+                el.style.transform = '';
+              });
+            });
+            created.push(() => {
+              el.style.opacity = '0';
+              el.style.transform = 'translateY(10px)';
+              setTimeout(() => {
+                el.style.opacity = '';
+                el.style.transform = '';
+                el.style.transition = '';
+              }, duration + delay);
+            });
+          }
+        }
+      }
+    });
+  }
+
+  if ((holder as Element).querySelectorAll('[data-animate]').length > 0) {
+    const anim = (holder as Element).querySelectorAll('[data-animate]');
+    anim.forEach((el) => {
+      if (islandSkip && el.closest('[data-rv-island]')) return;
+      const animAttr = el.getAttribute('data-animate')!;
+      const parts = animAttr.split('|');
+      for (const part of parts) {
+        const [name, params] = part.split(':');
+        const duration = params ? Number(params) : 300;
+        if (name === 'flip') {
+          const firstRect = el.getBoundingClientRect();
+          const firstTop = firstRect.top;
+          const firstLeft = firstRect.left;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              const lastRect = el.getBoundingClientRect();
+              const deltaTop = lastRect.top - firstTop;
+              const deltaLeft = lastRect.left - firstLeft;
+              if (Math.abs(deltaTop) < 0.5 && Math.abs(deltaLeft) < 0.5) return;
+              el.style.transform = `translate(${-deltaLeft}px, ${-deltaTop}px)`;
+              el.style.transition = 'none';
+              requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                  el.style.transition = `transform ${duration}ms ease`;
+                  el.style.transform = '';
+                });
+              });
+            });
+          });
+        } else if (name === 'pulse') {
+          el.style.transform = 'scale(1)';
+          el.style.transition = `transform ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = 'scale(1.1)';
+              setTimeout(() => {
+                el.style.transform = 'scale(1)';
+              }, duration);
+            });
+          });
+        } else if (name === 'bounce') {
+          el.style.transform = 'translateY(0)';
+          el.style.transition = `transform ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = 'translateY(-15px)';
+              setTimeout(() => {
+                el.style.transform = 'translateY(0)';
+              }, duration);
+            });
+          });
+        } else if (name === 'shake') {
+          el.style.transform = 'translateX(0)';
+          el.style.transition = `transform ${duration / 4}ms ease-in-out`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = 'translateX(-8px)';
+              setTimeout(() => {
+                el.style.transform = 'translateX(8px)';
+                setTimeout(() => {
+                  el.style.transform = 'translateX(-8px)';
+                  setTimeout(() => {
+                    el.style.transform = 'translateX(8px)';
+                    setTimeout(() => {
+                      el.style.transform = 'translateX(0)';
+                      el.style.transition = '';
+                    }, duration / 4);
+                  }, duration / 4);
+                }, duration / 4);
+              }, duration / 4);
+            }, duration / 4);
+          });
+        } else if (name === 'scale') {
+          el.style.transform = 'scale(0.5)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'scale(0.5)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'rotate') {
+          el.style.transform = 'rotate(-180deg)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'rotate(-180deg)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'fade-in') {
+          el.style.opacity = '0';
+          el.style.transition = `opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'fade-out') {
+          el.style.opacity = '1';
+          el.style.transition = `opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.opacity = '0';
+            });
+          });
+          created.push(() => {
+            el.style.opacity = '1';
+            setTimeout(() => {
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'stagger') {
+          const parent = el.parentElement;
+          if (parent) {
+            const siblings = Array.from(parent.children);
+            const index = siblings.indexOf(el);
+            const delay = index * (duration / 10);
+            el.style.opacity = '0';
+            el.style.transform = 'translateY(10px)';
+            el.style.transition = `opacity ${duration}ms ease ${delay}ms, transform ${duration}ms ease ${delay}ms`;
+            requestAnimationFrame(() => {
+              requestAnimationFrame(() => {
+                el.style.opacity = '1';
+                el.style.transform = '';
+              });
+            });
+            created.push(() => {
+              el.style.opacity = '0';
+              el.style.transform = 'translateY(10px)';
+              setTimeout(() => {
+                el.style.opacity = '';
+                el.style.transform = '';
+                el.style.transition = '';
+              }, duration + delay);
+            });
+          }
+        } else if (name === 'zoom-in') {
+          el.style.transform = 'scale(0)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'scale(0)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'zoom-out') {
+          el.style.transform = 'scale(1)';
+          el.style.opacity = '1';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = 'scale(0)';
+              el.style.opacity = '0';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'scale(1)';
+            el.style.opacity = '1';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'slide-up-fade') {
+          el.style.transform = 'translateY(30px)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'translateY(30px)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'slide-down-fade') {
+          el.style.transform = 'translateY(-30px)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'translateY(-30px)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'flip-x') {
+          el.style.transform = 'rotateX(90deg)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'rotateX(90deg)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'flip-y') {
+          el.style.transform = 'rotateY(90deg)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'rotateY(90deg)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'spin') {
+          el.style.transform = 'rotate(-360deg)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = '';
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'rotate(-360deg)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'pop') {
+          el.style.transform = 'scale(0.3)';
+          el.style.opacity = '0';
+          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.transform = 'scale(1.1)';
+              setTimeout(() => {
+                el.style.transform = '';
+              }, duration / 3);
+            });
+          });
+          created.push(() => {
+            el.style.transform = 'scale(0.3)';
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.transform = '';
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        } else if (name === 'blink') {
+          el.style.opacity = '0';
+          el.style.transition = `opacity ${duration}ms ease`;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              el.style.opacity = '1';
+            });
+          });
+          created.push(() => {
+            el.style.opacity = '0';
+            setTimeout(() => {
+              el.style.opacity = '';
+              el.style.transition = '';
+            }, duration);
+          });
+        }
+      }
+    });
+  }
 
   const DELEGATED_SET = new Set(['click', 'input', 'change', 'submit']);
   const evRoot = holder as Element;
@@ -1105,10 +1628,10 @@ export class StateDelta {
 }
 
 /** Append (or prepend) items to a list-valued state key. */
-export const $append = (value: unknown): StateDelta => new StateDelta('append', value);
-export const $prepend = (value: unknown): StateDelta => new StateDelta('prepend', value);
+export const $append = (value: unknown): StateDelta => new StateDelta('a', value);
+export const $prepend = (value: unknown): StateDelta => new StateDelta('p', value);
 /** Shallow-merge an object into an object-valued state key. */
-export const $merge = (value: Record<string, unknown>): StateDelta => new StateDelta('merge', value);
+export const $merge = (value: Record<string, unknown>): StateDelta => new StateDelta('m', value);
 
 const pendingDeltas = new Map<string, StateDelta>();
 
@@ -1117,15 +1640,7 @@ export function setStateDelta(key: string, delta: StateDelta): void {
   pendingDeltas.set(key, delta);
 }
 
-/**
- * Apply every pending delta to the live state and clear them. The generated
- * render calls this once, right after its state declarations - and only the
- * SSR side ever emits the call: a delta is recorded by a server dispatch, so
- * on the client (post-adopt re-render, client-side navigation, refresh) the
- * map is empty and this is a no-op. That is also why a delta can never apply
- * twice: the value it produced is what the state script carried, and the
- * client resumes THAT instead of recomputing it.
- */
+/** Apply every pending delta to the live state and clear them. */
 export function applyStateDeltas(): void {
   if (pendingDeltas.size === 0) return;
   for (const [key, delta] of [...pendingDeltas]) {
@@ -1137,13 +1652,12 @@ export function applyStateDeltas(): void {
 /** Apply one delta to the live state. */
 export function applyStateDelta(key: string, delta: StateDelta): void {
   const cur = signalMap.get(key)?.value;
-  if (delta.op === 'merge') {
+  if (delta.op === 'm') {
     setState(key, { ...(cur as Record<string, unknown> | undefined), ...(delta.value as Record<string, unknown>) });
     return;
   }
   const list = (v: unknown): unknown[] => (v == null ? [] : Array.isArray(v) ? v : [v]);
-  const merged =
-    delta.op === 'append' ? [...list(cur), ...list(delta.value)] : [...list(delta.value), ...list(cur)];
+  const merged = delta.op === 'a' ? [...list(cur), ...list(delta.value)] : [...list(delta.value), ...list(cur)];
   setState(key, merged);
 }
 
