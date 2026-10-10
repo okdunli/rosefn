@@ -3,6 +3,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
+import { createHash } from 'crypto';
 import { createRequire } from 'module';
 import { pathToFileURL, fileURLToPath } from 'url';
 import { buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadPlugins, RoseError, errorInfo, type RouteInfo } from '../compiler/index.js';
@@ -1139,6 +1140,25 @@ async function serve(): Promise<void> {
     }
   }).catch(() => {});
   const baseHandler = withAccessLog(serveStatic(OUT_DIR, true), `w${process.pid}`);
+  const earlyHintLinks: string[] = (() => {
+    try {
+      const html = fs.readFileSync(path.join(OUT_DIR, 'index.html'), 'utf8');
+      const links: string[] = [];
+      for (const m of html.matchAll(/<script[^>]+src="([^"]+)"/g)) {
+        const v = `<${m[1]}>; rel=preload; as=script`;
+        if (!links.includes(v)) links.push(v);
+      }
+      for (const m of html.matchAll(/<link[^>]+rel="stylesheet"[^>]*>/g)) {
+        const href = /href="([^"]+)"/.exec(m[0])?.[1];
+        if (href) { const v = `<${href}>; rel=preload; as=style`; if (!links.includes(v)) links.push(v); }
+      }
+      for (const m of html.matchAll(/<link[^>]+href="([^"]+)"[^>]+rel="stylesheet"[^>]*>/g)) {
+        const v = `<${m[1]}>; rel=preload; as=style`;
+        if (!links.includes(v)) links.push(v);
+      }
+      return links;
+    } catch { return []; }
+  })();
   let dynRouteSet: Set<string> | null = null;
   const dynRoutesOf = (): Set<string> => {
     const list = (serverModule?.dynamicRoutes as string[] | undefined) || [];
@@ -1149,10 +1169,30 @@ async function serve(): Promise<void> {
     try {
       if ((req.method === 'GET' || req.method === 'HEAD') && dynRoutesOf().has(pathnameOf(req.url || '/'))) {
         const handle = await edgeReady;
+        if (earlyHintLinks.length && req.method === 'GET' && String(req.headers.accept ?? '').includes('text/html')) {
+          try { res.writeEarlyHints({ link: earlyHintLinks }); } catch { /* client gone: the render still finishes */ }
+        }
         const url = 'http://' + (req.headers.host || `localhost:${PORT}`) + (req.url || '/');
         const response = await handle(new Request(url, { method: req.method, headers: req.headers }));
         res.statusCode = response.status;
         response.headers.forEach((v: string, k: string) => res.setHeader(k, v));
+        const htmlDoc = (response.headers.get('content-type') ?? '').startsWith('text/html');
+        const enc = htmlDoc && req.method === 'GET' ? pickEncoding(req) : null;
+        if (response.body && enc) {
+          const raw = Buffer.from(await response.arrayBuffer());
+          const etag = 'W/"' + createHash('sha1').update(raw).digest('base64url').slice(0, 24) + '"';
+          if (req.headers['if-none-match'] === etag) {
+            res.statusCode = 304;
+            res.end();
+            return;
+          }
+          const body = compress(enc, raw);
+          res.setHeader('ETag', etag);
+          res.setHeader('Content-Encoding', enc);
+          res.setHeader('Content-Length', String(body.length));
+          res.end(body);
+          return;
+        }
         if (response.body) {
           Readable.fromWeb(response.body as any).pipe(res);
         } else {
