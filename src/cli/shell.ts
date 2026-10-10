@@ -46,7 +46,25 @@ export function getStyles(): string {
 }
 
 const BOOTSTRAP = esbuild.transformSync(`
-const __app = document.getElementById('app');
+// shell = false: the document's SSR content sits directly in <body> - no
+// #app wrapper, no demo styles, so a real theme's CSS owns the document from
+// the first byte (and a JS-less visitor never sees either). The bundle still
+// runs, and it still needs its container: wrap the content once, here, before
+// any theme script executes (module scripts run before DOMContentLoaded). The
+// wrapper is a plain unstyled div, so the re-parent is visually inert; every
+// later path - adoption, navigation, forms - is then the ordinary one.
+let __app = document.getElementById('app');
+if (!__app) {
+  __app = document.createElement('div');
+  __app.id = 'app';
+  // scripts stay outside the wrapper, exactly where the dressed document
+  // keeps them: the state element and the running module must survive a
+  // navigation's innerHTML swap (they are the document's, not the route's).
+  for (const node of Array.from(document.body.children)) {
+    if (node.tagName !== 'SCRIPT') __app.appendChild(node);
+  }
+  document.body.appendChild(__app);
+}
 // Native View Transitions around client-side navigation (progressive:
 // browsers without the API navigate normally, no polyfill, no CSS required).
 function __navigate(pathname) {
@@ -136,7 +154,14 @@ if (__resumed) {
   __state = Object.assign(__state, __resumed);
   __state.__route = __route;
 }
-if (__resumed) {
+// A NOT-FOUND document (the server stamps __notFound onto its state) boots
+// into the app's own 404 route: the URL matches no route - or a catch-all
+// whose resolver threw notFound(), whose key sits null in the resumed state
+// and whose template would dereference it into a 500. startNotFound paints
+// the not-found route from the resumed state instead (zero requests).
+if (__state.__notFound) {
+  startNotFound(__app, window.location.pathname);
+} else if (__resumed) {
   start(__app, window.location.pathname);
 } else if (__state.__route === window.location.pathname) {
   start(__app, window.location.pathname, true);
@@ -292,54 +317,63 @@ export function clientScriptTag(client: string | null, nonce = ''): string {
  * docAttrs). The streaming path flushes this string BEFORE the render, so
  * the browser gets the language metadata in the first byte.
  */
-export function shellOpen(styles: string = getStyles(), lang = 'en', dir = ''): string {
+export function shellOpen(styles: string = getStyles(), lang = 'en', dir = '', shell = true): string {
   const styleTag = styles ? `\n  <style>${styles}</style>` : '';
+  const demoStyles = shell ? `\n  <style>${STYLES_MIN}</style>` : '';
+  const appOpen = shell ? `\n  <div id="app">` : '';
   return `<!DOCTYPE html>
 <html lang="${lang}"${dir ? ` dir="${dir}"` : ''}>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Rosefn</title>
-  <style>${STYLES_MIN}</style>${styleTag}
+  <title>Rosefn</title>${demoStyles}${styleTag}
   ${FAVICON}
 </head>
-<body>
-  <div id="app">`;
+<body>${appOpen}`;
 }
 
 /** Build the document from an explicit client source (edge runtimes have no fs). */
-export function buildShell(ssrHtml: string, stateJson: string, client: string | null, head: string[] = [], styles: string = getStyles(), js = true, lang = 'en', dir = '', nonce = ''): string {
+export function buildShell(ssrHtml: string, stateJson: string, client: string | null, head: string[] = [], styles: string = getStyles(), js = true, lang = 'en', dir = '', nonce = '', shell = true): string {
   const clientTag = clientScriptTag(client, nonce);
 
   const mergedHead = mergeHeadBlocks(head);
   const headStamped = nonce
     ? mergedHead.replace(/<script\b([^>]*)>/gi, (m, attrs: string) => (/\bnonce=/.test(attrs) ? m : `<script${attrs} nonce="${nonce}">`))
     : mergedHead;
+  let htmlAttrs = ` lang="${lang}"${dir ? ` dir="${dir}"` : ''}`;
+  let bodyAttrs = '';
+  const headClean = headStamped.replace(/<(html|body)\b([^>]*)>/gi, (_m, tag: string, attrs: string) => {
+    const clean = attrs.replace(/\s*data-rosefn-head="[^"]*"/, '');
+    if (tag === 'html') htmlAttrs = clean;
+    else bodyAttrs = clean;
+    return '';
+  });
   const titleTag = /<title>/i.test(mergedHead) ? '' : '<title>Rosefn</title>';
   const iconTag = /rel=["']?icon/i.test(mergedHead) ? '' : `\n  ${FAVICON}`;
-  const headTags = mergedHead ? `\n  ${headStamped}` : '';
+  const headTags = headClean ? `\n  ${headClean}` : '';
   const styleTag = styles ? `\n  <style>${styles}</style>` : '';
+  const stateSafe = stateJson.replace(/</g, '\\u003c');
   const jsTail = js
-    ? `\n  <script type="application/json" id="__rosefn_state">${stateJson}</script>\n  ${clientTag}`
+    ? `\n  <script type="application/json" id="__rosefn_state">${stateSafe}</script>\n  ${clientTag}`
     : '';
-  const open = js ? '<div id="app">' : '';
-  const close = js ? '</div>' : '';
-  const shellStyles = js ? `\n  <style>${STYLES_MIN}</style>` : '';
+  const open = js && shell ? '<div id="app">' : '';
+  const close = js && shell ? '</div>' : '';
+  const shellStyles = js && shell ? `\n  <style>${STYLES_MIN}</style>` : '';
 
   return `<!DOCTYPE html>
-<html lang="${lang}"${dir ? ` dir="${dir}"` : ''}>
+<html${htmlAttrs}>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">${headTags}${iconTag}
   ${titleTag}${shellStyles}${styleTag}
 </head>
-<body>
+<body${bodyAttrs}>
   ${open}${ssrHtml}${close}${jsTail}
 </body>
 </html>`;
 }
 
 /** Node entry: reads dist/client.js from disk (mtime-cached). */
-export function getHtmlShell(ssrHtml: string, stateJson: string, head: string[] = [], js = true, lang = 'en', dir = '', nonce = ''): string {
-  return buildShell(ssrHtml, stateJson, getClientSource(), head, getStyles(), js, lang, dir, nonce);
+export function getHtmlShell(ssrHtml: string, stateJson: string, head: string[] = [], js = true, lang = 'en', dir = '', nonce = '', shell = true): string {
+  return buildShell(ssrHtml, stateJson, getClientSource(), head, getStyles(), js, lang, dir, nonce, shell);
 }

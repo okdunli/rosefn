@@ -1,0 +1,24 @@
+<script>
+  // The bare route: `shell = false` keeps the client bundle (this page still
+  // needs it - the counter below is wired, client-side navigation from here
+  // still works) but drops the shell's demo dressing: the #app wrapper and
+  // the STYLES_MIN block (body padding, pink links). A real app ships its
+  // own theme CSS, and the scaffold's equal-specificity rules outrank it -
+  // so an app whose markup must sit directly under <body> declares this and
+  // keeps everything else. The bundle's bootstrap wraps the SSR content into
+  // #app at boot, so the router model is unchanged.
+  export const shell = false;
+
+  let taps = $state(0);
+</script>
+
+<head>
+  <title>The Bare Route - Rosefn</title>
+  <meta name="description" content="An interactive document without the shell's demo dressing.">
+</head>
+
+<h1>The Bare Route</h1>
+<p>This document carries the whole client bundle and no demo styles: no <code>#app</code> wrapper in the served HTML, no <code>body</code> padding, no pink links. The page's own CSS owns the document from the first byte.</p>
+<p>Taps: <b>{taps()}</b></p>
+<button on:click={taps.set(taps() + 1)}>tap</button>
+<p><a href="/">Back to the gate</a></p>

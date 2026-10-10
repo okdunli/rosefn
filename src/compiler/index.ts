@@ -58,6 +58,15 @@ export interface CompileResult {
   /** the component exports `csr = false` (document ships without the client bundle) */
   csr?: boolean;
   /**
+   * The component exports `shell = false`: keep the client bundle (this route
+   * still needs it - comments widgets, third-party scripts) but drop the
+   * shell's demo dressing - the #app wrapper and STYLES_MIN. A real app ships
+   * its own theme CSS; the scaffold's `body{padding:2rem}` / pink links then
+   * outrank it on equal specificity. Same escape the zero-JS branch has, for
+   * routes that cannot go JS-free.
+   */
+  shell?: boolean;
+  /**
    * P0-2 (bug report): the component exports `buffer = true` - render it per
    * request on the BUFFERED path instead of streaming. A streamed response
    * commits its status and headers before the body exists, so an onResponse
@@ -933,6 +942,8 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   }
   const csrMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+csr\s*=\s*(true|false)\s*;?/);
   const csr: boolean | undefined = csrMatch ? csrMatch[1] !== 'false' : undefined;
+  const shellMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+shell\s*=\s*(true|false)\s*;?/);
+  const shell: boolean | undefined = shellMatch ? shellMatch[1] !== 'false' : undefined;
   const bufferMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+buffer\s*=\s*(true|false)\s*;?/);
   const buffer: boolean | undefined = bufferMatch ? bufferMatch[1] !== 'false' : undefined;
   const controlSignal = /\b(?:redirect|notFound)\s*\(/.test(rawScript) || undefined;
@@ -1119,6 +1130,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
     usesContext,
     revalidate,
     csr,
+    shell,
     buffer,
     controlSignal,
     prefetch,
@@ -2189,7 +2201,7 @@ function compileSlot(acc: string): string {
   return `${acc} += String(children);\n`;
 }
 
-const RUNTIME_IMPORTS = `import { state, setState, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, ifMark, eachMark, headMark, rawMark, redirect, notFound } from './runtime.js';`;
+const RUNTIME_IMPORTS = `import { state, setState, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound } from './runtime.js';`;
 
 const API_RUNTIME_HELPERS = RUNTIME_IMPORTS
   .replace(/^import\s*\{/, '')
@@ -2218,16 +2230,7 @@ const SLOT_HELPER = `const __slot = (sl, name, pairs) => {
   for (let i = 0; i < pairs.length; i++) o[pairs[i][0]] = pairs[i][1];
   return { o, fn };
 };
-const __slotBlock = (closes, sl, name, pairs) => {
-  const hit = __slot(sl, name, pairs);
-  const idx = closes.length;
-  closes.push(() => {
-    if (!hit) return null;
-    const c = [];
-    return { html: String(hit.fn(hit.o, c)), closes: c, scope: hit.o };
-  });
-  return "<!--\\u27e6i:" + idx + "\\u27e7-->" + (hit ? String(hit.fn(hit.o, [])) : "") + "<!--\\u27e6/i:" + idx + "\\u27e7-->";
-};`;
+const __slotBlock = (closes, sl, name, pairs) => slotBlockMark(closes, __slot(sl, name, pairs));`;
 
 function generateSSR(script: string, templateFn: string, stateDeclsCode: string, exports = '', headFn = '', props: Array<{ name: string; def: string | null }> = [], namedSlots = false, imports = '', isComponent = false, guard = '', hasActions = false, dataDeclsCode = ''): string {
   const headCode = headFn
@@ -2333,6 +2336,9 @@ const routeShipsNoJs = (infos: RouteInfo[], compiled: CompileResult[], i: number
   if (compiled[i].needsClient) return false;
   return !layoutsOf(infos, i).some((li) => compiled[li].needsClient);
 };
+
+const routeShellOff = (infos: RouteInfo[], compiled: CompileResult[], i: number): boolean =>
+  compiled[i].shell === false || layoutsOf(infos, i).some((li) => compiled[li].shell === false);
 
 /**
  * The build's zero-JS lint report: one line per route with
@@ -2657,10 +2663,11 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
       const rel = path.relative(path.join(root, 'src', 'pages'), info.filePath).replace(/\\/g, '/');
       const dir = path.posix.dirname(rel);
       const prefix = dir === '.' ? '/' : '/' + dir;
-      return { prefix, render: split ? loaderOf(i) : compose(i) };
+      const flags = routeShellOff(infos, compiled, i) ? ', { shell: false }' : '';
+      return { prefix, render: split ? loaderOf(i) : compose(i), flags };
     })
     .sort((a, b) => b.prefix.length - a.prefix.length);
-  const notFoundTable = `[\n${notFoundEntries.map((e) => `  ['${e.prefix}', ${e.render}],`).join('\n')}\n]`;
+  const notFoundTable = `[\n${notFoundEntries.map((e) => `  ['${e.prefix}', ${e.render}${e.flags}],`).join('\n')}\n]`;
 
   const errIdx = infos.findIndex((info) => info.isError);
   const errorRender = errIdx >= 0 ? (split ? loaderOf(errIdx) : compose(errIdx)) : 'null';
@@ -2690,10 +2697,11 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
         }
       }
       const csrFlag = routeNoJs(i) ? ', csr: false' : '';
+      const shellFlag = routeShellOff(infos, compiled, i) ? ', shell: false' : '';
       const bufferFlag = compiled[i].buffer ? ', buffer: true' : '';
       const signalFlag = compiled[i].controlSignal ? ', signal: true' : '';
       const guardFlag = compiled[i].guardName ? `, guard: beforeAction_${i}` : '';
-      return `{ pattern: '${info.pattern}', path: '${info.routePath}', render: ${compose(i)}, actions: ${actionMap ? `{ ${actionMap} }` : 'null'}${guardFlag}${csrFlag}${bufferFlag}${signalFlag} }`;
+      return `{ pattern: '${info.pattern}', path: '${info.routePath}', render: ${compose(i)}, actions: ${actionMap ? `{ ${actionMap} }` : 'null'}${guardFlag}${csrFlag}${shellFlag}${bufferFlag}${signalFlag} }`;
     })
     .join(',\n  ');
 
@@ -2869,10 +2877,21 @@ const notFoundFor = (pathname) => {
   }
   return null;
 };
+
+const notFoundFlags = (pathname) => {
+  for (const [prefix, render, flags] of notFoundRoutes) {
+    if (prefix === '/' || pathname === prefix || pathname.startsWith(prefix + '/')) return flags || null;
+  }
+  return null;
+};
 const notFoundPage = async (pathname) => {
   const nf = notFoundFor(pathname);
-  if (nf) return { ...(await renderFallback(pathname, nf)), status: 404 };
-  return { html: '<h1>404</h1><p>Page not found</p>', state: '{}', head: [], status: 404, ...docAttrs(pathname) };
+  if (nf) {
+    const page = await renderFallback(pathname, nf);
+    // __notFound stamps the document so the client boot paints THIS route instead of re-rendering the matched one: a catch-all whose resolver threw.
+    return { ...page, ...(notFoundFlags(pathname) || {}), status: 404, state: JSON.stringify({ __notFound: true, ...JSON.parse(page.state) }) };
+  }
+  return { html: '<h1>404</h1><p>Page not found</p>', state: JSON.stringify({ __route: pathname, __notFound: true }), head: [], status: 404, ...docAttrs(pathname) };
 };
 
 
@@ -3009,7 +3028,7 @@ export async function renderPage(pathname, form) {
       // __route tells the bootstrap which route this document was rendered for.
       const state = JSON.stringify({ __route: pathname, ...JSON.parse(serializeState()) });
  // Csr ( auto since #29): false when the compiler found nothing in the route's chain that needs the client (or the route asserted csr = false) .
-      return { html: rendered.html, state, head: rendered.head, status: actionStatus || 200, csr: route.csr !== false, lang: docLang, dir: localeDir(docLang) };
+      return { html: rendered.html, state, head: rendered.head, status: actionStatus || 200, csr: route.csr !== false, shell: route.shell !== false, lang: docLang, dir: localeDir(docLang) };
     }
   }
   
@@ -3026,6 +3045,13 @@ export function canStream(pathname) {
     const langIdx = route.pattern.split('/').indexOf(':lang');
     return langIdx < 0 || isLocale(pathname.split('/')[langIdx]);
   });
+}
+
+
+export function shellOff(pathname) {
+  return routes.some(
+    (route) => route.shell === false && matchRoute(route.pattern, pathname),
+  );
 }
 
 // === API routes === The /api namespace answers JSON, never HTML: an API client that hits an unknown path must not receive the SPA shell.
@@ -3113,7 +3139,9 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
         return 200;
       }
       const state = JSON.stringify({ __route: pathname, ...JSON.parse(serializeState()) });
-      write('</div>\\n  <script type="application/json" id="__rosefn_state">' + state + '</script>\\n  ' + clientTag + '\\n</body>\\n</html>');
+      // P1-6 (bug report): the JSON data block is embedded in the document.
+      const stateSafe = state.replace(/</g, '\\\\u003c');
+      write('</div>\\n  <script type="application/json" id="__rosefn_state">' + stateSafe + '</script>\\n  ' + clientTag + '\\n</body>\\n</html>');
       return 200;
     }
   }
@@ -3219,8 +3247,8 @@ const notFoundFor = (pathname) => {
 const errorPage = ${errorRender};
 
 // Paint a fallback page (404/500) into the container, wired like any render.
-async function paintFallback(container, page, builtin) {
-  __navReset(container);
+async function paintFallback(container, page, builtin, keepState = false) {
+  if (!keepState) __navReset(container);
   clearMounts(); // a failed render leaves stale mounts behind
   // inline mode passes the render itself; split mode passes a loader
   const render = page ? await getRender(page) : null;
@@ -3236,6 +3264,13 @@ async function paintFallback(container, page, builtin) {
     return;
   }
   container.innerHTML = builtin;
+}
+
+
+export async function startNotFound(container, pathname) {
+  const el = document.getElementById('__rosefn_state');
+  if (el) resumeState(el.textContent);
+  await paintFallback(container, notFoundFor(pathname), '<h1>404</h1><p>Page not found</p>', true);
 }
 
 export function matchRoute(pattern, pathname) {

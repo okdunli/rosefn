@@ -99,7 +99,7 @@ async function sendPage(req: any, res: any, ssrModule: any, hookCtx: any, page: 
     return;
   }
   const nonce = nonceFor(ssrModule, routePath);
-  let html = getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, nonce);
+  let html = getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, nonce, page.shell !== false);
   let headers: Record<string, any> = pageHeaders(ssrModule, routePath, nonce);
   if (hookCtx) {
     const out = await ssrModule.runResponseHooks(hookCtx, new Response(html, {
@@ -307,7 +307,7 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
     }
     const routeDir = routePath === '/' ? OUT_DIR : path.join(OUT_DIR, routePath.slice(1));
     await fs.promises.mkdir(routeDir, { recursive: true });
-    await fs.promises.writeFile(path.join(routeDir, 'index.html'), getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir));
+    await fs.promises.writeFile(path.join(routeDir, 'index.html'), getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false));
     console.log(`prerendered ${routePath} -> ${path.relative(process.cwd(), path.join(routeDir, 'index.html'))}`);
   };
 
@@ -407,7 +407,7 @@ function revalidateInBackground(routePath: string, filePath: string): void {
       ssrModule.setQuery?.({});
       const page = await ssrModule.renderPage(routePath);
       if (page.status === 200) {
-        await fs.promises.writeFile(filePath, getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir));
+        await fs.promises.writeFile(filePath, getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false));
         fileCache.delete(filePath);
         console.log(`Rosefn: revalidated ${routePath} in the background`);
       }
@@ -857,7 +857,7 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
           done = () => res.end();
         }
         const doc = ssrModule.docAttrs(safe2);
-        await ssrModule.renderPageStream(safe2, write, shellOpen(getStyles(), doc.lang, doc.dir), clientScriptTag(getClientSource(), nonce));
+        await ssrModule.renderPageStream(safe2, write, shellOpen(getStyles(), doc.lang, doc.dir, !ssrModule.shellOff(safe2)), clientScriptTag(getClientSource(), nonce));
         done();
         return;
       }
