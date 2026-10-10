@@ -1,0 +1,22 @@
+<script>
+  
+  export const shell = false;
+
+  let d = $data(async () => ({
+    skin: '<div class="fix-404"><h1> themed 404 </h1></div>',
+    plain: '<div class="fix-404-plain"><h1> plain 404 </h1></div>',
+  }));
+  function skin() { return d().skin || ""; }
+  function plain() { return d().plain || ""; }
+</script>
+
+<head>
+  <title>mirror 404 - Rosefn</title>
+</head>
+
+{#if skin()}
+{@html skin()}
+{/if}
+{#if !skin()}
+{@html plain()}
+{/if}

@@ -1,3 +1,12 @@
+<script>
+  // The not-found page is a real document too - and an app's themed 404
+  // (its own CSS, its own markup) needs the same escape the bare route
+  // takes: `shell = false` keeps the bundle (client-side navigation onto an
+  // unknown path still paints this page) while the served HTML drops the
+  // #app wrapper and the demo styles.
+  export const shell = false;
+</script>
+
 <head>
   <title>404 - Rosefn</title>
   <meta name="description" content="This route does not exist.">

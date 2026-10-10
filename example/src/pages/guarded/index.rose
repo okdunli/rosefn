@@ -1,0 +1,12 @@
+<script>
+  // The page whose <head> block the guarded layout wraps: navigating here
+  // client-side must apply THIS title, not the layout's.
+</script>
+
+<head>
+  <title>Guarded Page - Rosefn</title>
+  <meta name="description" content="A page head inside a guarded slot.">
+</head>
+
+<h1>Guarded</h1>
+<p>The slot opens, so this page shows.</p>

@@ -1,0 +1,17 @@
+<script>
+  // Regression guard (bug hunt: xoboe themed 404): a layout that guards its
+  // <slot/> with a block emits the page's <head> block INSIDE that block. The
+  // nested wire pass must not claim the head markers - only the pass that owns
+  // the document <head> may - or every client navigation fell back to the
+  // layout's title/meta.
+  let open = $state(true);
+</script>
+
+<head>
+  <title>Guarded Layout - Rosefn</title>
+  <meta name="x-guard" content="layout">
+</head>
+
+{#if open()}
+<slot />
+{/if}
