@@ -2119,7 +2119,7 @@ function findBlock(src: string, kind: 'if' | 'each' | 'boundary' | 'island'): Re
       ? /\{#if\s+([^}]+)\}/g
       : kind === 'island'
         ? /\{#island(?:\s+name="([^"]*)")?(?:\s+hydrate="([^"]*)")?\s*\}/g
-        : /\{#each\s+([^}]+?)\s+as\s+(\w+)(?:\s*,\s*(\w+))?\}/g;
+        : /\{#each\s+([^}]+?)\s+as\s+(\{[^{}]*\}|\[[^[\]]*\]|\w+)(?:\s*,\s*(\w+))?\}/g;
   const closeRe = new RegExp(`\\{/${kind}\\}`, 'g');
   let open: RegExpExecArray | null;
   while ((open = head.exec(src))) {
@@ -2278,7 +2278,7 @@ function assertKnownDirectives(template: string, filePath: string): void {
   while ((m = OPENER_RE.exec(template))) {
     if (inRaw(m.index)) continue;
     const [, kind, head] = m;
-    if (kind === 'each' && !/\bas\s+(\w+)(?:\s*,\s*\w+)?\s*$/.test(head)) {
+    if (kind === 'each' && !/\bas\s+(\{[^{}]*\}?|\[[^[\]]*\]?|\w+)(?:\s*,\s*\w+)?\s*$/.test(head)) {
       throw new RoseError(
         'E-TEMPLATE',
         `${filePath}: {#each ${head.trim()}} is missing its item name`,
@@ -2440,23 +2440,26 @@ function compileTemplate(
       if (before) result += emitChunk(before, acc, closes, scope);
       const call = autoCall(items);
       const id = nextId();
-      const itemRe = new RegExp(`\\b${item}\\b`, 'g');
+      const isDestructure = /^[{[]/.test(item);
+      const itemRe = isDestructure ? null : new RegExp(`\\b${item}\\b`, 'g');
       const indexRe = index ? new RegExp(`\\b${index}\\b`, 'g') : null;
       let scoped = '';
       let lastSpan = 0;
       for (const s of templateExprSpans(content.trim())) {
-        let expr = s.expr.replace(itemRe, '__s');
+        let expr = itemRe ? s.expr.replace(itemRe, '__s') : s.expr;
         if (indexRe) expr = expr.replace(indexRe, '__i');
         scoped += content.trim().slice(lastSpan, s.start) + '{' + expr + '}';
         lastSpan = s.end + 1;
       }
       scoped += content.trim().slice(lastSpan);
       const inner = compileTemplate(scoped, 'h', '__c', '__s', depth + 1, effMarkers, comps, islandDepth);
-      result += `const __b${id} = (__s, __c${index ? ', __i' : ''}) => { let h = ''; ${inner} return h; };\n`;
+      const body = isDestructure ? `const ${item} = __s; ${inner}` : inner;
+      result += `const __b${id} = (__s, __c${index ? ', __i' : ''}) => { let h = ''; ${body} return h; };\n`;
       if (effMarkers) {
         result += `${acc} += eachMark(${closes}, () => (${call}), __b${id});\n`;
       } else {
-        result += `${acc} += (${call}).map((${item}${index ? ', __i' : ''}) => __b${id}(${item}, []${index ? ', __i' : ''}))).join('');\n`;
+        const param = isDestructure ? '__s' : item;
+        result += `${acc} += (${call}).map((${param}${index ? ', __i' : ''}) => __b${id}(${param}, []${index ? ', __i' : ''}))).join('');\n`;
       }
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
     } else if (earliest.type === 'boundary') {
@@ -2548,6 +2551,13 @@ function compileTemplate(
       const [, expr] = earliest.match;
       const trimmed = expr.trim();
       const before = remaining.substring(0, earliest.index);
+      const constMatch = /^@const\s+([A-Za-z_$][\w$]*)\s*=\s*([\s\S]+)$/.exec(trimmed);
+      if (constMatch) {
+        if (before) result += emitChunk(before, acc, closes, scope);
+        result += `const ${constMatch[1]} = (${constMatch[2].trim()});\n`;
+        remaining = remaining.substring(earliest.index + earliest.match[0].length);
+        continue;
+      }
       if (trimmed === '__slot__') {
         if (before) result += emitChunk(before, acc, closes, scope);
         result += compileSlot(acc);

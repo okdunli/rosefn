@@ -54,10 +54,16 @@ Rules the compiler enforces (breaking one fails the build):
   synchronously inside its parent. Fetch in the page or the middleware and pass
   the value down as a prop.
 - Template interpolation {expr} is HTML-escaped. {@html expr} is the explicit
-  trusted-HTML escape hatch - use it only for content you control.
+  trusted-HTML escape hatch - use it only for content you control. {@const name
+  = expr} is a template-level binding: it evaluates once and is visible to every
+  expression that follows in the same scope (use it to name a computed value
+  inside {#each} without re-evaluating, or to shorten a long expression).
 - Blocks: {#if cond}...{:else if cond2}...{:else}...{/if},
   {#each items as item, i}...{:else}...{/each} (i is the zero-based index, the
-  {:else} renders when the list is empty), {#key expr}...{/key} (re-creates the
+  {:else} renders when the list is empty, and the item may be a DESTRUCTURING
+  pattern - {#each items as {name, price}} or {#each entries as [k, v]} - the
+  body then reads the properties/elements directly),
+  {#key expr}...{/key} (re-creates the
   body whenever expr changes), {#boundary}...{:fallback}...{/boundary} (the
   fallback renders on a throw; {$boundaryError()?.message} reads the caught
   error), {#island name="x"}...{/island} (partial hydration) and
