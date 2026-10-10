@@ -636,9 +636,14 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
     if (!el.getAttributeNames) continue;
     if (islandSkip && el.closest && el.closest('[data-rv-island]')) continue;
     for (const an of el.getAttributeNames()) {
-      if (!an.startsWith('data-on-')) continue;
-      const ev = an.slice('data-on-'.length);
-      if (DELEGATED_SET.has(ev)) continue;
+      const mm = /^data-on(w|d)?-(.+)$/.exec(an);
+      if (!mm) continue;
+      const ev = mm[2];
+      if (!mm[1] && DELEGATED_SET.has(ev)) continue;
+      const g = globalThis as { window?: EventTarget; document?: { defaultView?: EventTarget } & EventTarget };
+      const win = g.window ?? g.document?.defaultView;
+      const target: EventTarget | undefined = mm[1] === 'w' ? win : mm[1] === 'd' ? (g.document as EventTarget) : el;
+      if (!target) continue;
       let seen = directBound.get(el);
       if (!seen) directBound.set(el, (seen = new Set()));
       if (seen.has(ev)) continue;
@@ -653,9 +658,9 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
         const h = handlers[spec];
         if (h) h(e);
       };
-      el.addEventListener(ev, listener);
+      target.addEventListener(ev, listener);
       created.push(() => {
-        el.removeEventListener(ev, listener);
+        target.removeEventListener(ev, listener);
         const s = directBound.get(el);
         if (s) s.delete(ev);
       });

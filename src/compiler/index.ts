@@ -716,15 +716,16 @@ function wireEventBindings(template: string, actionNames: Set<string>, filePath 
   const bindings: Array<{ event: string; fn: string }> = [];
   let out = '';
   let rest = template;
-  const MOD_PRE: Record<string, string> = {
-    preventDefault: 'e.preventDefault()',
-    stopPropagation: 'e.stopPropagation()',
-    self: "const __self = e.target.closest('[data-on-' + e.type + ']'); if (e.target !== __self) return;",
+  const TARGET_MODS: Record<string, string> = { window: 'w', document: 'd' };
+  const MOD_PRE: Record<string, (p: string) => string> = {
+    preventDefault: () => 'e.preventDefault()',
+    stopPropagation: () => 'e.stopPropagation()',
+    self: (p) => `const __self = e.target.closest && e.target.closest('[data-${p}-' + e.type + ']'); if (__self && e.target !== __self) return;`,
   };
-  const MOD_POST: Record<string, string> = {
-    once: "e.target.closest('[data-on-' + e.type + ']')?.removeAttribute('data-on-' + e.type);",
+  const MOD_POST: Record<string, (p: string) => string> = {
+    once: (p) => `const __o = e.target && e.target.closest ? e.target.closest('[data-${p}-' + e.type + ']') : null; if (__o) __o.removeAttribute('data-${p}-' + e.type);`,
   };
-  const KNOWN_MODS: string[] = [...Object.keys(MOD_PRE), ...Object.keys(MOD_POST)];
+  const KNOWN_MODS: string[] = [...Object.keys(MOD_PRE), ...Object.keys(MOD_POST), ...Object.keys(TARGET_MODS)];
   for (;;) {
     const m = /\bon:(\w+)((?:\|\w+)*)\s*=\s*\{/.exec(rest);
     if (!m) {
@@ -732,6 +733,15 @@ function wireEventBindings(template: string, actionNames: Set<string>, filePath 
       break;
     }
     const mods = m[2] ? m[2].slice(1).split('|') : [];
+    const targets = mods.filter((mod) => TARGET_MODS[mod]);
+    if (targets.length > 1) {
+      throw new RoseError(
+        'E-TEMPLATE',
+        `${filePath}: on:${m[1]} carries both |${targets.join(' and |')}`,
+        { hint: 'a handler binds to one target - the element (default), |window or |document' },
+      );
+    }
+    const prefix = targets.length ? 'on' + TARGET_MODS[targets[0]] : 'on';
     for (const mod of mods) {
       if (!KNOWN_MODS.includes(mod)) {
         throw new RoseError(
@@ -764,8 +774,8 @@ function wireEventBindings(template: string, actionNames: Set<string>, filePath 
     const expr = rest.slice(m.index + m[0].length, i).trim();
     const wrap = (body: string): string => {
       if (!mods.length) return body;
-      const pre = mods.filter((mod) => MOD_PRE[mod]).map((mod) => MOD_PRE[mod]);
-      const post = mods.filter((mod) => MOD_POST[mod]).map((mod) => MOD_POST[mod]);
+      const pre = mods.filter((mod) => MOD_PRE[mod]).map((mod) => MOD_PRE[mod](prefix));
+      const post = mods.filter((mod) => MOD_POST[mod]).map((mod) => MOD_POST[mod](prefix));
       return `(e) => {${pre.length ? ' ' + pre.join('; ') + ';' : ''} (${body})(e);${post.length ? ' ' + post.join('; ') + ';' : ''} }`;
     };
     if (mods.length && actionNames.has(expr)) {
@@ -777,7 +787,7 @@ function wireEventBindings(template: string, actionNames: Set<string>, filePath 
     }
     if (mods.length) {
       const name = `__h${bindings.length}`;
-      out += `data-on-${m[1]}="${name}"`;
+      out += `data-${prefix}-${m[1]}="${name}"`;
       bindings.push({ event: m[1], fn: `${name}: ${wrap(expr)}` });
     } else if (actionNames.has(expr)) {
       out += `data-on-${m[1]}="$action:${expr}"`;
