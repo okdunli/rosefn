@@ -614,6 +614,14 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
     }
   });
 
+  const refs = (holder as Element).querySelectorAll('[data-bind-this]');
+  refs.forEach((el) => {
+    if (islandSkip && el.closest('[data-rv-island]')) return;
+    const key = el.getAttribute('data-bind-this')!;
+    setState(key, el);
+    created.push(() => setState(key, null));
+  });
+
   if (holder !== root) {
     while (holder.firstChild) root.appendChild(holder.firstChild);
   }

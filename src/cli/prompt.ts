@@ -73,7 +73,9 @@ Rules the compiler enforces (breaking one fails the build):
   bind:checked={on}> / <select bind:value={s}>. Numeric inputs coerce through
   valueAsNumber. Radio groups: <input type="radio" value="free"
   bind:group={plan}> - the group state holds the selected value and every
-  radio's checked state follows it.
+  radio's checked state follows it. bind:this={ref} captures the ELEMENT into
+  a $state slot (declare it: let ref = $state(null)) - call ref().focus() or
+  measure it after mount. A bind:* name must be a $state declaration.
 - Conditional attributes: class:NAME={expr} and style:PROP={expr} merge with
   the tag's static class/style into one reactive attribute.
 - Boolean attributes (checked/disabled/...) are presence-correct: a false
@@ -99,7 +101,10 @@ Rules the compiler enforces (breaking one fails the build):
 - on:click={handler} wires a client event. The handler is a named function from
   the script or an inline arrow: on:click={() => $setState('n', n() + 1)}.
   Modifiers ride the event: on:submit|preventDefault={save} (supported:
-  |preventDefault, |stopPropagation).
+  |preventDefault, |stopPropagation, |self - only when the event target IS the
+  bound element, |once - unbind after the first run). capture/passive are NOT
+  supported: they are listener options and one delegated listener per event
+  type cannot carry per-element options.
 - A server action is an exported async function. Call it from a native form
   (method="POST", no JS needed - progressive enhancement) or from any event
   (on:click={like} - one POST, in-place adopt). Its return value is an

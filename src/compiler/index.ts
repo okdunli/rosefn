@@ -716,10 +716,15 @@ function wireEventBindings(template: string, actionNames: Set<string>, filePath 
   const bindings: Array<{ event: string; fn: string }> = [];
   let out = '';
   let rest = template;
-  const KNOWN_MODS: Record<string, string> = {
+  const MOD_PRE: Record<string, string> = {
     preventDefault: 'e.preventDefault()',
     stopPropagation: 'e.stopPropagation()',
+    self: "const __self = e.target.closest('[data-on-' + e.type + ']'); if (e.target !== __self) return;",
   };
+  const MOD_POST: Record<string, string> = {
+    once: "e.target.closest('[data-on-' + e.type + ']')?.removeAttribute('data-on-' + e.type);",
+  };
+  const KNOWN_MODS: string[] = [...Object.keys(MOD_PRE), ...Object.keys(MOD_POST)];
   for (;;) {
     const m = /\bon:(\w+)((?:\|\w+)*)\s*=\s*\{/.exec(rest);
     if (!m) {
@@ -728,11 +733,11 @@ function wireEventBindings(template: string, actionNames: Set<string>, filePath 
     }
     const mods = m[2] ? m[2].slice(1).split('|') : [];
     for (const mod of mods) {
-      if (!KNOWN_MODS[mod]) {
+      if (!KNOWN_MODS.includes(mod)) {
         throw new RoseError(
           'E-TEMPLATE',
           `${filePath}: unknown event modifier |${mod}`,
-          { hint: `the supported modifiers are ${Object.keys(KNOWN_MODS).map((k) => '|' + k).join(' ')} - anything else belongs inside the handler body` },
+          { hint: `the supported modifiers are ${KNOWN_MODS.map((k) => '|' + k).join(' ')} - capture/passive are listener options a delegated listener cannot carry per element; anything else belongs inside the handler body` },
         );
       }
     }
@@ -757,10 +762,12 @@ function wireEventBindings(template: string, actionNames: Set<string>, filePath 
       i++;
     }
     const expr = rest.slice(m.index + m[0].length, i).trim();
-    const wrap = (body: string): string =>
-      mods.length
-        ? `(e) => { ${mods.map((mod) => KNOWN_MODS[mod]).join('; ')}; (${body})(e); }`
-        : body;
+    const wrap = (body: string): string => {
+      if (!mods.length) return body;
+      const pre = mods.filter((mod) => MOD_PRE[mod]).map((mod) => MOD_PRE[mod]);
+      const post = mods.filter((mod) => MOD_POST[mod]).map((mod) => MOD_POST[mod]);
+      return `(e) => {${pre.length ? ' ' + pre.join('; ') + ';' : ''} (${body})(e);${post.length ? ' ' + post.join('; ') + ';' : ''} }`;
+    };
     if (mods.length && actionNames.has(expr)) {
       throw new RoseError(
         'E-TEMPLATE',
@@ -1148,7 +1155,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   const bindBindings: Array<{ event: string; fn: string }> = [];
   let bindCounter = 0;
   const bindExpanded = wired.template.replace(
-    /\sbind:(value|checked)\s*=\s*\{([\w$]+)(?:\(\))?\}/g,
+    /\sbind:(value|checked|this)\s*=\s*\{([\w$]+)(?:\(\))?\}/g,
     (whole, kind: string, name: string) => {
       if (!stateKeys.includes(name)) {
         throw new Error(
@@ -1156,6 +1163,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
             (stateKeys.length ? ` (state keys here: ${stateKeys.join(', ')})` : ' (this file declares no $state)'),
         );
       }
+      if (kind === 'this') return ` data-bind-this="${name}"`;
       const setter = setterNames.get(name)!;
       const evt = kind === 'checked' ? 'change' : 'input';
       const hname = `__rvbind_${scopeKey.replace(/\W/g, '_')}_${bindCounter++}`;
