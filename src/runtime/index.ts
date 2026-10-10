@@ -407,7 +407,7 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
         const disp = wire(frag, r.closes, (r as { scope?: unknown }).scope ?? scope);
         const nodes = Array.from(frag.childNodes);
         const parent = anchor.parentNode!;
-        for (const nd of nodes) parent.insertBefore(nd, anchor.nextSibling);
+        for (const nd of nodes) parent.insertBefore(nd, end);
         st.__st = { nodes, disp };
       });
     } else {
