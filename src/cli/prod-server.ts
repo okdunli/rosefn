@@ -1,3 +1,4 @@
+// Must run before any request can reach bootstrap(): see shell.ts.
 (globalThis as any).__ROSEFN_SKIP_MINIFY = true;
 
 import http from 'node:http';
@@ -5,12 +6,17 @@ import { Readable } from 'node:stream';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
 import { createEdgeHandler } from './edge.ts';
-import { onShutdown, runShutdownHooks } from './shutdown.ts';
 import { requestOrigin } from './origin.ts';
+import { onShutdown, runShutdownHooks } from './shutdown.ts';
+
+// Brotli quality for ON-THE-FLY compression. Baked .br siblings keep quality 11 (see the build) - those are the headline number.
+const brotliFast = { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 } };
+
 
 const dist = fileURLToPath(new URL('./', import.meta.url));
 const port = Number(process.env.PORT || 8080);
@@ -18,14 +24,14 @@ let handle: ((request: Request) => Promise<Response>) | null = null;
 let mod: any = null;
 let warmList: string[] = [];
 
+// Per-request context isolation.
 const requestAls = new AsyncLocalStorage<Record<string, unknown>>();
 
-/** Run `fn` with a private per-request context bag. */
 function runIsolated<T>(fn: () => T): T {
   return requestAls.run({}, fn);
+      /* client gone: the render still finishes */
 }
 
-// Extra roots searched for baked assets, after `dist` itself.
 let extraRoots: string[] | null = null;
 function resolveStaticRoots(): string[] {
   if (extraRoots) return extraRoots;
@@ -33,12 +39,14 @@ function resolveStaticRoots(): string[] {
   const add = (p: string) => {
     if (p && !seen.has(p)) seen.add(p);
   };
+  
   if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
     add(path.join(dist, '..'));
     add(path.join(dist, '..', '..'));
     add(path.resolve(dist, '..', 'public'));
     add(path.resolve(dist, '..', 'xoboe'));
   }
+  
   add(path.join(dist, 'xoboe'));
   add(path.resolve(dist, '..', 'xoboe'));
   add(path.resolve(process.cwd(), 'xoboe'));
@@ -56,6 +64,7 @@ function isBakedAssetPath(pathname: string): boolean {
   );
 }
 
+// B8: 103 Early Hints.
 const earlyHintLinks: string[] = (() => {
   try {
     const html = fs.readFileSync(path.join(dist, 'index.html'), 'utf8');
@@ -92,24 +101,94 @@ const ready = createEdgeHandler(dist).then(async (h) => {
 
 const shouldWarm = !process.env.VERCEL;
 if (shouldWarm) ready.then(async (h) => {
-  for (const r of warmList) {
-    try {
-      const res = await runIsolated(() => h(new Request('http://localhost' + r)));
-      const buf = await res.arrayBuffer();
-      const suspect = res.status === 200 && res.headers.get('content-type')?.includes('text/html') && buf.byteLength < 2048;
-      console.log('[rosefn] warm', r, 'status=' + res.status, 'bytes=' + buf.byteLength, suspect ? 'SUSPECT-EMPTY' : '');
-    } catch (e) {
-      console.error('[rosefn] warm', r, 'FAILED:', (e as Error)?.stack ?? e);
+  try {
+    const reg = (globalThis as unknown as {
+      __oboeLoaders?: { warmUrls?: () => Promise<unknown> };
+    }).__oboeLoaders;
+    const extra = await reg?.warmUrls?.();
+    if (Array.isArray(extra)) {
+      warmList.push(
+        ...extra.filter((u): u is string => typeof u === 'string' && u.startsWith('/')).slice(0, 8),
+      );
     }
-  }
+  } catch { /* registry absent or the lookup failed - fixed routes still warm */ }
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(4, warmList.length) }, async () => {
+    while (next < warmList.length) {
+      const r = warmList[next++];
+      try {
+        const res = await runIsolated(() => h(new Request('http://localhost' + r)));
+        const buf = await res.arrayBuffer();
+        const suspect = res.status === 200 && res.headers.get('content-type')?.includes('text/html') && buf.byteLength < 2048;
+        console.log('[rosefn] warm', r, 'status=' + res.status, 'bytes=' + buf.byteLength, suspect ? 'SUSPECT-EMPTY' : '');
+      } catch (e) {
+        console.error('[rosefn] warm', r, 'FAILED:', (e as Error)?.stack ?? e);
+      }
+    }
+  }));
 }).catch((e) => console.error('[rosefn] warm loop aborted:', (e as Error)?.stack ?? e));
 
-const hotCache = new Map<string, { raw: Buffer; br: Buffer; gzip: Buffer; headers: Record<string, string>; etag: string; fetchedAt: number; refreshing?: boolean }>();
+const hotCache = new Map<string, { raw: Buffer; br?: Buffer; gzip?: Buffer; headers: Record<string, string>; etag: string; fetchedAt: number; status?: number; refreshing?: boolean }>();
+const HOT_CACHE_MAX = 300;
+function hotCacheEvict(): void {
+  while (hotCache.size >= HOT_CACHE_MAX) {
+    const oldest = hotCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    hotCache.delete(oldest);
+  }
+}
 const HOT_TTL = 10_000;
+
+const gzipFallback: zlib.ZlibOptions = { level: 6 };
+
+function pickEncoding(raw: Buffer, accept: string): 'br' | 'gzip' | null {
+  if (raw.length <= 1024) return null;
+  return /br\b/i.test(accept) ? 'br' : /gzip\b/i.test(accept) ? 'gzip' : null;
+}
+
+const NO_COMPRESS_EXT = new Set([
+  '.png', '.jpg', '.jpeg', '.webp', '.avif', '.gif', '.ico',
+  '.woff', '.woff2', '.mp4', '.webm', '.mp3', '.pdf', '.zip', '.gz', '.br',
+]);
+
+/**
+ * asset (writeBrotli). Compressing those bytes again here costs the same
+ * multi-hundred-millisecond synchronous pass - measured: ~290 ms blocked for a
+ * 194 KB vendor bundle, ~3.3 s for a 2.2 MB one - on the event loop, inside a
+ * request. Reuse the sibling instead. Freshness is the whole safety argument:
+ * the sibling must be at least as new as the raw file, so a file replaced in
+ * place after the build (or an ISR re-render that rewrote it) is newer than its
+ * sibling and falls back to compressing in-process. A stale sibling is
+ * therefore unservable - the worst case is the old cost, never wrong bytes.
+ */
+function prebuiltBro(filePath: string, rawMtimeMs: number): Buffer | null {
+  try {
+    const brPath = filePath + '.br';
+    const s = fs.statSync(brPath);
+    if (!s.isFile() || s.mtimeMs < rawMtimeMs) return null;
+    return fs.readFileSync(brPath);
+  } catch {
+    return null;
+  }
+}
+
+function encodedBody(entry: { raw: Buffer; br?: Buffer; gzip?: Buffer }, enc: 'br' | 'gzip'): Buffer {
+  if (enc === 'br') return (entry.br ??= zlib.brotliCompressSync(entry.raw, brotliFast));
+  return (entry.gzip ??= zlib.gzipSync(entry.raw, gzipFallback));
+}
+
+const brotliAsync = promisify(zlib.brotliCompress);
+const gzipAsync = promisify(zlib.gzip);
+async function encodedBodyAsync(
+  entry: { raw: Buffer; br?: Buffer; gzip?: Buffer },
+  enc: 'br' | 'gzip',
+): Promise<Buffer> {
+  if (enc === 'br') return (entry.br ??= await brotliAsync(entry.raw, brotliFast));
+  return (entry.gzip ??= await gzipAsync(entry.raw, gzipFallback));
+}
 
 /**
  * One access line per request on stdout - the same greppable shape the CLI's
- * `rosefn serve` writes, so one grep works across every rosefn server.
  *
  * prod-server had NO access log at all: the platform request log showed a
  * status and a duration, and the server itself said nothing, so a blank first
@@ -136,22 +215,20 @@ async function refetchHot(pathname: string, cookieHeader: string): Promise<void>
   const response = await runIsolated(() => handle!(new Request('http://localhost' + pathname, { headers })));
   const csp = response.headers.get('content-security-policy') || '';
   const key = pathname + '|' + fnv(cookieHeader);
-  if (response.status !== 200 || csp.includes('nonce-')) {
+  if (!cacheable(response.status) || csp.includes('nonce-')) {
     hotCache.delete(key);
     return;
   }
   const head: Record<string, string> = {};
   response.headers.forEach((v, k) => { if (k !== 'content-length' && k !== 'date' && k !== 'content-encoding') head[k] = v; });
   const raw = Buffer.from(await response.arrayBuffer());
-  const compressed = raw.length > 1024;
+  hotCacheEvict();
   hotCache.set(key, {
     raw,
-    br: compressed ? zlib.brotliCompressSync(raw) : raw,
-    gzip: compressed ? zlib.gzipSync(raw, { level: 9 }) : raw,
-    compressed,
     headers: head,
     etag: `W/"${raw.length}-${fnv(cookieHeader)}"`,
     fetchedAt: Date.now(),
+    status: response.status,
   });
 }
 
@@ -167,11 +244,9 @@ function warmHot(pathname: string, cookieHeader: string): void {
     });
 }
 
-function tryHot(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+async function tryHot(req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
   if (req.method !== 'GET') return false;
   const q = req.url || '/';
-  const qm = q.indexOf('?');
-  if (qm >= 0) return false;
   const cookieHeader = String(req.headers.cookie || '');
   const key = q + '|' + fnv(cookieHeader);
   const entry = hotCache.get(key);
@@ -181,7 +256,7 @@ function tryHot(req: http.IncomingMessage, res: http.ServerResponse): boolean {
     entry.refreshing = true;
     warmHot(q, cookieHeader);
   }
-  res.statusCode = 200;
+  res.statusCode = entry.status ?? 200;
   for (const k in entry.headers) res.setHeader(k, entry.headers[k]);
   res.setHeader('ETag', entry.etag);
   if (req.headers['if-none-match'] === entry.etag) {
@@ -190,12 +265,10 @@ function tryHot(req: http.IncomingMessage, res: http.ServerResponse): boolean {
     writeAccessLine(req, res, 0);
     return true;
   }
-  const compressed = (entry as any).compressed !== false;
-  const accept = String(req.headers['accept-encoding'] || '');
-  const enc = compressed ? (/br\b/i.test(accept) ? 'br' : /gzip\b/i.test(accept) ? 'gzip' : null) : null;
+  const enc = pickEncoding(entry.raw, String(req.headers['accept-encoding'] || ''));
   if (enc) {
     res.setHeader('Content-Encoding', enc);
-    const body = enc === 'br' ? entry.br : entry.gzip;
+    const body = await encodedBodyAsync(entry, enc);
     res.end(body);
     writeAccessLine(req, res, body.length);
   } else {
@@ -205,26 +278,29 @@ function tryHot(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   return true;
 }
 
-function fillHot(pathname: string, cookieHeader: string, response: Response): void {
-  const csp = response.headers.get('content-security-policy') || '';
-  if (response.status !== 200 || csp.includes('nonce-')) return;
-  const head: Record<string, string> = {};
-  response.headers.forEach((v, k) => { if (k !== 'content-length' && k !== 'date' && k !== 'content-encoding') head[k] = v; });
-  response.arrayBuffer().then((ab) => {
-    const raw = Buffer.from(ab);
-    hotCache.set(pathname + '|' + fnv(cookieHeader), {
-      raw,
-      compressed: raw.length > 1024,
-      br: raw.length > 1024 ? zlib.brotliCompressSync(raw) : raw,
-      gzip: raw.length > 1024 ? zlib.gzipSync(raw, { level: 9 }) : raw,
-      headers: head,
-      etag: `W/"${raw.length}-${fnv(cookieHeader)}"`,
-      fetchedAt: Date.now(),
-    });
-  }).catch(() => {});
+function cacheable(status: number): boolean {
+  return status === 200 || status === 404;
 }
 
-const fileCache = new Map<string, { raw: Buffer; br: Buffer; gzip: Buffer; etag: string; mtimeMs: number }>();
+function fillHot(pathname: string, cookieHeader: string, response: Response, memo: { raw: Buffer; br?: Buffer; gzip?: Buffer }, etag: string): void {
+  if (!cacheable(response.status)) return;
+  const csp = response.headers.get('content-security-policy') || '';
+  if (csp.includes('nonce-')) return;
+  if (response.status === 404 && hotCache.size >= HOT_CACHE_MAX) return;
+  const head: Record<string, string> = {};
+  response.headers.forEach((v, k) => { if (k !== 'content-length' && k !== 'date' && k !== 'content-encoding') head[k] = v; });
+  hotCacheEvict();
+  hotCache.set(pathname + '|' + fnv(cookieHeader), { ...memo, headers: head, etag, fetchedAt: Date.now(), status: response.status });
+}
+
+const fileCache = new Map<string, { filePath: string; raw: Buffer; br?: Buffer; gzip?: Buffer; compressed: boolean; etag: string; mtimeMs: number; checkedAt: number }>();
+// Bounded re-stat window: the per-request statSync is a cache-invalidation
+// probe only (bytes always come from the in-memory entry), and the freshness
+// it guards is already bounded by the headers themselves - chunks/?v= assets
+// are immutable, uploads carry max-age=3600, entry docs change only on a
+// deploy that restarts the process. See the deployment repo's prod-server.ts
+// for the full account and tools/static-hot-bench.mts for the measurement.
+const STATIC_RESTAT_MS = 2_000;
 const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -285,44 +361,56 @@ function handleRevalidate(req: http.IncomingMessage, res: http.ServerResponse): 
   return true;
 }
 
-function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, rawUrl: string): boolean {
-  let pathname: string;
-  try {
-    pathname = decodeURIComponent(new URL('http://localhost' + rawUrl).pathname);
-  } catch {
-    return false;
-  }
+function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathname: string | null, rawUrl: string): boolean {
+  if (pathname === null) return false;
   if (pathname.includes('\0') || pathname.includes('..')) return false;
   const ext = path.extname(pathname).toLowerCase();
   if (!TYPES[ext]) return false;
-  let filePath = '';
+  let entry = fileCache.get(pathname);
   let st: fs.Stats | null = null;
-  for (const root of resolveStaticRoots()) {
-    const candidate = path.join(root, pathname);
-    if (!candidate.startsWith(root)) continue;
-    try {
-      const s = fs.statSync(candidate);
-      if (!s.isFile()) continue;
-      filePath = candidate;
-      st = s;
-      break;
-    } catch {
-      // not under this root; try the next one
+  let valid = false;
+  if (entry) {
+    if (Date.now() - entry.checkedAt < STATIC_RESTAT_MS) {
+      valid = true;
+    } else {
+      entry.checkedAt = Date.now();
+      try {
+        const s = fs.statSync(entry.filePath);
+        if (s.isFile() && s.mtimeMs === entry.mtimeMs) { st = s; valid = true; }
+      } catch {
+        // moved or deleted since it was cached: re-resolve below
+      }
     }
   }
-  if (!st) return false;
-  let entry = fileCache.get(filePath);
-  if (!entry || entry.mtimeMs !== st.mtimeMs) {
+  if (!valid) {
+    let filePath = '';
+    for (const root of resolveStaticRoots()) {
+      const candidate = path.join(root, pathname);
+      if (!candidate.startsWith(root)) continue;
+      try {
+        const s = fs.statSync(candidate);
+        if (!s.isFile()) continue;
+        filePath = candidate;
+        st = s;
+        break;
+      } catch {
+        // not under this root; try the next one
+      }
+    }
+    if (!st) return false;
     const raw = fs.readFileSync(filePath);
+    const compressed = raw.length > 1024 && !NO_COMPRESS_EXT.has(ext);
     entry = {
+      filePath,
       raw,
-      compressed: raw.length > 1024,
-    br: raw.length > 1024 ? zlib.brotliCompressSync(raw) : raw,
-      gzip: raw.length > 1024 ? zlib.gzipSync(raw, { level: 9 }) : raw,
+      br: compressed ? (prebuiltBro(filePath, st.mtimeMs) ?? undefined) : undefined,
+      gzip: undefined,
+      compressed,
       etag: `W/"${st.size}-${st.mtimeMs}"`,
       mtimeMs: st.mtimeMs,
+      checkedAt: Date.now(),
     };
-    fileCache.set(filePath, entry);
+    fileCache.set(pathname, entry);
     if (fileCache.size > 500) fileCache.delete(fileCache.keys().next().value as string);
   }
   res.statusCode = 200;
@@ -330,19 +418,28 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, rawUrl
   res.setHeader('ETag', entry.etag);
   res.setHeader('Vary', 'Accept-Encoding');
   const isEntryDoc = pathname === '/' || pathname.endsWith('/') || TYPES[ext].startsWith('text/html');
-  res.setHeader('Cache-Control', isEntryDoc ? 'public, max-age=0, must-revalidate' : 'public, max-age=3600');
+  const immutableAsset =
+    pathname.startsWith('/chunks/') ||
+    (pathname.startsWith('/public/') && rawUrl.includes('?v='));
+  res.setHeader(
+    'Cache-Control',
+    isEntryDoc
+      ? 'public, max-age=0, must-revalidate'
+      : immutableAsset
+        ? 'public, max-age=31536000, immutable'
+        : 'public, max-age=3600',
+  );
   if (req.headers['if-none-match'] === entry.etag) {
     res.statusCode = 304;
     res.end();
     writeAccessLine(req, res, 0);
     return true;
   }
-  const compressed = (entry as any).compressed !== false;
   const accept = String(req.headers['accept-encoding'] || '');
-  const enc = compressed ? (/br\b/i.test(accept) ? 'br' : /gzip\b/i.test(accept) ? 'gzip' : null) : null;
+  const enc = entry.compressed ? pickEncoding(entry.raw, accept) : null;
   if (enc) {
     res.setHeader('Content-Encoding', enc);
-    const body = enc === 'br' ? entry.br : entry.gzip;
+    const body = encodedBody(entry, enc);
     res.end(body);
     writeAccessLine(req, res, body.length);
   } else {
@@ -361,20 +458,20 @@ const server = http.createServer(async (req, res) => {
       const fn = (mod as any).invalidateRenderCache;
       if (typeof fn === 'function') fn();
     }
-    if (hotCache.size > 0 && tryHot(req, res)) return;
+    if (hotCache.size > 0 && (await tryHot(req, res))) return;
     if (req.method === 'GET' && !req.headers.cookie && hotCache.size === 0) {
       for (const r of warmList) warmHot(r, '');
     }
-    if (hotCache.size > 0 && tryHot(req, res)) return;
     if (req.method === 'GET' || req.method === 'HEAD') {
-      if (serveStatic(req, res, req.url || '/')) return;
-      let p = '/';
+      const rawUrl = req.url || '/';
+      let pathname: string | null = null;
       try {
-        p = decodeURIComponent(new URL('http://localhost' + (req.url || '/')).pathname);
+        pathname = decodeURIComponent(new URL('http://localhost' + rawUrl).pathname);
       } catch {
-        p = req.url || '/';
+        pathname = null;
       }
-      p = p.split('?')[0]!;
+      if (serveStatic(req, res, pathname, rawUrl)) return;
+      const p = pathname ?? rawUrl.split('?')[0]!;
       if (isBakedAssetPath(p)) {
         res.statusCode = 404;
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -404,13 +501,12 @@ const server = http.createServer(async (req, res) => {
       await new Promise((r) => setTimeout(r, 200));
       response = await runIsolated(() => handle!(new Request(url, init)));
     }
-    if (req.method === 'GET') fillHot(req.url || '/', cookieHeader, response.clone());
     res.statusCode = response.status;
     response.headers.forEach((v, k) => res.setHeader(k, v));
     const htmlDoc = (response.headers.get('content-type') ?? '').startsWith('text/html');
     const accept = String(req.headers['accept-encoding'] ?? '');
-    if (response.body && htmlDoc && (accept.includes('br') || accept.includes('gzip'))) {
-      const raw = Buffer.from(await response.arrayBuffer());
+    const raw = response.body ? Buffer.from(await response.arrayBuffer()) : null;
+    if (raw && htmlDoc) {
       const etag = 'W/"' + createHash('sha1').update(raw).digest('base64url').slice(0, 24) + '"';
       if (req.method === 'GET' && req.headers['if-none-match'] === etag) {
         res.statusCode = 304;
@@ -419,15 +515,18 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       res.setHeader('ETag', etag);
-      const compressed = accept.includes('br')
-        ? zlib.brotliCompressSync(raw)
-        : zlib.gzipSync(raw);
-      res.setHeader('Content-Encoding', accept.includes('br') ? 'br' : 'gzip');
-      res.setHeader('Content-Length', String(compressed.length));
-      res.end(compressed);
-      writeAccessLine(req, res, compressed.length);
-    } else if (response.body) {
-      const raw = Buffer.from(await response.arrayBuffer());
+      const memo: { raw: Buffer; br?: Buffer; gzip?: Buffer } = { raw };
+      const enc = pickEncoding(raw, accept);
+      const body = enc ? await encodedBodyAsync(memo, enc) : raw;
+      if (enc) {
+        res.setHeader('Content-Encoding', enc);
+        res.setHeader('Content-Length', String(body.length));
+      }
+      if (req.method === 'GET') fillHot(req.url || '/', cookieHeader, response, memo, etag);
+      res.end(body);
+      writeAccessLine(req, res, body.length);
+    } else if (raw) {
+      if (req.method === 'GET') fillHot(req.url || '/', cookieHeader, response, { raw }, `W/"${raw.length}-${fnv(cookieHeader)}"`);
       res.end(raw);
       writeAccessLine(req, res, raw.length);
     } else {
