@@ -158,9 +158,26 @@ export function textMark(closes: Close[], fn: Close, pair?: boolean, arg?: unkno
   return `<!--\u27e6m:${i}\u27e7-->` + esc(fn(arg)) + (pair ? `<!--\u27e6/m:${i}\u27e7-->` : '');
 }
 
+export function attrValueString(name: string, v: unknown): string {
+  if (v == null) return '';
+  if (typeof v === 'object') {
+    if (name === 'class') {
+      return Object.entries(v).filter(([, x]) => x).map(([k]) => k).join(' ');
+    }
+    if (name === 'style') {
+      return Object.entries(v)
+        .filter(([, x]) => x != null && x !== false && x !== '')
+        .map(([k, x]) => `${k}: ${x}`)
+        .join('; ');
+    }
+    return JSON.stringify(v);
+  }
+  return String(v);
+}
+
 export function attrMark(closes: Close[], fn: Close, name: string, arg?: unknown): string {
   const i = closes.push(fn) - 1;
-  return `${name}="${esc(fn(arg))}" data-b${i}="${name}"`;
+  return `${name}="${esc(attrValueString(name, fn(arg)))}" data-b${i}="${name}"`;
 }
 
 /**
@@ -197,9 +214,23 @@ export function ifMark(
   return `<!--\u27e6i:${i}\u27e7-->` + (r ? r.html : '') + `<!--\u27e6/i:${i}\u27e7-->`;
 }
 
-export function eachMark(closes: Close[], items: Close, fn: (s: unknown, c: Close[]) => unknown): string {
+interface EachRow {
+  html: string;
+  closes: unknown[];
+  scope?: unknown;
+  keyed?: boolean;
+  key?: string;
+  nodes?: Node[];
+  disp?: Cleanup;
+  norm?: string;
+}
+const EACH_REUSE_FORBID = /data-(?:on|use|bind-this|transition|animate)|data-rosefn-c|data-rv-island/;
+const EACH_HTML_NORM = (h: string): string => h.replace(/\u27e6\/?[a-z]+:\d+\u27e7/g, '').replace(/data-b\d+/g, 'data-b');
+const normHtml = (row: EachRow): string => (row.norm ??= EACH_HTML_NORM(row.html));
+
+export function eachMark(closes: Close[], items: Close, fn: (s: unknown, c: Close[]) => unknown, key?: (s: unknown, vi: number) => unknown): string {
   const i = closes.push(() => (items() as unknown[]).map((v, vi) => {
-    return { html: String(fn(v, closes, vi)), closes, scope: v };
+    return { html: String(fn(v, closes, vi)), closes, scope: v, keyed: !!key, key: key ? String(key(v, vi)) : undefined };
   })) - 1;
   let h = `<!--\u27e6l:${i}\u27e7-->`;
   for (const r of closes[i]() as Array<{ html: string }>) h += r.html;
@@ -355,6 +386,18 @@ export function clearHead(): void {
  * Works on the live SSR DOM (adoption) and on freshly parsed fragments.
  * Returns a disposer for every effect it created.
  */
+const TRANSITION_POSES: Record<string, { transform?: string; opacity: string }> = {
+  fade: { opacity: '0' },
+  slide: { transform: 'translateY(20px)', opacity: '0' },
+  fly: { transform: 'translateX(-30px) rotate(-5deg)', opacity: '0' },
+  zoom: { transform: 'scale(0.8)', opacity: '0' },
+  'slide-up': { transform: 'translateY(30px)', opacity: '0' },
+  'slide-down': { transform: 'translateY(-30px)', opacity: '0' },
+  'slide-left': { transform: 'translateX(30px)', opacity: '0' },
+  'slide-right': { transform: 'translateX(-30px)', opacity: '0' },
+  stagger: { transform: 'translateY(10px)', opacity: '0' },
+};
+
 export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Cleanup {
   let holder: Node = root;
   if (root.nodeType === 11) {
@@ -517,20 +560,68 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
       const start = c;
       const end = ends.get(idx);
       if (!end) continue;
-      const st = start as unknown as { __disp?: Cleanup };
+      const st = start as unknown as { __disp?: Cleanup; __kmap?: Map<string, EachRow> };
       weff(() => {
         if (st.__disp) {
           st.__disp();
           st.__disp = undefined;
         }
-        const items = (closes[idx] as (s?: unknown) => unknown)(scope) as Array<{ html: string; closes: unknown[]; scope?: unknown }>;
+        const items = (closes[idx] as (s?: unknown) => unknown)(scope) as EachRow[];
+        const parent = start.parentNode!;
+        const keyed = items.length > 0 && items.every((r) => r.keyed);
+        if (keyed) {
+          const prev = st.__kmap ?? new Map<string, EachRow>();
+          const counts = new Map<string, number>();
+          for (const r of items) counts.set(r.key!, (counts.get(r.key!) ?? 0) + 1);
+          const keep = new Set<Node>();
+          const nextMap = new Map<string, EachRow>();
+          const used = new Set<string>();
+          const decisions: Array<{ row: EachRow; keepRow?: EachRow }> = [];
+          for (const r of items) {
+            const k = r.key!;
+            let keepRow: EachRow | undefined;
+            if (counts.get(k) === 1 && !used.has(k)) {
+              const cand = prev.get(k);
+              if (cand && normHtml(cand) === normHtml(r) && !EACH_REUSE_FORBID.test(r.html)) {
+                keepRow = cand;
+                used.add(k);
+              }
+            }
+            decisions.push({ row: r, keepRow });
+            if (keepRow) for (const nd of keepRow.nodes ?? []) keep.add(nd);
+          }
+          let n = start.nextSibling;
+          while (n && n !== end) {
+            const nx = n.nextSibling;
+            if (!keep.has(n)) n.remove();
+            n = nx;
+          }
+          const disps: Cleanup[] = [];
+          for (const d of decisions) {
+            if (d.keepRow) {
+              disps.push(d.keepRow.disp!);
+              nextMap.set(d.row.key!, d.keepRow);
+              for (const nd of d.keepRow.nodes ?? []) parent.insertBefore(nd, end);
+            } else {
+              const frag = tpl(d.row.html);
+              const disp = wire(frag, d.row.closes, d.row.scope);
+              disps.push(disp);
+              const nodes = Array.from(frag.childNodes);
+              for (const nd of nodes) parent.insertBefore(nd, end);
+              if (counts.get(d.row.key!) === 1) nextMap.set(d.row.key!, { ...d.row, nodes, disp });
+            }
+          }
+          st.__kmap = nextMap;
+          st.__disp = () => disps.forEach((d) => d());
+          return;
+        }
+        st.__kmap = undefined;
         let n = start.nextSibling;
         while (n && n !== end) {
           const nx = n.nextSibling;
           n.remove();
           n = nx;
         }
-        const parent = start.parentNode!;
         const disps: Cleanup[] = [];
         for (const r of items) {
           const frag = tpl(r.html);
@@ -583,6 +674,13 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
           const inp = el as unknown as HTMLInputElement;
           if (inp.value !== v) inp.value = v;
         });
+      } else if (attr === 'data-selmulti') {
+        weff(() => {
+          const vals = effect().split(',');
+          for (const o of Array.from((el as unknown as HTMLSelectElement).options)) {
+            o.selected = vals.includes(o.value);
+          }
+        });
       } else if (attr.startsWith('!')) {
         const name = attr.slice(1);
         weff(() => {
@@ -594,7 +692,7 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
           else el.removeAttribute(name);
         });
       } else {
-        weff(() => { el.setAttribute(attr, effect()); });
+        weff(() => { el.setAttribute(attr, attrValueString(attr, (closes[idx] as (s?: unknown) => unknown)(scope))); });
       }
     }
   });
@@ -633,8 +731,38 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
       const transAttr = el.getAttribute('data-transition')!;
       const parts = transAttr.split('|');
       for (const part of parts) {
-        const [name, params] = part.split(':');
-        const duration = params ? Number(params) : 300;
+        const segs = part.split(':');
+        const dir = segs[0] === 'in' || segs[0] === 'out' ? segs[0]! : '';
+        const name = (dir ? segs[1] : segs[0]) ?? '';
+        const pstr = (dir ? segs.slice(2) : segs.slice(1)).join(':');
+        const duration = Number((/(\d+)\s*\}?\s*$/.exec(pstr) ?? [])[1]) || 300;
+        if (dir === 'out') {
+          const pose = TRANSITION_POSES[name];
+          if (pose) {
+            const parent = el.parentElement;
+            const delay = name === 'stagger' && parent
+              ? Math.max(0, Array.from(parent.children).indexOf(el)) * (duration / 10)
+              : 0;
+            created.push(() => {
+              el.style.transition = `transform ${duration}ms ease ${delay}ms, opacity ${duration}ms ease ${delay}ms`;
+              if (pose.transform) el.style.transform = pose.transform;
+              el.style.opacity = pose.opacity;
+              setTimeout(() => {
+                el.style.transform = '';
+                el.style.opacity = '';
+                el.style.transition = '';
+              }, duration + delay);
+            });
+          } else {
+            const custom = (globalThis as any).__rosefnTransitions?.[name];
+            if (custom) {
+              const ret = custom(el, duration, 'out');
+              if (typeof ret === 'function') created.push(ret);
+            }
+          }
+          continue;
+        }
+        const exitStart = created.length;
         if (name === 'fade') {
           el.style.opacity = '0';
           el.style.transition = `opacity ${duration}ms ease`;
@@ -808,7 +936,14 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
               }, duration + delay);
             });
           }
+        } else {
+          const custom = (globalThis as any).__rosefnTransitions?.[name];
+          if (custom) {
+            const ret = custom(el, duration, dir || 'both');
+            if (typeof ret === 'function') created.push(ret);
+          }
         }
+        if (dir === 'in') created.length = exitStart;
       }
     });
   }
