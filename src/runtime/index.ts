@@ -1574,13 +1574,11 @@ export function restoreState(entries: Map<string, SignalEntry>): void {
 }
 
 export function serializeState(): string {
-  const keys: string[] = [];
-  const values: unknown[] = [];
+  const obj: Record<string, unknown> = {};
   signalMap.forEach((v: { value: unknown }, k: string) => {
-    keys.push(k);
-    values.push(v.value);
+    obj[k] = v.value;
   });
-  return JSON.stringify([keys, values]);
+  return JSON.stringify(obj);
 }
 
 export function resumeState(json: string): void {
