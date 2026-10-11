@@ -1,3 +1,4 @@
+// Zero-dependency image dimension parser: reads just the header bytes of PNG / JPEG / GIF / WebP files to extract intrinsic width & height.
 import fs from "node:fs";
 
 export interface ImageDims {
@@ -14,16 +15,19 @@ export function readImageSize(filePath: string): ImageDims | null {
     fs.closeSync(fd);
     if (read < 24) return null;
 
+    // PNG: 8-byte signature + IHDR chunk (width/height at offset 16, big-endian)
     if (
       buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47
     ) {
       return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
     }
 
+    // GIF: "GIF8" + logical screen descriptor (width/height at 6, little-endian)
     if (buf.slice(0, 3).toString("latin1") === "GIF") {
       return { width: buf.readUInt16LE(6), height: buf.readUInt16LE(8) };
     }
 
+    // WebP: "RIFF" + "WEBP" + VP8/VP8L/VP8X variants
     if (
       buf.slice(0, 4).toString("latin1") === "RIFF" &&
       buf.slice(8, 12).toString("latin1") === "WEBP"
@@ -31,6 +35,7 @@ export function readImageSize(filePath: string): ImageDims | null {
       return parseWebP(buf);
     }
 
+    // JPEG: SOF markers (scan segments for 0xFFC0-0xFFCF, skip 0xFFC4/0xFFC8)
     if (buf[0] === 0xff && buf[1] === 0xd8) {
       return parseJpeg(filePath);
     }
@@ -44,13 +49,16 @@ export function readImageSize(filePath: string): ImageDims | null {
 function parseWebP(buf: Buffer): ImageDims | null {
   const format = buf.slice(12, 16).toString("latin1");
   if (format === "VP8 ") {
+    // lossy: frame tag at 20, width/height at 26 (14-bit, little-endian)
     return { width: buf.readUInt16LE(26) & 0x3fff, height: buf.readUInt16LE(28) & 0x3fff };
   }
   if (format === "VP8L") {
+    // lossless: bits at 21 — 14-bit width-1 / height-1 packed together
     const b = buf.readUInt32LE(21);
     return { width: (b & 0x3fff) + 1, height: ((b >> 14) & 0x3fff) + 1 };
   }
   if (format === "VP8X") {
+    // extended: 24-bit width-1 / height-1 at 24/27
     const w = buf.readUIntLE(24, 3) + 1;
     const h = buf.readUIntLE(27, 3) + 1;
     return { width: w, height: h };
@@ -62,7 +70,7 @@ function parseJpeg(filePath: string): ImageDims | null {
   const fd = fs.openSync(filePath, "r");
   try {
     const buf = Buffer.alloc(4);
-    let pos = 2;
+    let pos = 2; 
     for (let guard = 0; guard < 64; guard++) {
       if (fs.readSync(fd, buf, 0, 4, pos) < 4) return null;
       if (buf[0] !== 0xff) { pos += 1; continue; }
@@ -70,6 +78,7 @@ function parseJpeg(filePath: string): ImageDims | null {
       if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { pos += 2; continue; }
       const len = fs.readSync(fd, buf, 0, 2, pos + 2) < 2 ? 0 : buf.readUInt16BE(2);
       if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        // SOF: precision(1) height(2) width(2) at offset 5
         const seg = Buffer.alloc(8);
         fs.readSync(fd, seg, 0, 8, pos + 4);
         return { width: seg.readUInt16BE(3), height: seg.readUInt16BE(1) };
