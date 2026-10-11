@@ -12,7 +12,7 @@ const COMPONENT_RE = /<script>([\s\S]*?)<\/script>/;
 const TEMPLATE_RE = /<template>([\s\S]*?)<\/template>/;
 const HEAD_RE = /<head>([\s\S]*?)<\/head>/;
 const STYLE_RE = /<style>([\s\S]*?)<\/style>/;
-const DECL_RE = /(?:let|const|var)\s+(\w+)[^=]*=\s*\$(state|data|kv|persist)\b/g;
+const DECL_RE = /(?:let|const|var)\s+(\w+)[^=]*=\s*\$(state|data|kv|persist|derived)\b/g;
 const DECL_CAST_RE = /^\s+as\s+[^;\n]+/;
 const SETSTATE_RE = /\$setState\(([^,]+),\s*([^)]+)\)/g;
 const EVENT_RE = /on:(\w+)=\{([^}]+)\}/g;
@@ -875,6 +875,41 @@ function hoistImports(script: string): { imports: string; rest: string } {
   return { imports: imports.join('\n'), rest: rest.join('\n') };
 }
 
+const __compileMemo = new Map<string, CompileResult>();
+function compileMemoKey(
+  filePath: string,
+  scopeKey: string,
+  isApi: boolean,
+  registry: RoseRegistry,
+): string | null {
+  let st: fs.Stats;
+  try { st = fs.statSync(filePath); } catch { return null; }
+  const reg: string[] = [];
+  for (const [p, e] of registry) reg.push(`${p}#${e.index}:${e.scopeKey}:${e.slots.join('|')}`);
+  return [filePath, String(st.mtimeMs), String(st.size), scopeKey, isApi ? '1' : '0', reg.join(';')].join('\u0000');
+}
+async function compileComponentMemo(
+  filePath: string,
+  publicDir: string,
+  scopeKey: string,
+  isApi: boolean,
+  plugins: Plugin[],
+  registry: RoseRegistry,
+): Promise<CompileResult> {
+  if (plugins.length > 0) return compileComponent(filePath, publicDir, scopeKey, isApi, plugins, registry);
+  const key = compileMemoKey(filePath, scopeKey, isApi, registry);
+  if (key) {
+    const hit = __compileMemo.get(key);
+    if (hit) return { ...hit };
+  }
+  const result = await compileComponent(filePath, publicDir, scopeKey, isApi, plugins, registry);
+  if (key) {
+    if (__compileMemo.size > 500) __compileMemo.clear();
+    __compileMemo.set(key, result);
+  }
+  return result;
+}
+
 export async function compileComponent(filePath: string, publicDir: string, scopeKey: string, isApi = false, plugins: Plugin[] = [], registry: RoseRegistry = new Map()): Promise<CompileResult> {
   let source = await fs.promises.readFile(filePath, 'utf-8');
   for (const p of plugins) {
@@ -1106,6 +1141,8 @@ export async function compileComponent(filePath: string, publicDir: string, scop
 
   const decls = extractDecls(script);
   const stateDecls = decls.filter((d) => d.kind === 'state' || d.kind === 'kv' || d.kind === 'persist');
+  const derivedNames = decls.filter((d) => d.kind === 'derived').map((d) => d.name);
+  const callifyNames = [...stateDecls.map((s) => s.name), ...derivedNames];
 
   const setterNames = new Map<string, string>();
   stateDecls.forEach((s) => setterNames.set(s.name, `set${capitalize(s.name)}`));
@@ -1119,6 +1156,9 @@ export async function compileComponent(filePath: string, publicDir: string, scop
     const fn = isFn ? d.expr : `() => (${d.expr})`;
     if (d.kind === 'persist') {
       return `const [${d.name}, ${setterNames.get(d.name)!}] = persistState(${JSON.stringify(key)}, ${d.expr});`;
+    }
+    if (d.kind === 'derived') {
+      return `const ${d.name} = () => (${callifyStateReads(d.expr, callifyNames)});`;
     }
     if (d.kind === 'kv') {
       const mTtl = /^(.*)\s*,\s*(\d+)\s*$/s.exec(d.expr);
@@ -1138,7 +1178,14 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
   let pos = 0;
   decls.forEach((d, i) => {
     const top = braceDepthAt(script, d.start) === 0;
-    if (!top) nestedDecls.push(d);
+    if (!top) {
+      if (d.kind === 'derived') {
+        throw new Error(
+          `${filePath}: $derived must be a top-level declaration - inside a function body a plain const arrow already does this natively`,
+        );
+      }
+      nestedDecls.push(d);
+    }
     spliced += script.slice(pos, d.start) + (top ? `'__rvdecl${i}__';` : '');
     pos = d.end;
   });
@@ -1146,28 +1193,33 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
 
   let cleanScript = spliced.replace(SETSTATE_RE, (_, key, val) => {
     const trimmedKey = key.trim().replace(/^['"`]|['"`]$/g, '');
+    if (derivedNames.includes(trimmedKey)) {
+      throw new Error(
+        `${filePath}: $setState('${trimmedKey}', ...) - a $derived value is read-only; make it $state or derive a different expression`,
+      );
+    }
     const setter = setterNames.get(trimmedKey) || `set${capitalize(trimmedKey)}`;
     return `${setter}(${val})`;
   });
-  cleanScript = callifyStateReads(cleanScript, stateDecls.map((s) => s.name));
+  cleanScript = callifyStateReads(cleanScript, callifyNames);
   cleanScript = cleanScript.replace(/'__rvdecl(\d+)__';/g, (_m, i) => declCode(decls[Number(i)]));
 
   const stateDeclsCode = nestedDecls.filter((d) => d.kind === 'state').map(declCode).join('\n');
   const dataDeclsCode = nestedDecls.filter((d) => d.kind === 'data').map(declCode).join('\n');
 
-  const templateCalled = callifyTemplateExprs(template, stateDecls.map((s) => s.name));
+  const templateCalled = callifyTemplateExprs(template, callifyNames);
   const imgDefaulted = templateCalled
     .replace(/<img\b(?![^>]*?\sloading=)/gi, '<img loading="lazy"')
     .replace(/<img\b(?![^>]*?\sdecoding=)/gi, '<img decoding="async"')
   const wired = wireEventBindings(imgDefaulted, actionNames, filePath);
 
-  const stateKeys = decls.map((d) => d.name);
+  const stateKeys = decls.filter((d) => d.kind !== 'derived').map((d) => d.name);
 
   const bindBindings: Array<{ event: string; fn: string }> = [];
   let bindCounter = 0;
   const bindExpanded = wired.template.replace(
-    /\sbind:(value|checked|this)\s*=\s*\{([\w$]+)(?:\(\))?\}/g,
-    (whole, kind: string, name: string) => {
+    /\sbind:(value|checked|this|open)\s*=\s*\{([\w$]+)(?:\(\))?\}/g,
+    (whole, kind: string, name: string, offset: number, str: string) => {
       if (!stateKeys.includes(name)) {
         throw new Error(
           `${filePath}: bind:${kind}={${name}} must name a $state declaration` +
@@ -1175,6 +1227,23 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
         );
       }
       if (kind === 'this') return ` data-bind-this="${name}"`;
+      const tagStart = str.lastIndexOf('<', offset);
+      const tagText = tagStart >= 0 ? str.slice(tagStart, offset) : '';
+      if (kind === 'value' && /^<select[\s>]/i.test(tagText) && /\smultiple\b/i.test(tagText)) {
+        const setterM = setterNames.get(name)!;
+        const hnameM = `__rvbind_${scopeKey.replace(/\W/g, '_')}_${bindCounter++}`;
+        bindBindings.push({
+          event: 'change',
+          fn: `${hnameM}: (e) => ${setterM}(Array.from(e.target.selectedOptions, (o) => o.value))`,
+        });
+        return ` data-selmulti={${name}().join(',')} data-on-change="${hnameM}"`;
+      }
+      if (kind === 'open') {
+        const setterO = setterNames.get(name)!;
+        const hnameO = `__rvbind_${scopeKey.replace(/\W/g, '_')}_${bindCounter++}`;
+        bindBindings.push({ event: 'toggle', fn: `${hnameO}: (e) => ${setterO}(e.target.open)` });
+        return ` open={${name}()} data-on-toggle="${hnameO}"`;
+      }
       const setter = setterNames.get(name)!;
       const evt = kind === 'checked' ? 'change' : 'input';
       const hname = `__rvbind_${scopeKey.replace(/\W/g, '_')}_${bindCounter++}`;
@@ -1268,7 +1337,8 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
         : ` data-use="${name}"`,
   );
   const classExpanded = expandClassDirectives(useExpanded, filePath);
-  const styleExpanded = expandStyleDirectives(classExpanded, filePath);
+  const classMerged = mergeStaticClass(classExpanded);
+  const styleExpanded = expandStyleDirectives(classMerged, filePath);
   const transExpanded = expandTransitionDirectives(styleExpanded, filePath);
   const animExpanded = expandAnimateDirectives(transExpanded, filePath);
   const keyExpanded = expandKeyBlocks(animExpanded, filePath);
@@ -1361,8 +1431,15 @@ function minifyDecls(block: string): string {
  * pass through unscoped (their from/to/to selectors are not selectors).
  * Global element rules (:root/html/body) belong in the shell's STYLES.
  */
-function scopeCss(css: string, key: string): string {
+export function scopeCss(css: string, key: string): string {
   const attr = `[data-rosefn-c="${key}"]`;
+  const scopeOneSelector = (s: string): string => {
+    const t = s.trim();
+    if (!t.includes(':global')) return `${attr} ${t}`;
+    const stripped = t.replace(/:global\([^()]*\)/g, (m) => m.slice(8, -1)).trim();
+    const outside = t.replace(/:global\([^()]*\)/g, '').trim();
+    return outside ? `${attr} ${stripped}` : stripped;
+  };
   const clean = css.replace(/\/\*[\s\S]*?\*\//g, '');
   let out = '';
   let prelude = '';
@@ -1382,7 +1459,7 @@ function scopeCss(css: string, key: string): string {
       if (sel.startsWith('@')) {
         out += `${sel}{${/^@(?:-[\w]+-)?keyframes/.test(sel) ? minifyDecls(block) : scopeCss(block, key)}}`;
       } else if (sel) {
-        const scoped = sel.split(',').map((s) => `${attr} ${s.trim()}`).join(',');
+        const scoped = sel.split(',').map((s) => scopeOneSelector(s)).join(',');
         out += `${scoped}{${minifyDecls(block)}}`;
       }
       prelude = '';
@@ -1608,7 +1685,7 @@ function extractDecls(script: string): Decl[] {
     if (script[end] === ';') end++;
     decls.push({
       name: m[1],
-      kind: m[2] as 'state' | 'data' | 'persist',
+      kind: m[2] as 'state' | 'data' | 'persist' | 'kv' | 'derived',
       expr: script.slice(open, i - 1).trim(),
       start: m.index,
       end,
@@ -1859,6 +1936,53 @@ function expandIfElseOnce(template: string): { template: string; changed: boolea
 }
 
 /**
+ * F32: a static class and a reactive class={expr} on ONE tag are two writers
+ * for a single attribute - the HTML parser keeps the first, so the reactive
+ * half silently never renders and the first update wipes the static value.
+ * Merge: the static value becomes the BASE of the expression's result via an
+ * inline wrapper - object results are seeded with { "static": true, ...rest },
+ * string results are prefixed, null keeps the base. Runs after the class:
+ * directive pass (which already fails on static+directive+reactive conflicts
+ * it cannot own).
+ */
+function mergeStaticClass(template: string): string {
+  if (!/\sclass\s*=\s*"/.test(template) || !/\sclass\s*=\s*\{/.test(template)) return template;
+  const TAG_RE = /<([a-zA-Z][^\s>/]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
+  let out = '';
+  let pos = 0;
+  let m: RegExpExecArray | null;
+  TAG_RE.lastIndex = 0;
+  while ((m = TAG_RE.exec(template))) {
+    const [whole, tag, attrs, selfClose] = m;
+    const sm = /\sclass\s*=\s*"([^"]*)"/.exec(attrs);
+    if (!sm) continue;
+    const rm = /\sclass\s*=\s*\{/.exec(attrs);
+    if (!rm || rm.index === sm.index) continue;
+    const open = attrs.indexOf('{', rm.index);
+    let depth = 1;
+    let j = open + 1;
+    while (j < attrs.length && depth > 0) {
+      const ch = attrs[j];
+      if (ch === '"' || ch === "'") { j = skipQuoted(attrs, j); continue; }
+      if (ch === '{') depth++;
+      else if (ch === '}') depth--;
+      j++;
+    }
+    if (depth !== 0) continue;
+    const expr = attrs.slice(open + 1, j - 1);
+    const base = JSON.stringify(sm[1]);
+    const merged = ` class={((v) => v == null ? ${base} : typeof v === 'object' ? ({ ${base}: true, ...v }) : (${base} + ' ' + v))(${expr})}`;
+    const lo = Math.min(sm.index, rm.index);
+    const hiEnd = Math.max(sm.index + sm[0].length, j);
+    const newAttrs = attrs.slice(0, lo) + merged + attrs.slice(hiEnd);
+    out += template.slice(pos, m.index) + `<${tag}${newAttrs}${selfClose}>`;
+    pos = m.index + whole.length;
+  }
+  out += template.slice(pos);
+  return out;
+}
+
+/**
  * F2c (class: directive): `class:NAME={expr}` merges with the tag's static
  * class into ONE reactive class attribute whose closure concatenates the
  * static value plus each conditional segment - one attrMark, one data-b
@@ -1946,7 +2070,7 @@ function expandClassDirectives(template: string, filePath: string): string {
  * Example: `<div transition:fade>` or `<div transition:fade={duration: 300}>`.
  */
 function expandTransitionDirectives(template: string, filePath: string): string {
-  if (!template.includes('transition:')) return template;
+  if (!/\s(?:transition|in|out):/.test(template)) return template;
   const TAG_RE = /<([a-zA-Z][^\s>/]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
   let out = '';
   let pos = 0;
@@ -1954,9 +2078,9 @@ function expandTransitionDirectives(template: string, filePath: string): string 
   TAG_RE.lastIndex = 0;
   while ((m = TAG_RE.exec(template))) {
     const [whole, tag, attrs, selfClose] = m;
-    if (!attrs.includes('transition:')) continue;
-    const pairs: Array<{ name: string; params: string; start: number; end: number }> = [];
-    const NAME_RE = /\stransition:([\w-]+)(?:\s*=\s*\{)?/g;
+    if (!attrs.includes('transition:') && !/\s(?:in|out):/.test(attrs)) continue;
+    const pairs: Array<{ dir: string; name: string; params: string; start: number; end: number }> = [];
+    const NAME_RE = /\s(transition|in|out):([\w-]+)(?:\s*=\s*\{)?/g;
     let nm: RegExpExecArray | null;
     while ((nm = NAME_RE.exec(attrs))) {
       let start = nm.index;
@@ -1978,12 +2102,13 @@ function expandTransitionDirectives(template: string, filePath: string): string 
         params = attrs.slice(end, i - 1);
         end = i;
       }
-      pairs.push({ name: nm[1], params, start, end });
+      pairs.push({ dir: nm[1] === 'transition' ? '' : nm[1], name: nm[2], params, start, end });
     }
+    if (pairs.length === 0) continue;
     let transitionValue = '';
     for (const p of pairs) {
       if (transitionValue) transitionValue += '|';
-      transitionValue += p.name + (p.params ? ':' + p.params : '');
+      transitionValue += (p.dir ? p.dir + ':' : '') + p.name + (p.params ? ':' + p.params : '');
     }
     let newAttrs = attrs;
     for (let k = pairs.length - 1; k >= 0; k--) {
@@ -2393,7 +2518,7 @@ function findBlock(src: string, kind: 'if' | 'each' | 'boundary' | 'island' | 's
         ? /\{#island(?:\s+name="([^"]*)")?(?:\s+hydrate="([^"]*)")?\s*\}/g
         : kind === 'snippet'
           ? /\{#snippet\s+(\w+)(?:\s*\(([^)]+)\))?\s*\}/g
-          : /\{#each\s+([^}]+?)\s+as\s+(\{[^{}]*\}|\[[^[\]]*\]|\w+)(?:\s*,\s*(\w+))?\}/g;
+          : /\{#each\s+([^}]+?)\s+as\s+(\{[^{}]*\}|\[[^[\]]*\]|\w+)(?:\s*,\s*(\w+))?(?:\s*\(([^)]+)\))?\}/g;
   const closeRe = new RegExp(`\\{/${kind}\\}`, 'g');
   let open: RegExpExecArray | null;
   while ((open = head.exec(src))) {
@@ -2417,7 +2542,8 @@ function findBlock(src: string, kind: 'if' | 'each' | 'boundary' | 'island' | 's
         const content = src.slice(afterOpen, nextClose.index);
         const groups = kind === 'boundary' ? [open[1] ?? '', content]
           : kind === 'island' ? [open[1] ?? '', open[2] ?? '', content]
-          : kind === 'if' ? [open[1], content] : [open[1], open[2], open[3] ?? '', content];
+          : kind === 'snippet' ? [open[1], open[2] ?? '', content]
+          : kind === 'if' ? [open[1], content] : [open[1], open[2], open[3] ?? '', open[4] ?? '', content];
         const arr = [src.slice(start, i), ...groups] as unknown as RegExpExecArray;
         (arr as any).index = start;
         return arr;
@@ -2497,7 +2623,7 @@ function compileHead(head: string): string {
  * Adversarial probing found all three in one afternoon; a template compiler
  * that emits broken code silently is the worst failure mode it has.
  */
-const KNOWN_CLOSERS = new Set(['if', 'each', 'boundary', 'island', 'await']);
+const KNOWN_CLOSERS = new Set(['if', 'each', 'boundary', 'island', 'await', 'snippet']);
 const __blockResCache = new Map<string, { open: RegExp; close: RegExp }>();
 function blockCloseRes(kind: string): { open: RegExp; close: RegExp } {
   let hit = __blockResCache.get(kind);
@@ -2567,7 +2693,7 @@ function assertKnownDirectives(template: string, filePath: string): void {
   while ((m = OPENER_RE.exec(template))) {
     if (inRaw(m.index)) continue;
     const [, kind, head] = m;
-    if (kind === 'each' && !/\bas\s+(\{[^{}]*\}?|\[[^[\]]*\]?|\w+)(?:\s*,\s*\w+)?\s*$/.test(head)) {
+    if (kind === 'each' && !/\bas\s+(\{[^{}]*\}?|\[[^[\]]*\]?|\w+)(?:\s*,\s*\w+)?(?:\s*\([^)]*\))?\s*$/.test(head)) {
       throw new RoseError(
         'E-TEMPLATE',
         `${filePath}: {#each ${head.trim()}} is missing its item name`,
@@ -2659,6 +2785,8 @@ function compileTemplate(
 
   const nextId = () => `${depth}_${blockId++}`;
 
+  if (depth === 0) result += 'const __snip = {};\n';
+
   while (remaining.length > 0) {
     const ifMatch = findBlock(remaining, 'if');
     const eachMatch = findBlock(remaining, 'each');
@@ -2676,9 +2804,9 @@ function compileTemplate(
     if (eachMatch?.index !== undefined) candidates.push({ type: 'each', match: eachMatch, index: eachMatch.index });
     if (boundaryMatch?.index !== undefined) candidates.push({ type: 'boundary', match: boundaryMatch, index: boundaryMatch.index });
     if (islandMatch?.index !== undefined) candidates.push({ type: 'island', match: islandMatch, index: islandMatch.index });
+    if (snippetMatch?.index !== undefined) candidates.push({ type: 'snippet', match: snippetMatch, index: snippetMatch.index });
     if (exprMatch?.index !== undefined) candidates.push({ type: 'expr', match: exprMatch, index: exprMatch.index });
     if (compTag) candidates.push({ type: 'comp', match: exprMatch!, index: compTag.start, tag: compTag });
-    if (snippetMatch?.index !== undefined) candidates.push({ type: 'snippet', match: snippetMatch, index: snippetMatch.index });
     const earliest = candidates.length > 0
       ? candidates.reduce((a, b) => (a.index <= b.index ? a : b))
       : null;
@@ -2725,7 +2853,7 @@ function compileTemplate(
       }
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
     } else if (earliest.type === 'each') {
-      const [, items, item, index, content] = earliest.match;
+      const [, items, item, index, key, content] = earliest.match;
       const before = remaining.substring(0, earliest.index);
       if (before) result += emitChunk(before, acc, closes, scope);
       const call = autoCall(items);
@@ -2744,9 +2872,23 @@ function compileTemplate(
       scoped += content.trim().slice(lastSpan);
       const inner = compileTemplate(scoped, 'h', '__c', '__s', depth + 1, effMarkers, comps, islandDepth);
       const body = isDestructure ? `const ${item} = __s; ${inner}` : inner;
+      let keyFn = '';
+      if (key) {
+        if (isDestructure) {
+          throw new RoseError(
+            'E-TEMPLATE',
+            `${filePath}: a keyed {#each} keys on a named item's property - write {#each xs as x (x.id)}, not a destructuring pattern`,
+            { file: filePath, hint: 'name the item first, then key on one of its properties' },
+          );
+        }
+        let k = key.trim();
+        if (itemRe) k = k.replace(itemRe, '__s');
+        if (indexRe) k = k.replace(indexRe, '__i');
+        keyFn = `, (__s, __i) => (${k})`;
+      }
       result += `const __b${id} = (__s, __c${index ? ', __i' : ''}) => { let h = ''; ${body} return h; };\n`;
       if (effMarkers) {
-        result += `${acc} += eachMark(${closes}, () => (${call}), __b${id});\n`;
+        result += `${acc} += eachMark(${closes}, () => (${call}), __b${id}${keyFn});\n`;
       } else {
         const param = isDestructure ? '__s' : item;
         result += `${acc} += (${call}).map((${param}${index ? ', __i' : ''}) => __b${id}(${param}, []${index ? ', __i' : ''}))).join('');\n`;
@@ -2785,7 +2927,7 @@ function compileTemplate(
       const id = nextId();
       const paramList = params ? params.split(',').map(p => p.trim()).filter(Boolean).join(',') : '';
       const inner = compileTemplate(content.trim(), 'h', '__c', '__s', depth + 1, effMarkers, comps, islandDepth);
-      result += `(__snip || (__snip = {})).${name} = (__s, __c${paramList ? ',' + paramList : ''}) => { let h = ''; ${inner} return h; };\n`;
+      result += `__snip.${name} = (__s, __c${paramList ? ',' + paramList : ''}) => { let h = ''; ${inner} return h; };\n`;
       remaining = remaining.substring(earliest.index + earliest.match[0].length);
     } else if (earliest.type === 'comp') {
       const tag = earliest.tag!;
@@ -2898,6 +3040,22 @@ function compileTemplate(
         result += names
           ? `console.log('[rosefn:debug]', { ${names} });\n`
           : `console.log('[rosefn:debug]'); debugger;\n`;
+        remaining = remaining.substring(earliest.index + earliest.match[0].length);
+        continue;
+      }
+      const renderMatch = /^@render\s+([A-Za-z_$][\w$]*)\s*\(([\s\S]*)\)\s*$/.exec(trimmed);
+      if (renderMatch) {
+        const ahead = new RegExp(`\\{#snippet\\s+${renderMatch[1]}\\b`).test(remaining.substring(earliest.index + earliest.match[0].length));
+        if (ahead) {
+          throw new RoseError(
+            'E-TEMPLATE',
+            `${filePath}: {@render ${renderMatch[1]}} runs before its {#snippet ${renderMatch[1]}} is defined`,
+            { file: filePath, hint: 'move the {#snippet} definition above the {@render} call - definitions register as the statement stream reaches them' },
+          );
+        }
+        if (before) result += emitChunk(before, acc, closes, scope);
+        const renderArgs = renderMatch[2].trim();
+        result += `${acc} += ((__snip && __snip.${renderMatch[1]}) ? __snip.${renderMatch[1]}(${scope ?? 'null'}, ${closes}${renderArgs ? ', ' + renderArgs : ''}) : '');\n`;
         remaining = remaining.substring(earliest.index + earliest.match[0].length);
         continue;
       }
@@ -3565,7 +3723,7 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
     files.map((f, i) => [f, { index: i, scopeKey: scopeKeys[i], slots: scanSlotDecls(f) }])
   );
   const compiled = await Promise.all(
-    files.map((f, i) => compileComponent(f, path.join(root, 'public'), scopeKeys[i], infos[i].isApi, plugins, registry))
+    files.map((f, i) => compileComponentMemo(f, path.join(root, 'public'), scopeKeys[i], infos[i].isApi, plugins, registry))
   );
 
   const importsOf = new Map<number, number[]>();
