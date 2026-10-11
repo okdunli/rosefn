@@ -4642,7 +4642,7 @@ async function renderPageIsolated(pathname, form) {
       // __route tells the bootstrap which route this document was rendered for.
       const noJs = route.csr === false;
       let state = '{}';
-      if (!noJs) {
+      if (!noJs || actionStatus !== 0) {
         const s = serializeState();
         state = '{"__route":' + JSON.stringify(pathname) + (s.length > 2 ? ',' + s.slice(1) : '}');
       }
