@@ -6,6 +6,8 @@ type SignalEntry = { value: unknown; subs: Set<Subscriber> };
 
 let currentEffect: (() => void) | null = null;
 
+let trackingDeps: Set<SignalEntry> | null = null;
+
 let signalMap: Map<string, SignalEntry> =
   (globalThis as any).__rosefn_signalMap ?? new Map();
 (globalThis as any).__rosefn_signalMap = signalMap;
@@ -21,14 +23,24 @@ export function state<T>(key: string, initial: T): [() => T, (v: T) => void] {
   const e = entry(key, initial);
 
   const getter = () => {
-    if (currentEffect) e.subs.add(currentEffect);
+    if (currentEffect) {
+      e.subs.add(currentEffect);
+      if (trackingDeps) trackingDeps.add(e);
+    }
     return e.value as T;
   };
 
   const setter = (v: T) => {
-    e.value = v;
+    const next = (typeof v === 'function' ? (v as (cur: T) => T)(e.value) : v) as T;
+    e.value = next;
+    const prevEffect = currentEffect;
+    const prevTracking = trackingDeps;
+    currentEffect = null;
+    trackingDeps = null;
     e.subs.forEach((fn: Subscriber) => fn());
-    if (persistedKeys.has(key)) writeStorage(key, v);
+    currentEffect = prevEffect;
+    trackingDeps = prevTracking;
+    if (persistedKeys.has(key)) writeStorage(key, next);
   };
 
   return [getter, setter];
@@ -38,10 +50,26 @@ export function hasState(key: string): boolean {
   return signalMap.has(key);
 }
 
+let seededKeys = new Set<string>();
+
+export function isSeeded(key: string): boolean {
+  return seededKeys.has(key);
+}
+
+export function markSeeded(key: string): void {
+  seededKeys.add(key);
+}
+
 export function setState<T>(key: string, value: T): void {
   const e = entry(key, value);
   e.value = value;
+  const prevEffect = currentEffect;
+  const prevTracking = trackingDeps;
+  currentEffect = null;
+  trackingDeps = null;
   e.subs.forEach((fn: Subscriber) => fn());
+  currentEffect = prevEffect;
+  trackingDeps = prevTracking;
   if (persistedKeys.has(key)) writeStorage(key, value);
 }
 
@@ -115,7 +143,7 @@ export function resetContainerFx(container: object): void {
     keys.forEach((k: string) => signalMap.delete(k));
     keysByOwner.delete(container);
   }
-  dataCache.clear();
+  renderMaps().data.clear();
   pendingDeltas.clear();
 }
 
@@ -137,6 +165,55 @@ export function effect(fn: () => void): Cleanup {
   };
   fxSet().add(cleanup);
   return cleanup;
+}
+
+// F43: `$effect(fn)` - the reactive effect rune. Client-only (SSR: a no-op, fn never fires).
+export function $effect(fn: () => void | (() => void)): Cleanup {
+  if (typeof document === 'undefined') return () => {};
+  const deps = new Set<SignalEntry>();
+  let cleanup: (() => void) | undefined;
+  let scheduled = false;
+  let disposed = false;
+  const detach = () => {
+    deps.forEach((e: SignalEntry) => e.subs.delete(wrapped));
+    deps.clear();
+  };
+  const run = () => {
+    if (disposed) return;
+    scheduled = true;
+    detach();
+    if (typeof cleanup === 'function') {
+      try { (cleanup as () => void)(); } catch { /* a stale cleanup must not kill the route */ }
+    }
+    const prevEffect = currentEffect;
+    const prevTracking = trackingDeps;
+    currentEffect = wrapped;
+    trackingDeps = deps;
+    try {
+      const ret = fn();
+      cleanup = typeof ret === 'function' ? (ret as () => void) : undefined;
+    } catch { /* a throwing effect must not kill the route */ }
+    currentEffect = prevEffect;
+    trackingDeps = prevTracking;
+    scheduled = false;
+  };
+  const wrapped: Subscriber = () => {
+    if (scheduled || disposed) return;
+    scheduled = true;
+    queueMicrotask(run);
+  };
+  const owner = fxSet();
+  const dispose: Cleanup = () => {
+    disposed = true;
+    detach();
+    if (typeof cleanup === 'function') {
+      try { (cleanup as () => void)(); } catch {  }
+    }
+    owner.delete(dispose);
+  };
+  owner.add(dispose);
+  queueMicrotask(run);
+  return dispose;
 }
 
 const ESC_MAP: Record<string, string> = {
@@ -386,7 +463,7 @@ export function clearHead(): void {
  * Works on the live SSR DOM (adoption) and on freshly parsed fragments.
  * Returns a disposer for every effect it created.
  */
-const TRANSITION_POSES: Record<string, { transform?: string; opacity: string }> = {
+const TRANSITION_POSES: Record<string, { transform?: string; filter?: string; opacity: string }> = {
   fade: { opacity: '0' },
   slide: { transform: 'translateY(20px)', opacity: '0' },
   fly: { transform: 'translateX(-30px) rotate(-5deg)', opacity: '0' },
@@ -395,8 +472,25 @@ const TRANSITION_POSES: Record<string, { transform?: string; opacity: string }> 
   'slide-down': { transform: 'translateY(-30px)', opacity: '0' },
   'slide-left': { transform: 'translateX(30px)', opacity: '0' },
   'slide-right': { transform: 'translateX(-30px)', opacity: '0' },
+  scale: { transform: 'scale(0.7)', opacity: '0' },
+  spin: { transform: 'rotate(-90deg)', opacity: '0' },
+  blur: { filter: 'blur(8px)', opacity: '0' },
   stagger: { transform: 'translateY(10px)', opacity: '0' },
 };
+
+function parseTransitionParams(pstr: string): { duration?: number; delay?: number; easing?: string } {
+  const out: { duration?: number; delay?: number; easing?: string } = {};
+  if (!pstr) return out;
+  const trimmed = pstr.trim();
+  if (/^\d+$/.test(trimmed)) { out.duration = Number(trimmed); return out; }
+  const dM = /duration\s*:\s*(\d+)/.exec(pstr);
+  if (dM) out.duration = Number(dM[1]);
+  const dlM = /delay\s*:\s*(\d+)/.exec(pstr);
+  if (dlM) out.delay = Number(dlM[1]);
+  const eM = /easing\s*:\s*(['"])(.*?)\1/.exec(pstr);
+  if (eM) out.easing = eM[2];
+  return out;
+}
 
 export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Cleanup {
   let holder: Node = root;
@@ -671,8 +765,9 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
       if (attr === 'value') {
         weff(() => {
           const v = effect();
+          const out = v == null ? '' : v;
           const inp = el as unknown as HTMLInputElement;
-          if (inp.value !== v) inp.value = v;
+          if (inp.value !== out) inp.value = out;
         });
       } else if (attr === 'data-selmulti') {
         weff(() => {
@@ -692,7 +787,10 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
           else el.removeAttribute(name);
         });
       } else {
-        weff(() => { el.setAttribute(attr, attrValueString(attr, (closes[idx] as (s?: unknown) => unknown)(scope))); });
+        weff(() => {
+          const out = attrValueString(attr, (closes[idx] as (s?: unknown) => unknown)(scope));
+          if (el.getAttribute(attr) !== out) el.setAttribute(attr, out);
+        });
       }
     }
   });
@@ -735,20 +833,27 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
         const dir = segs[0] === 'in' || segs[0] === 'out' ? segs[0]! : '';
         const name = (dir ? segs[1] : segs[0]) ?? '';
         const pstr = (dir ? segs.slice(2) : segs.slice(1)).join(':');
-        const duration = Number((/(\d+)\s*\}?\s*$/.exec(pstr) ?? [])[1]) || 300;
+        const params = parseTransitionParams(pstr);
+        const duration = params.duration != null ? Number(params.duration) : 300;
         if (dir === 'out') {
           const pose = TRANSITION_POSES[name];
           if (pose) {
             const parent = el.parentElement;
-            const delay = name === 'stagger' && parent
-              ? Math.max(0, Array.from(parent.children).indexOf(el)) * (duration / 10)
-              : 0;
+            const idx = parent ? Math.max(0, Array.from(parent.children).indexOf(el)) : 0;
+            const vDelay = params.delay != null ? Number(params.delay) : null;
+            const delay = name === 'stagger'
+              ? (vDelay != null ? Math.max(0, vDelay) : idx * (duration / 10))
+              : (vDelay != null ? vDelay : 0);
+            const easing = params.easing || 'ease';
             created.push(() => {
-              el.style.transition = `transform ${duration}ms ease ${delay}ms, opacity ${duration}ms ease ${delay}ms`;
+              const parts = [pose.transform ? `transform ${duration}ms ${easing} ${delay}ms` : '', pose.filter ? `filter ${duration}ms ${easing} ${delay}ms` : '', `opacity ${duration}ms ${easing} ${delay}ms`].filter(Boolean);
+              el.style.transition = parts.join(', ');
               if (pose.transform) el.style.transform = pose.transform;
+              if (pose.filter) el.style.filter = pose.filter;
               el.style.opacity = pose.opacity;
               setTimeout(() => {
                 el.style.transform = '';
+                el.style.filter = '';
                 el.style.opacity = '';
                 el.style.transition = '';
               }, duration + delay);
@@ -763,179 +868,42 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
           continue;
         }
         const exitStart = created.length;
-        if (name === 'fade') {
-          el.style.opacity = '0';
-          el.style.transition = `opacity ${duration}ms ease`;
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              el.style.opacity = '1';
-            });
-          });
-          created.push(() => {
-            el.style.opacity = '0';
-            setTimeout(() => {
-              el.style.opacity = '';
-              el.style.transition = '';
-            }, duration);
-          });
-        } else if (name === 'slide') {
-          el.style.transform = 'translateY(20px)';
-          el.style.opacity = '0';
-          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              el.style.transform = '';
-              el.style.opacity = '1';
-            });
-          });
-          created.push(() => {
-            el.style.transform = 'translateY(20px)';
-            el.style.opacity = '0';
-            setTimeout(() => {
-              el.style.transform = '';
-              el.style.opacity = '';
-              el.style.transition = '';
-            }, duration);
-          });
-        } else if (name === 'fly') {
-          el.style.transform = 'translateX(-30px) rotate(-5deg)';
-          el.style.opacity = '0';
-          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              el.style.transform = '';
-              el.style.opacity = '1';
-            });
-          });
-          created.push(() => {
-            el.style.transform = 'translateX(-30px) rotate(-5deg)';
-            el.style.opacity = '0';
-            setTimeout(() => {
-              el.style.transform = '';
-              el.style.opacity = '';
-              el.style.transition = '';
-            }, duration);
-          });
-        } else if (name === 'zoom') {
-          el.style.transform = 'scale(0.8)';
-          el.style.opacity = '0';
-          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              el.style.transform = '';
-              el.style.opacity = '1';
-            });
-          });
-          created.push(() => {
-            el.style.transform = 'scale(0.8)';
-            el.style.opacity = '0';
-            setTimeout(() => {
-              el.style.transform = '';
-              el.style.opacity = '';
-              el.style.transition = '';
-            }, duration);
-          });
-        } else if (name === 'slide-up') {
-          el.style.transform = 'translateY(30px)';
-          el.style.opacity = '0';
-          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              el.style.transform = '';
-              el.style.opacity = '1';
-            });
-          });
-          created.push(() => {
-            el.style.transform = 'translateY(30px)';
-            el.style.opacity = '0';
-            setTimeout(() => {
-              el.style.transform = '';
-              el.style.opacity = '';
-              el.style.transition = '';
-            }, duration);
-          });
-        } else if (name === 'slide-down') {
-          el.style.transform = 'translateY(-30px)';
-          el.style.opacity = '0';
-          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              el.style.transform = '';
-              el.style.opacity = '1';
-            });
-          });
-          created.push(() => {
-            el.style.transform = 'translateY(-30px)';
-            el.style.opacity = '0';
-            setTimeout(() => {
-              el.style.transform = '';
-              el.style.opacity = '';
-              el.style.transition = '';
-            }, duration);
-          });
-        } else if (name === 'slide-left') {
-          el.style.transform = 'translateX(30px)';
-          el.style.opacity = '0';
-          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              el.style.transform = '';
-              el.style.opacity = '1';
-            });
-          });
-          created.push(() => {
-            el.style.transform = 'translateX(30px)';
-            el.style.opacity = '0';
-            setTimeout(() => {
-              el.style.transform = '';
-              el.style.opacity = '';
-              el.style.transition = '';
-            }, duration);
-          });
-        } else if (name === 'slide-right') {
-          el.style.transform = 'translateX(-30px)';
-          el.style.opacity = '0';
-          el.style.transition = `transform ${duration}ms ease, opacity ${duration}ms ease`;
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              el.style.transform = '';
-              el.style.opacity = '1';
-            });
-          });
-          created.push(() => {
-            el.style.transform = 'translateX(-30px)';
-            el.style.opacity = '0';
-            setTimeout(() => {
-              el.style.transform = '';
-              el.style.opacity = '';
-              el.style.transition = '';
-            }, duration);
-          });
-        } else if (name === 'stagger') {
+        const pose = TRANSITION_POSES[name];
+        if (pose) {
           const parent = el.parentElement;
-          if (parent) {
-            const siblings = Array.from(parent.children);
-            const index = siblings.indexOf(el);
-            const delay = index * (duration / 10);
-            el.style.opacity = '0';
-            el.style.transform = 'translateY(10px)';
-            el.style.transition = `opacity ${duration}ms ease ${delay}ms, transform ${duration}ms ease ${delay}ms`;
+          const idx = parent ? Math.max(0, Array.from(parent.children).indexOf(el)) : 0;
+          const vDelay = params.delay != null ? Number(params.delay) : null;
+          const delay = name === 'stagger'
+            ? (vDelay != null ? Math.max(0, vDelay) : idx * (duration / 10))
+            : (vDelay != null ? vDelay : 0);
+          const easing = params.easing || 'ease';
+          const cssParts: string[] = [];
+          if (pose.transform) cssParts.push(`transform ${duration}ms ${easing} ${delay}ms`);
+          if (pose.filter) cssParts.push(`filter ${duration}ms ${easing} ${delay}ms`);
+          cssParts.push(`opacity ${duration}ms ${easing} ${delay}ms`);
+          const tcss = cssParts.join(', ');
+          el.style.opacity = '0';
+          if (pose.transform) el.style.transform = pose.transform;
+          if (pose.filter) el.style.filter = pose.filter;
+          el.style.transition = tcss;
+          requestAnimationFrame(() => {
             requestAnimationFrame(() => {
-              requestAnimationFrame(() => {
-                el.style.opacity = '1';
-                el.style.transform = '';
-              });
+              el.style.transform = '';
+              el.style.filter = '';
+              el.style.opacity = '1';
             });
-            created.push(() => {
-              el.style.opacity = '0';
-              el.style.transform = 'translateY(10px)';
-              setTimeout(() => {
-                el.style.opacity = '';
-                el.style.transform = '';
-                el.style.transition = '';
-              }, duration + delay);
-            });
-          }
+          });
+          created.push(() => {
+            el.style.opacity = '0';
+            if (pose.transform) el.style.transform = pose.transform;
+            if (pose.filter) el.style.filter = pose.filter;
+            setTimeout(() => {
+              el.style.opacity = '';
+              el.style.transform = '';
+              el.style.filter = '';
+              el.style.transition = '';
+            }, duration + delay);
+          });
         } else {
           const custom = (globalThis as any).__rosefnTransitions?.[name];
           if (custom) {
@@ -955,8 +923,9 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
       const animAttr = el.getAttribute('data-animate')!;
       const parts = animAttr.split('|');
       for (const part of parts) {
-        const [name, params] = part.split(':');
-        const duration = params ? Number(params) : 300;
+        const [name] = part.split(':');
+        const rest = part.slice(name.length + 1);
+        const duration = Number((/(\d+)\s*\}?\s*$/.exec(rest) ?? [])[1]) || 300;
         if (name === 'flip') {
           const firstRect = el.getBoundingClientRect();
           const firstTop = firstRect.top;
@@ -1316,7 +1285,7 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
         const h = handlers[spec];
         if (h) h(e);
       };
-      target.addEventListener(ev, listener);
+      target.addEventListener(ev, listener, ev === 'scroll' ? { passive: true } : undefined);
       created.push(() => {
         target.removeEventListener(ev, listener);
         const s = directBound.get(el);
@@ -1339,22 +1308,56 @@ export function resetEffects(): void {
   pendingIslandObservers.clear();
 }
 
-let dataCache = new Map<string, Promise<unknown>>();
-
 export function $data<T>(fn: () => T | Promise<T>): Promise<T> {
+  const cache = renderMaps().data;
   const key = fn.toString();
-  let p = dataCache.get(key);
+  let p = cache.get(key);
   if (!p) {
     p = Promise.resolve(fn());
-    dataCache.set(key, p);
+    cache.set(key, p);
   }
   return p as Promise<T>;
 }
 
 export function clearRequestState(): void {
   signalMap.clear();
-  dataCache.clear();
+  renderMaps().data.clear();
   pendingDeltas.clear();
+  seededKeys = new Set();
+}
+
+/**
+ * Run `fn` with request state no other in-flight render can observe or
+ * destroy, then restore the caller's state.
+ *
+ * signalMap is a process-wide singleton (deliberate - every inlined module
+ * shares one map), which is only safe while renders never overlap. They
+ * DO overlap: prod-server warms every route in the background at startup, and
+ * renderPageCached revalidates a stale cache entry in the background while the
+ * foreground request is still streaming. Each of those renders used to open
+ * with clearRequestState(), wiping whichever render was in flight; the
+ * survivor then saw hasState()===true for a key it never seeded and
+ * dereferenced the other render's null - "Cannot read properties of null
+ * (reading 'bodyFix')", a 500 that hits a cold route and clears on refresh.
+ *
+ * Isolating here makes concurrent renders correct rather than merely unlikely.
+ * Two different mechanisms, because they fail differently: signalMap is
+ * swapped and restored (it is synchronous to read, and its entries are keyed
+ * per state key), while dataCache rides the async chain instead - see
+ * renderMaps() for why a swap there was not isolation at all.
+ */
+export async function isolateRender<T>(fn: () => Promise<T>): Promise<T> {
+  const savedSignals = signalMap;
+  const savedSeeded = seededKeys;
+  signalMap = new Map();
+  seededKeys = new Set();
+  renderMaps().data.clear();
+  try {
+    return await fn();
+  } finally {
+    signalMap = savedSignals;
+    seededKeys = savedSeeded;
+  }
 }
 
 let requestQuery: Record<string, string> = {};
@@ -1380,13 +1383,97 @@ export function setPrefetchOverride(q: Record<string, string> | null): void {
 
 let requestContext: Record<string, unknown> = {};
 
-export function getContext(): Record<string, unknown> {
-  return requestContext;
+/** Pluggable per-async-chain store; see the comment above. */
+type ContextStore = {
+  getStore(): Record<string, unknown> | undefined;
+  run<T>(store: Record<string, unknown>, fn: () => T): T;
+};
+let contextStore: ContextStore | null = null;
+
+/**
+ * The render-local maps for the CURRENT async chain.
+ *
+ * isolateRender() used to swap module-level `dataCache` / `signalMap` and
+ * restore them in a finally. That is not isolation, it is a rename: `await`
+ * yields, so two overlapping renders interleave and the second one saves the
+ * FIRST one's fresh map as its "saved" value. Concretely, with A and B running:
+ *
+ *   A: saved = D0;  dataCache = DA
+ *   B: saved = DA;  dataCache = DB        <- A's writes now land in DB
+ *   A: restore dataCache = D0
+ *   B: restore dataCache = DA            <- and A's map is live again
+ *
+ * So A and B shared one $data map, and $data is keyed on the thunk SOURCE
+ * ALONE (the payload is not part of the key). Two renders of different paths
+ * therefore shared one `chrome()` promise, and the second one was served the
+ * first one's header - which is how the home page could come back with no menu
+ * item highlighted, on roughly two cold starts out of three, while a warm
+ * process was always correct.
+ *
+ * The fix is the same shape as the request context bag: keep the maps on the
+ * async chain. Under a context store each request gets its own; without one
+ * (edge, client) this is the single-render fallback and the old behaviour is
+ * correct anyway.
+ */
+const RENDER_MAPS = Symbol('renderMaps');
+type RenderMaps = { data: Map<string, Promise<unknown>>; signals: Map<string, unknown>; seeded: Set<string> };
+let fallbackRenderMaps: RenderMaps = { data: new Map(), signals: new Map(), seeded: new Set() };
+
+function renderMaps(): RenderMaps {
+  const scoped = contextStore?.getStore();
+  if (!scoped) return fallbackRenderMaps;
+  let m = scoped[RENDER_MAPS] as RenderMaps | undefined;
+  if (!m) {
+    m = { data: new Map(), signals: new Map(), seeded: new Set() };
+    scoped[RENDER_MAPS] = m;
+  }
+  return m;
 }
 
-/** Fresh bag for a new request - runMiddleware() calls this before the middleware. */
+/**
+ * Install the async-local context store (Node passes an AsyncLocalStorage
+ * adapter). Pass null to return to the module-level bag.
+ */
+export function installContextStore(store: ContextStore | null): void {
+  contextStore = store;
+}
+
+export function getContext(): Record<string, unknown> {
+  const scoped = contextStore?.getStore();
+  return scoped ?? requestContext;
+}
+
+/**
+ * Fresh bag for a new request - runMiddleware() calls this before the
+ * middleware. Under a context store it must NOT assign the module-level
+ * variable (that is the shared-state bug); it clears the current scope's bag
+ * in place so the object identity the store handed out stays valid.
+ */
 export function resetRequestContext(): void {
+  if (contextStore) {
+    const scoped = contextStore.getStore();
+    if (scoped) {
+      for (const k of Object.keys(scoped)) delete scoped[k];
+      return;
+    }
+  }
   requestContext = {};
+}
+
+/**
+ * Run `fn` inside its own context bag. A Node host calls this around each
+ * request; without a store this degrades to a save/restore of the module-level
+ * bag, which is what the pre-AsyncLocalStorage code did.
+ */
+export function runWithContext<T>(fn: () => T): T {
+  if (contextStore) return contextStore.run({}, fn);
+  const saved = requestContext;
+  requestContext = {};
+  try {
+    return fn();
+  } finally {
+    requestContext = saved;
+  }
 }
 
 /**
@@ -1410,14 +1497,13 @@ export async function isolateStateAsync<T>(
   fn: () => Promise<T>
 ): Promise<{ result: T; state: Map<string, SignalEntry>; mounts: Array<() => void>; cleanups: Set<Cleanup> }> {
   const savedSignals = signalMap;
-  const savedData = dataCache;
   const savedDeltas = new Map(pendingDeltas);
   pendingDeltas.clear();
   const savedMounts = mountQueue.splice(0, mountQueue.length);
   const savedCleanups = new Set(cleanups);
   cleanups.clear();
   signalMap = new Map();
-  dataCache = new Map();
+  renderMaps().data.clear();
   try {
     const result = await fn();
     return {
@@ -1428,7 +1514,6 @@ export async function isolateStateAsync<T>(
     };
   } finally {
     signalMap = savedSignals;
-    dataCache = savedData;
     pendingDeltas.clear();
     savedDeltas.forEach((d, k) => pendingDeltas.set(k, d));
     mountQueue.splice(0, 0, ...savedMounts);
@@ -1454,6 +1539,7 @@ export function resumeState(json: string): void {
     const obj = JSON.parse(json);
     Object.entries(obj).forEach(([k, v]) => {
       entry(k, v).value = v;
+      seededKeys.add(k);
     });
   } catch {
     // ignore corrupt state
@@ -1732,10 +1818,18 @@ export type ActionErrorInfo = { action: string; message: string; code: number; f
  * Read it as data (`{#if $actionError()}<p>{$actionError().message}</p>{/if}`)
  * or let a {#boundary} contain it ($actionErrorOrThrow below).
  */
+export function $actionPending(): boolean {
+  const entry = signalMap.get('actionPending');
+  return entry ? entry.value === true : false;
+}
+
 export function $actionError(): ActionErrorInfo | null {
   const e = signalMap.get('actionError');
   if (!e) return null;
-  if (currentEffect) e.subs.add(currentEffect);
+  if (currentEffect) {
+    e.subs.add(currentEffect);
+    if (trackingDeps) trackingDeps.add(e);
+  }
   return (e.value as ActionErrorInfo | null) ?? null;
 }
 

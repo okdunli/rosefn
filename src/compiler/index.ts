@@ -2,6 +2,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { pathToFileURL, fileURLToPath } from 'url';
 import * as esbuild from 'esbuild';
 import { RoseError, lineOf, lineAt } from './errors.js';
@@ -112,6 +113,8 @@ export interface CompileResult {
    * baked file cannot carry a fresh nonce.
    */
   cspNonce?: boolean;
+  /** a route's script references globalThis.__rosefnAuth - emit the node:crypto auth helpers */
+  usesRosefnAuth?: boolean;
   /**
  * The component's props - `export let title = 'x'` in its script.
    * A prop is a plain value the caller passes per invocation (never a
@@ -888,6 +891,51 @@ function compileMemoKey(
   for (const [p, e] of registry) reg.push(`${p}#${e.index}:${e.scopeKey}:${e.slots.join('|')}`);
   return [filePath, String(st.mtimeMs), String(st.size), scopeKey, isApi ? '1' : '0', reg.join(';')].join('\u0000');
 }
+const __compilerStamp = (() => {
+  try { return String(fs.statSync(fileURLToPath(import.meta.url)).mtimeMs); } catch { return 'noid'; }
+})();
+const __diskCacheDir = (() => {
+  try {
+    const dir = path.join(os.tmpdir(), 'rosefn-compile-cache');
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  } catch { return null; }
+})();
+let __diskWrites = 0;
+function __fnv1a(str: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+function __diskFile(key: string): string {
+  return path.join(__diskCacheDir!, __fnv1a(key + '|' + __compilerStamp) + '.json');
+}
+function __diskGet(key: string): CompileResult | null {
+  if (!__diskCacheDir || process.env.ROSEFN_NO_DISK_CACHE === '1') return null;
+  try {
+    const obj = JSON.parse(fs.readFileSync(__diskFile(key), 'utf-8'));
+    if (obj && typeof obj === 'object' && typeof (obj as any).ssr === 'string') return obj as CompileResult;
+  } catch { /* miss / corrupt: fall through to fresh compile */ }
+  return null;
+}
+function __diskSet(key: string, result: CompileResult): void {
+  if (!__diskCacheDir || process.env.ROSEFN_NO_DISK_CACHE === '1') return;
+  try {
+    fs.writeFileSync(__diskFile(key), JSON.stringify(result));
+    if ((__diskWrites++ & 511) === 0) {
+      try {
+        const entries = fs.readdirSync(__diskCacheDir!);
+        if (entries.length > 5000) {
+          for (const e of entries) { try { fs.unlinkSync(path.join(__diskCacheDir!, e)); } catch { /* ignore */ } }
+        }
+      } catch { /* ignore */ }
+    }
+  } catch { /* disk full / permission: ignore, in-process memo still holds */ }
+}
+
 async function compileComponentMemo(
   filePath: string,
   publicDir: string,
@@ -901,11 +949,14 @@ async function compileComponentMemo(
   if (key) {
     const hit = __compileMemo.get(key);
     if (hit) return { ...hit };
+    const disk = __diskGet(key);
+    if (disk) return disk;
   }
   const result = await compileComponent(filePath, publicDir, scopeKey, isApi, plugins, registry);
   if (key) {
     if (__compileMemo.size > 500) __compileMemo.clear();
     __compileMemo.set(key, result);
+    __diskSet(key, result);
   }
   return result;
 }
@@ -964,6 +1015,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const scriptMatch = source.match(COMPONENT_RE);
   const roseResolved = resolveRoseImports(scriptMatch?.[1] ?? '', filePath, registry);
   const rawScript = roseResolved.script;
+  const usesRosefnAuth = rawScript.includes('__rosefnAuth');
   const roseImports = roseResolved.imports;
   const { imports: importStmts, rest: scriptNoImports } = hoistImports(rawScript);
   if (path.basename(filePath) !== '_middleware.rose') {
@@ -1105,7 +1157,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   if (/<form[^>]*\son:[a-z]+\s*=/i.test(source) || /\$action:|data-on-/.test(source)) {
     clientReasons.push('a form bound to a client dispatch ($action)');
   }
-  const lifecycle = rawScript.match(/\b(?:onMount|onCleanup|refresh|adopt|\$action|\$setState)\s*\(/);
+  const lifecycle = rawScript.match(/\b(?:onMount|onCleanup|refresh|adopt)\s*\(|(?:\$action|\$effect)\s*\(/);
   if (lifecycle) clientReasons.push(`${lifecycle[0].replace(/\s*\($/, '')}()`);
   if (source.includes('{#defer')) clientReasons.push('{#defer} progressive content');
   if (source.includes('{#await')) clientReasons.push('{#await} async block');
@@ -1164,13 +1216,13 @@ export async function compileComponent(filePath: string, publicDir: string, scop
       const mTtl = /^(.*)\s*,\s*(\d+)\s*$/s.exec(d.expr);
       const fnExpr = mTtl ? mTtl[1] : d.expr;
       const ttl = mTtl ? mTtl[2] : '300';
-      return `const __had_${d.name} = hasState(${JSON.stringify(key)});
+      return `const __seeded_${d.name} = isSeeded(${JSON.stringify(key)});
 const [${d.name}, set${capitalize(d.name)}] = state(${JSON.stringify(key)}, null);
-if (!__had_${d.name}) set${capitalize(d.name)}(await globalThis.__rosefnKvApi.kvMemo(${JSON.stringify('__kvh:' + scopeKey + ':' + d.name)}, ${fnExpr}, ${ttl}));`;
+if (!__seeded_${d.name}) { const __v_${d.name} = await globalThis.__rosefnKvApi.kvMemo(${JSON.stringify('__kvh:' + scopeKey + ':' + d.name)}, ${fnExpr}, ${ttl}); set${capitalize(d.name)}(__v_${d.name}); markSeeded(${JSON.stringify(key)}); }`;
     }
-    return `const __had_${d.name} = hasState(${JSON.stringify(key)});
+    return `const __seeded_${d.name} = isSeeded(${JSON.stringify(key)});
 const [${d.name}, set${capitalize(d.name)}] = state(${JSON.stringify(key)}, null);
-if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
+if (!__seeded_${d.name}) { const __v_${d.name} = await $data(${fn}); set${capitalize(d.name)}(__v_${d.name}); markSeeded(${JSON.stringify(key)}); }`;
   };
 
   const nestedDecls: (typeof decls)[number][] = [];
@@ -1252,7 +1304,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
         fn:
           kind === 'checked'
             ? `${hname}: (e) => ${setter}(e.target.checked)`
-            : `${hname}: (e) => { const t = e.target; ${setter}(t.type === 'number' || t.type === 'range' ? t.valueAsNumber : t.value); }`,
+            : `${hname}: (e) => { const t = e.target; const raw = t.type === 'number' || t.type === 'range' ? t.valueAsNumber : t.value; ${setter}(typeof raw === 'number' && Number.isNaN(raw) ? null : raw); }`,
       });
       const evtAttr = kind === 'checked'
         ? ` data-on-change="${hname}"`
@@ -1403,6 +1455,7 @@ if (!__had_${d.name}) set${capitalize(d.name)}(await $data(${fn}));`;
     jsWarnings,
     headers,
     cspNonce,
+    usesRosefnAuth,
     props,
     roseImports,
     isComponent,
@@ -2667,11 +2720,25 @@ function assertKnownDirectives(template: string, filePath: string): void {
       );
     }
     if (word === 'else') {
-      throw new RoseError(
-        'E-TEMPLATE',
-        `${filePath}: a stray {:else} with no {#if} above it`,
-        { file: filePath, line: lineAt(template, m), hint: '{:else} / {:else if cond} belong inside an {#if} ... {/if} block - {#if cond}A{:else}B{/if}' },
-      );
+      const netOpens = (re: RegExp, closer: string, at: number): number => {
+        let n = 0, mm: RegExpExecArray | null;
+        re.lastIndex = 0;
+        while ((mm = re.exec(template))) { if (mm.index >= at) break; if (!inRaw(mm.index)) n++; }
+        const cr = new RegExp(closer, 'g');
+        let c = 0;
+        while ((mm = cr.exec(template))) { if (mm.index >= at) break; if (!inRaw(mm.index)) c++; }
+        return n - c;
+      };
+      const ifNet = netOpens(/\{#if\b/g, '\\{/if\\b', m.index);
+      const eachNet = netOpens(/\{#each\b/g, '\\{/each\\b', m.index);
+      if (ifNet <= 0 && eachNet <= 0) {
+        throw new RoseError(
+          'E-TEMPLATE',
+          `${filePath}: a stray {:else} with no {#if} or {#each} above it`,
+          { file: filePath, line: lineAt(template, m), hint: '{:else} belongs inside an {#if} ... {/if} or {#each} ... {/each} block' },
+        );
+      }
+      continue;
     }
     if (word === 'fallback') {
       throw new RoseError(
@@ -2681,6 +2748,21 @@ function assertKnownDirectives(template: string, filePath: string): void {
       );
     }
     if (word === 'then' || word === 'catch') {
+      const opensBefore = (re: RegExp, at: number): number => {
+        re.lastIndex = 0;
+        let n = 0, mm: RegExpExecArray | null;
+        while ((mm = re.exec(template))) { if (mm.index >= at) break; if (!inRaw(mm.index)) n++; }
+        return n;
+      };
+      const open = opensBefore(/\{#await\b/g, m.index);
+      const close = opensBefore(/\{\/await\b/g, m.index);
+      if (open <= close) {
+        throw new RoseError(
+          'E-TEMPLATE',
+          `${filePath}: a stray {:${word}} with no {#await} above it`,
+          { file: filePath, line: lineAt(template, m), hint: '{:then} / {:catch} belong inside an {#await} ... {/await} block' },
+        );
+      }
       continue;
     }
     throw new RoseError(
@@ -3461,7 +3543,7 @@ function compileSlot(acc: string): string {
   return `${acc} += String(children);\n`;
 }
 
-const RUNTIME_IMPORTS = `import { state, setState, persistState, $data, hasState, esc, refresh, onMount, onCleanup, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $boundaryFallback, $setBoundaryError, $boundaryError, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound } from './runtime.js';`;
+const RUNTIME_IMPORTS = `import { state, setState, persistState, $data, hasState, isSeeded, markSeeded, esc, refresh, onMount, onCleanup, $effect, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $actionPending, $boundaryFallback, $setBoundaryError, $boundaryError, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound } from './runtime.js';`;
 
 const API_RUNTIME_HELPERS = RUNTIME_IMPORTS
   .replace(/^import\s*\{/, '')
@@ -3977,11 +4059,13 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
     })
     .join(',\n  ');
 
+  const appUsesAuth = compiled.some((c) => c.usesRosefnAuth);
+
   const serverEntry = `
 ${serverImports}
 import { renderMarkdown } from './content-md.ts';
-import crypto from 'node:crypto';
-import { setState, persistState, clearRequestState, serializeState, resetRequestContext, setRequestQuery, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta, esc } from './runtime.js';
+${appUsesAuth ? "import crypto from 'node:crypto';" : "// no route references __rosefnAuth: the node:crypto auth helpers are omitted, keeping the bundle edge-loadable"}
+import { setState, persistState, clearRequestState, isolateRender, serializeState, resetRequestContext, installContextStore, setRequestQuery, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta, esc } from './runtime.js';
 ${runtimePlugins.length > 0
     ? `import { hooks as __pluginHooks, hasRequestHooks as __hasRequestHooks, hasResponseHooks as __hasResponseHooks } from './plugins.js';`
 : `// no plugin declares a runtime hook, so there is no plugins
@@ -4089,7 +4173,6 @@ const __dynCache = new Map();
 export function invalidateRenderCache(): void {
   __dynCache.clear();
 }
-
 
 
 // Application KV cache primitive (server-side, per-worker in-memory): a zero-dependency store for expensive computations.
@@ -4205,6 +4288,7 @@ function sse(handler: (send: (event: string, data: unknown) => void) => Promise<
   });
 }
 globalThis.__rosefnExtras = { v, jobs, sse };
+${appUsesAuth ? `
 const auth = {
   hashPassword(password: string): string {
     const salt = crypto.randomBytes(16).toString("hex");
@@ -4246,6 +4330,7 @@ const auth = {
   },
 };
 globalThis.__rosefnAuth = auth;
+` : "// __rosefnAuth helpers omitted: no route references them (keeps the bundle free of node:crypto and edge-loadable)"}
 
 export async function $kv(key: string, compute: () => unknown | Promise<unknown>, ttlSeconds = 300): Promise<unknown> {
   const hit = kv.get(key);
@@ -4476,7 +4561,15 @@ function extractHead(rendered) {
 
 // Form: the submitted FormData of a progressive-enhancement POST.
 export async function renderPage(pathname, form) {
+  // Renders DO overlap in one process: prod-server warms every route in the background at startup.
+  return isolateRender(() => renderPageIsolated(pathname, form));
+}
+
+async function renderPageIsolated(pathname, form) {
   clearRequestState();
+  // Cold-start readiness gate (xoboe #8): await the app's published DB-ready promise before any $data() read.
+  const appReady = globalThis.__rosefnAppReady;
+  if (appReady) await appReady;
   for (const route of routes) {
     if (matchRoute(route.pattern, pathname)) {
       const patternParts = route.pattern.split('/');
@@ -4645,7 +4738,15 @@ export async function handleApi(method, pathname, request) {
 
 // === Streaming SSR === The static shell (doctype, <head>, body + container open) flushes BEFORE the - possibly slow - render completes: the first byte.
 export async function renderPageStream(pathname, write, shellOpen, clientTag) {
+  // Isolated for the same reason as renderPage: a streaming render awaits inside route.render()
+  return isolateRender(() => renderPageStreamIsolated(pathname, write, shellOpen, clientTag));
+}
+
+async function renderPageStreamIsolated(pathname, write, shellOpen, clientTag) {
   clearRequestState();
+  // Cold-start readiness gate (xoboe #8): same contract as renderPage — await the app's published DB-ready promise before streaming the shell.
+  const appReady = globalThis.__rosefnAppReady;
+  if (appReady) await appReady;
   for (const route of routes) {
     if (matchRoute(route.pattern, pathname)) {
       const patternParts = route.pattern.split('/');
@@ -4704,6 +4805,9 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
 }
 // Prevent tree-shaking of invalidateRenderCache (called from prod-server.ts / edge.ts on non-GET writes).
 void invalidateRenderCache;
+
+// Same reason, for the per-request context store: prod-server.ts installs an AsyncLocalStorage adapter.
+export { installContextStore };
 `;
   try {
     const patterns = [...pages, ...apiRoutes].map(({ info }) => info.pattern);
@@ -4786,7 +4890,7 @@ void invalidateRenderCache;
 
   const prefetchMode = compiled.find((c) => c.prefetch)?.prefetch ?? 'all';
   const vitalsOn = compiled.some((c) => c.vitals === true);
-    const vitalsBlock = vitalsOn
+  const vitalsBlock = vitalsOn
 ? `\n// the app asked for web-vitals - measure once, at boot, and let the\n// app decide where the numbers go (one 'rosefn:vitals' CustomEvent per metric).\nreportVitals();\n`
     : '';
 
@@ -4814,7 +4918,7 @@ void invalidateRenderCache;
 
   const clientEntry = `
 ${clientImports}
-import { setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setActionDispatcher, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState, setFxOwner, resetContainerFx, esc } from './runtime.js';
+import { state, setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setActionDispatcher, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState, setFxOwner, resetContainerFx, esc } from './runtime.js';
 
 // I18n: the dictionaries baked at build time - the client renders any PRELOADED locale from the bundle.
 setLocales(${clientLocalesJson}, '${defaultLocale}');
@@ -5029,11 +5133,19 @@ async function postForm(body, container, pathname) {
 // Call a page's server action by name from any event handler: <button on:click={like}> compiles to $action('like').
 export async function $action(name, e) {
   if (e && e.preventDefault) e.preventDefault();
+  // F34: the pending flag is ordinary signal state - {#if $actionPending()}
+  // disables a submit button while the action is in flight, reactively.
+  const [__rvPending, __rvSetPending] = state('actionPending', false);
+  __rvSetPending(true);
   const body = new FormData();
   body.append('__action', name);
  // An event inside a mount belongs to that mount - the attribute is kept in step with what is currently mounted.
   const box = e && e.target && e.target.closest ? e.target.closest('[data-rosefn]') : null;
-  return postForm(body, box || undefined, box ? box.getAttribute('data-rosefn') : undefined);
+  try {
+    return await postForm(body, box || undefined, box ? box.getAttribute('data-rosefn') : undefined);
+  } finally {
+    __rvSetPending(false);
+  }
 }
 // F17: hand the dispatcher to the runtime, so wire() can serve a server action bound to a non-delegated event (on:keydown="$action:save") the same way.
 setActionDispatcher($action);

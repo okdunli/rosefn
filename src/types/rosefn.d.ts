@@ -56,6 +56,9 @@ declare function onMount(fn: () => void): void;
 /** Register a teardown for the next navigation. */
 declare function onCleanup(fn: () => void): void;
 
+// F43: a reactive side-effect.
+declare function $effect(fn: () => void | (() => void)): () => void;
+
 /** Re-render the current route in place - `$data` re-runs, zero requests. */
 declare function refresh(): Promise<void>;
 
