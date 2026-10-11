@@ -77,7 +77,9 @@ Rules the compiler enforces (breaking one fails the build):
   (the server renders the pending branch, the client flips to the resolved
   value once the promise settles, or to the caught error if it rejects; the
   {:then} / {:catch} names are in scope only inside their branch, and {:catch}
-  is optional). {:else} / {:else if} must sit inside an {#if} block.
+  is optional). There is NO {:else} branch of its own: a bare {:else} with no
+  block around it is a build error - inside {#each} it means "the list is
+  empty", inside {#if} it is the final else.
 - Keyed each: {#each todos() as t (t.id)} — the key makes wire() reconcile:
   rows whose key and rendered html are unchanged KEEP their DOM nodes (focus,
   unbound input text, loaded images survive; reorders become moves). Rows
@@ -89,14 +91,28 @@ Rules the compiler enforces (breaking one fails the build):
   rejects the reverse). Reactive content inside works per call.
 - Transitions: transition:fade (both directions), in:fade (enter only),
   out:fade (mounts at rest, leave only). Built-ins: fade, slide, fly, zoom,
-  slide-up/down/left/right, stagger; params via transition:fade={300} or the
-  bare name (300 ms default). Custom: register
+  slide-up/down/left/right, scale, spin, blur, stagger; params via
+  transition:fade={300} or transition:fade={duration: 300} (the trailing
+  number wins), or the bare name (300 ms default). Custom: register
   globalThis.__rosefnTransitions.NAME = (el, duration, phase) => cleanup? —
   a transition:NAME that is not a built-in falls through to it (phase
   'both'/'in'/'out'; built-ins always win).
+- $actionPending() is true while a server action is in flight: use it to
+  disable the submit button reactively ({#if $actionPending()}).
+- $setState('k', (x) => x + 1) supports a FUNCTIONAL UPDATER: when the new
+  value is a function it receives the current value and returns the next one.
+  (State that must literally store a function cannot use this form.)
+- <input type="number" bind:value={n}>: clearing the field stores 'null'
+  (NOT 'NaN') so bound math (n() + 1) stays clean instead of going NaN. The
+  empty field renders as '' on write-back.
+- Scroll listeners are passive by default (they cannot preventDefault), which
+  keeps the constant scroll event off the main-thread critical path.
 - Scoped CSS: component <style> rules scope under the component. Use
   :global(X) to unscope one compound (.card :global(.md)); a selector made
   only of :global(...) groups emits fully unscoped (:global(body){...}).
+- animate:flip={duration: 300} (or animate:flip={300}) passes a DURATION
+  param to the FLIP animation; the trailing number is parsed even though object
+  params carry their own colons. Registered animation names work the same way.
 - <select multiple bind:value={arr}> binds an ARRAY of selected values
   (declare $state([])); state changes drive option.selected properties.
 - Two-way binding: <input bind:value={q}> / <input type="checkbox"
