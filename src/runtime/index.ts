@@ -1,24 +1,29 @@
-// Rosefn Runtime - Zero-hydration, compile-time reactivity Target: < 2KB gzipped
 
+// === Reactive Primitives ===
 type Subscriber = () => void;
 type Cleanup = () => void;
 type SignalEntry = { value: unknown; subs: Set<Subscriber> };
 
 let currentEffect: (() => void) | null = null;
 
+// F43: while an $effect body runs, every signal read lands here (the entry OBJECT).
 let trackingDeps: Set<SignalEntry> | null = null;
 
+// Trade-off: global signal map, shared across all inlined modules
 let signalMap: Map<string, SignalEntry> =
   (globalThis as any).__rosefn_signalMap ?? new Map();
 (globalThis as any).__rosefn_signalMap = signalMap;
 
+// One get-or-create helper shared by state / setState / resumeState.
 function entry(key: string, initial: unknown): { value: unknown; subs: Set<Subscriber> } {
   const e = signalMap.get(key) ?? { value: initial, subs: new Set<Subscriber>() };
   signalMap.set(key, e);
   return e;
+      // F43: $effect dep capture
 }
 
 export function state<T>(key: string, initial: T): [() => T, (v: T) => void] {
+ // The key belongs to whoever is rendering, so a mount's navigation
   ownerKeys()?.add(key);
   const e = entry(key, initial);
 
@@ -26,34 +31,42 @@ export function state<T>(key: string, initial: T): [() => T, (v: T) => void] {
     if (currentEffect) {
       e.subs.add(currentEffect);
       if (trackingDeps) trackingDeps.add(e);
+  /* no storage / private mode / quota: persistence is best-effort */
     }
     return e.value as T;
   };
 
   const setter = (v: T) => {
+    // F36: a function value is a functional update - it receives the current value and returns the next one ($setState('n', (x) => x + 1)).
     const next = (typeof v === 'function' ? (v as (cur: T) => T)(e.value) : v) as T;
     e.value = next;
+    // F43: notify UNTRACKED. Subscribers were subscribed by whoever owns them; a write's fan-out must not hand out new subscriptions.
     const prevEffect = currentEffect;
     const prevTracking = trackingDeps;
     currentEffect = null;
     trackingDeps = null;
     e.subs.forEach((fn: Subscriber) => fn());
+    /* a throwing effect must not kill the route */
     currentEffect = prevEffect;
     trackingDeps = prevTracking;
     if (persistedKeys.has(key)) writeStorage(key, next);
   };
 
   return [getter, setter];
+      
 }
 
 export function hasState(key: string): boolean {
   return signalMap.has(key);
+      /* a stale cleanup must not kill the route */
 }
 
+// === Per-RENDER $data seeding === The compiled `$data(() => loader())` prologue is const __seeded = isSeeded("k"); const [get.
 let seededKeys = new Set<string>();
 
 export function isSeeded(key: string): boolean {
   return seededKeys.has(key);
+      
 }
 
 export function markSeeded(key: string): void {
@@ -63,6 +76,7 @@ export function markSeeded(key: string): void {
 export function setState<T>(key: string, value: T): void {
   const e = entry(key, value);
   e.value = value;
+  // F43: notify untracked (same reason as the per-render setter above).
   const prevEffect = currentEffect;
   const prevTracking = trackingDeps;
   currentEffect = null;
@@ -73,12 +87,13 @@ export function setState<T>(key: string, value: T): void {
   if (persistedKeys.has(key)) writeStorage(key, value);
 }
 
+// F9 ($persist): keys declared with $persist survive reloads — every write lands in localStorage (JSON-encoded under a rosefn: prefix) and every client.
 const persistedKeys = new Set<string>();
 
 function writeStorage(key: string, v: unknown): void {
   try {
     (globalThis as { localStorage?: Storage }).localStorage?.setItem('rosefn:' + key, JSON.stringify(v));
-  } catch { /* no storage / private mode / quota: persistence is best-effort */ }
+  } catch {  }
 }
 
 // F9 ($persist): `let theme = $persist('dark')` — like $state, but the value survives reloads.
@@ -93,11 +108,14 @@ export function persistState<T>(key: string, initial: T): [() => T, (v: T) => vo
       hasStored = true;
     }
   } catch {  }
+  
   const [get, set] = state(key, seeded);
   if (hasStored) set(seeded);
+  // the stored value wins over the resumed server default
   return [get, set];
 }
 
+// F12: the error a {#boundary} just caught — a custom {:fallback} reads it ({$boundaryError()?.message}) to render its own failure UX.
 let lastBoundaryError: Error | null = null;
 
 export function $setBoundaryError(e: unknown): void {
@@ -108,7 +126,9 @@ export function $boundaryError(): Error | null {
   return lastBoundaryError;
 }
 
+
 const cleanups = new Set<Cleanup>();
+
 
 let fxOwner: object | null = null;
 const fxByOwner = new WeakMap<object, Set<Cleanup>>();
@@ -152,7 +172,6 @@ export function effect(fn: () => void): Cleanup {
     try {
       fn();
     } catch {
-      
     }
   };
   const prev = currentEffect;
@@ -170,6 +189,7 @@ export function effect(fn: () => void): Cleanup {
 // F43: `$effect(fn)` - the reactive effect rune. Client-only (SSR: a no-op, fn never fires).
 export function $effect(fn: () => void | (() => void)): Cleanup {
   if (typeof document === 'undefined') return () => {};
+  // SSR: no DOM, nothing changes
   const deps = new Set<SignalEntry>();
   let cleanup: (() => void) | undefined;
   let scheduled = false;
@@ -180,10 +200,11 @@ export function $effect(fn: () => void | (() => void)): Cleanup {
   };
   const run = () => {
     if (disposed) return;
+    // F43: stay "scheduled" for the whole run.
     scheduled = true;
     detach();
     if (typeof cleanup === 'function') {
-      try { (cleanup as () => void)(); } catch { /* a stale cleanup must not kill the route */ }
+      try { (cleanup as () => void)(); } catch {  }
     }
     const prevEffect = currentEffect;
     const prevTracking = trackingDeps;
@@ -192,7 +213,7 @@ export function $effect(fn: () => void | (() => void)): Cleanup {
     try {
       const ret = fn();
       cleanup = typeof ret === 'function' ? (ret as () => void) : undefined;
-    } catch { /* a throwing effect must not kill the route */ }
+    } catch {  }
     currentEffect = prevEffect;
     trackingDeps = prevTracking;
     scheduled = false;
@@ -203,6 +224,7 @@ export function $effect(fn: () => void | (() => void)): Cleanup {
     queueMicrotask(run);
   };
   const owner = fxSet();
+  
   const dispose: Cleanup = () => {
     disposed = true;
     detach();
@@ -213,9 +235,11 @@ export function $effect(fn: () => void | (() => void)): Cleanup {
   };
   owner.add(dispose);
   queueMicrotask(run);
+  // first run: after the synchronous render that created us
   return dispose;
 }
 
+// === HTML escaping (server-side interpolation safety) ===
 const ESC_MAP: Record<string, string> = {
   '&': '&amp;',
   '<': '&lt;',
@@ -228,6 +252,7 @@ export function esc(v: unknown): string {
   return String(v).replace(/[&<>"']/g, (c) => ESC_MAP[c]);
 }
 
+// === Generated-code marker helpers === Every reactive marker in every generated module is emitted through these functions.
 type Close = (s?: unknown) => unknown;
 
 export function textMark(closes: Close[], fn: Close, pair?: boolean, arg?: unknown): string {
@@ -1319,11 +1344,31 @@ export function $data<T>(fn: () => T | Promise<T>): Promise<T> {
   return p as Promise<T>;
 }
 
+const bffCache: Map<string, Promise<unknown>> = new Map();
+
+export function loader<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  let p = bffCache.get(key) as Promise<T> | undefined;
+  if (!p) {
+    p = fn().catch((e) => { bffCache.delete(key); throw e; });
+    bffCache.set(key, p);
+  }
+  return p;
+}
+
+export async function aggregate<R extends Record<string, () => Promise<unknown>>>(loaders: R): Promise<{ [K in keyof R]: Awaited<ReturnType<R[K]>> }> {
+  const keys = Object.keys(loaders) as (keyof R)[];
+  const results = await Promise.all(keys.map((k) => loaders[k]()));
+  const out = {} as { [K in keyof R]: Awaited<ReturnType<R[K]>> };
+  keys.forEach((k, i) => { (out as Record<string, unknown>)[k as string] = results[i]; });
+  return out;
+}
+
 export function clearRequestState(): void {
   signalMap.clear();
   renderMaps().data.clear();
   pendingDeltas.clear();
   seededKeys = new Set();
+  bffCache.clear();
 }
 
 /**
@@ -1529,21 +1574,62 @@ export function restoreState(entries: Map<string, SignalEntry>): void {
 }
 
 export function serializeState(): string {
-  const obj: Record<string, unknown> = {};
-  signalMap.forEach((v: { value: unknown }, k: string) => (obj[k] = v.value));
-  return JSON.stringify(obj);
+  const keys: string[] = [];
+  const values: unknown[] = [];
+  signalMap.forEach((v: { value: unknown }, k: string) => {
+    keys.push(k);
+    values.push(v.value);
+  });
+  return JSON.stringify([keys, values]);
 }
 
 export function resumeState(json: string): void {
   try {
-    const obj = JSON.parse(json);
-    Object.entries(obj).forEach(([k, v]) => {
-      entry(k, v).value = v;
-      seededKeys.add(k);
-    });
+    const parsed = JSON.parse(json);
+    if (Array.isArray(parsed)) {
+      const [keys, values] = parsed as [string[], unknown[]];
+      for (let i = 0; i < keys.length; i++) {
+        entry(keys[i], values[i]).value = values[i];
+        seededKeys.add(keys[i]);
+      }
+    } else if (parsed && typeof parsed === 'object') {
+      Object.entries(parsed as Record<string, unknown>).forEach(([k, v]) => {
+        entry(k, v).value = v;
+        seededKeys.add(k);
+      });
+    }
   } catch {
     // ignore corrupt state
   }
+}
+
+const SDUI_TAGS = ['div', 'span', 'a', 'p', 'img', 'ul', 'li', 'button', 'input', 'section', 'h1', 'h2', 'h3', 'nav', 'header', 'footer', 'form', 'label', 'strong', 'em', 'table', 'tr', 'td', 'code', 'pre', 'article', 'main', 'aside'];
+const sduiTagToId = new Map(SDUI_TAGS.map((t, i) => [t, i]));
+const sduiIdToTag = new Map(SDUI_TAGS.map((t, i) => [i, t]));
+
+export interface SduiNode {
+  t: string;
+  p?: Record<string, string>;
+  c?: SduiNode[];
+}
+
+export function encodeSdui(node: SduiNode): string {
+  const enc = (n: SduiNode): unknown[] => [
+    sduiTagToId.get(n.t) ?? n.t,
+    n.p ?? {},
+    (n.c ?? []).map(enc),
+  ];
+  return JSON.stringify(enc(node));
+}
+
+export function decodeSdui(json: string): SduiNode {
+  const dec = (a: unknown): SduiNode => {
+    const arr = a as [number | string, Record<string, string>, unknown[]];
+    const raw = arr[0];
+    const t = typeof raw === 'number' ? (sduiIdToTag.get(raw) ?? String(raw)) : String(raw);
+    return { t, p: arr[1], c: (arr[2] ?? []).map(dec) };
+  };
+  return dec(JSON.parse(json));
 }
 
 let refreshHook: (() => Promise<void>) | null = null;
@@ -1704,10 +1790,18 @@ export function localeDir(lang: string): string {
 const ICU_RE = /\{([\w$]+),\s*(plural|selectordinal|select),\s*((?:\s*[=\w]+\s*\{(?:[^{}]|\{[^{}]*\})*\})*)\}/g;
 const BRANCH_RE = /([=\w]+)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g;
 
+const PLURAL_RULES = new Map<string, Intl.PluralRules>();
+
 /** The CLDR category of `n` in `locale`, or null where Intl has no answer. */
 function pluralCategory(locale: string, ordinal: boolean, n: number): string | null {
   try {
-    return new Intl.PluralRules(locale, ordinal ? { type: 'ordinal' } : undefined).select(n);
+    const key = ordinal ? locale + '\u0000ord' : locale;
+    let rules = PLURAL_RULES.get(key);
+    if (!rules) {
+      rules = new Intl.PluralRules(locale, ordinal ? { type: 'ordinal' } : undefined);
+      PLURAL_RULES.set(key, rules);
+    }
+    return rules.select(n);
   } catch {
     return null;
   }
