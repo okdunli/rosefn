@@ -3,6 +3,16 @@
   let n = $state(2);
   let sq = $derived(n * n);
   function bump() { $setState('n', n() + 1); }
+  let m = $state(10);
+  // F36: functional update - the setter receives the current value.
+  function fnBump() { $setState('m', (x) => x + 5); }
+  let numv = $state(5);
+  // F43: $effect - mirrors n*7 into state; the returned cleanup counts disposals.
+  let mirror = $state(0);
+  $effect(() => {
+    $setState('mirror', n() * 7);
+    return () => { globalThis.__effCleanup = (globalThis.__effCleanup || 0) + 1; };
+  });
   let keyedItems = $state([{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }, { id: 'c', label: 'C' }]);
   function shuffle() {
     const xs = keyedItems();
@@ -52,9 +62,18 @@
   </select>
   <p class="selm-out">{selm().join('|')}</p>
   <p class="pulse-demo" transition:pulse>pulse</p>
+  <p class="spin-demo" in:spin>spin</p>
+  <p class="ap-out">{$actionPending()}</p>
   <p class="p30" transition:fade={duration: 200}>p30</p>
+  <p class="f41-trans" transition:fade={duration: 500, delay: 100, easing: 'ease-in-out'}>f41</p>
   <details class="dt" bind:open={dopen}><summary>s</summary><p>body</p></details>
   <p class="dt-out">{dopen() ? 'open' : 'closed'}</p>
   <p class="cls-obj" class={{ a: true, b: false, c: 1 }}>x</p>
   <p class="sty-obj" style={{ color: 'red', margin: 0 }}>y</p>
+  <button class="fn-up" on:click={fnBump}>fn +5</button>
+  <p class="fn-out">{m}</p>
+  <input class="num-in" type="number" bind:value={numv} />
+  <p class="num-out">{numv() ?? 'empty'}</p>
+  <p class="eff-mirror">{mirror}</p>
+  <p class="anim-demo" animate:flip={duration: 400}>anim</p>
 </div>
