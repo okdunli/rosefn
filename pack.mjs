@@ -23,7 +23,6 @@ fs.rmSync(OUT, { recursive: true, force: true });
 fs.mkdirSync(OUT, { recursive: true });
 
 const entries = [
-  // [source, output, is-the-bin]
   ['src/cli/index.ts', `${OUT}/rosefn.mjs`, true],
   ['src/cli/edge.ts', `${OUT}/edge.mjs`, false],
   ['src/cli/test.ts', `${OUT}/test.mjs`, false],
@@ -40,6 +39,7 @@ for (const [entry, outfile, isBin] of entries) {
     format: 'esm',
     target: 'node22',
     external: ['esbuild'],
+    minify: true,
     banner: isBin ? { js: '#!/usr/bin/env node' } : {},
     logLevel: 'warning',
   });
