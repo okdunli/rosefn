@@ -1,5 +1,21 @@
 <script>
   export const bundle = 'split';
+  let n = $state(2);
+  let sq = $derived(n * n);
+  function bump() { $setState('n', n() + 1); }
+  let keyedItems = $state([{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }, { id: 'c', label: 'C' }]);
+  function shuffle() {
+    const xs = keyedItems();
+    $setState('keyedItems', [xs[2], xs[0], xs[1]]);
+  }
+  let selm = $state([]);
+  let dopen = $state(true);
+  globalThis.__rosefnTransitions = globalThis.__rosefnTransitions || {};
+  globalThis.__rosefnTransitions.pulse = function (el, d) {
+    el.style.opacity = '0.4';
+    const id = setTimeout(function () { el.style.opacity = ''; }, d);
+    return function () { clearTimeout(id); };
+  };
 </script>
 
 <head><title>Deftest</title></head>
@@ -15,4 +31,30 @@
       <li class="deftest-item" transition:stagger>{item}</li>
     {/each}
   </ul>
+  <p class="trans-in" in:fade>in only</p>
+  <p class="trans-out" out:fade>out only</p>
+  <p class="trans-both" transition:fade>both</p>
+  <button class="derived-btn" on:click={bump}>bump</button>
+  <p class="derived-out">{sq}</p>
+  {#snippet chip(label, tone)}
+    <span class="chip chip-{tone}">{label}</span>
+  {/snippet}
+  <div class="snip-out">{@render chip('hello', 'ok')}{@render chip(sq, 'n')}</div>
+  <ul class="keyed-list">
+    {#each keyedItems() as it (it.id)}
+      <li class="keyed-item">{it.label}</li>
+    {/each}
+  </ul>
+  <button class="keyed-shuffle" on:click={shuffle}>shuffle</button>
+  <select class="selm" multiple bind:value={selm}>
+    <option value="x">X</option>
+    <option value="y">Y</option>
+  </select>
+  <p class="selm-out">{selm().join('|')}</p>
+  <p class="pulse-demo" transition:pulse>pulse</p>
+  <p class="p30" transition:fade={duration: 200}>p30</p>
+  <details class="dt" bind:open={dopen}><summary>s</summary><p>body</p></details>
+  <p class="dt-out">{dopen() ? 'open' : 'closed'}</p>
+  <p class="cls-obj" class={{ a: true, b: false, c: 1 }}>x</p>
+  <p class="sty-obj" style={{ color: 'red', margin: 0 }}>y</p>
 </div>
