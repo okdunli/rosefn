@@ -6,14 +6,55 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
 import { createEdgeHandler } from './edge.ts';
+import { onShutdown, runShutdownHooks } from './shutdown.ts';
+import { requestOrigin } from './origin.ts';
 
 const dist = fileURLToPath(new URL('./', import.meta.url));
 const port = Number(process.env.PORT || 8080);
 let handle: ((request: Request) => Promise<Response>) | null = null;
 let mod: any = null;
 let warmList: string[] = [];
+
+const requestAls = new AsyncLocalStorage<Record<string, unknown>>();
+
+/** Run `fn` with a private per-request context bag. */
+function runIsolated<T>(fn: () => T): T {
+  return requestAls.run({}, fn);
+}
+
+// Extra roots searched for baked assets, after `dist` itself.
+let extraRoots: string[] | null = null;
+function resolveStaticRoots(): string[] {
+  if (extraRoots) return extraRoots;
+  const seen = new Set<string>([dist]);
+  const add = (p: string) => {
+    if (p && !seen.has(p)) seen.add(p);
+  };
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    add(path.join(dist, '..'));
+    add(path.join(dist, '..', '..'));
+    add(path.resolve(dist, '..', 'public'));
+    add(path.resolve(dist, '..', 'xoboe'));
+  }
+  add(path.join(dist, 'xoboe'));
+  add(path.resolve(dist, '..', 'xoboe'));
+  add(path.resolve(process.cwd(), 'xoboe'));
+  extraRoots = [...seen];
+  return extraRoots;
+}
+
+// A request path that must never reach the dynamic render.
+function isBakedAssetPath(pathname: string): boolean {
+  return (
+    pathname.startsWith('/public/') ||
+    pathname.startsWith('/icons/') ||
+    pathname.startsWith('/vendor/') ||
+    pathname === '/favicon.ico'
+  );
+}
 
 const earlyHintLinks: string[] = (() => {
   try {
@@ -42,19 +83,43 @@ const ready = createEdgeHandler(dist).then(async (h) => {
     warmList = ['/', ...((mod.dynamicRoutes as string[]) || []).filter((r: string) => !r.includes(':'))];
     mod.invalidateRenderCache?.();
   } catch { /* warm list stays just the home route */ }
+  mod?.installContextStore?.({
+    getStore: () => requestAls.getStore(),
+    run: (store: Record<string, unknown>, fn: () => unknown) => requestAls.run(store, fn),
+  });
+  return h;
 });
 
-ready.then(async (h) => {
+const shouldWarm = !process.env.VERCEL;
+if (shouldWarm) ready.then(async (h) => {
   for (const r of warmList) {
     try {
-      const res = await h(new Request('http://localhost' + r));
-      await res.arrayBuffer();
-    } catch { /* a warm-up failure just means that route renders cold */ }
+      const res = await runIsolated(() => h(new Request('http://localhost' + r)));
+      const buf = await res.arrayBuffer();
+      const suspect = res.status === 200 && res.headers.get('content-type')?.includes('text/html') && buf.byteLength < 2048;
+      console.log('[rosefn] warm', r, 'status=' + res.status, 'bytes=' + buf.byteLength, suspect ? 'SUSPECT-EMPTY' : '');
+    } catch (e) {
+      console.error('[rosefn] warm', r, 'FAILED:', (e as Error)?.stack ?? e);
+    }
   }
-}).catch(() => {});
+}).catch((e) => console.error('[rosefn] warm loop aborted:', (e as Error)?.stack ?? e));
 
 const hotCache = new Map<string, { raw: Buffer; br: Buffer; gzip: Buffer; headers: Record<string, string>; etag: string; fetchedAt: number; refreshing?: boolean }>();
 const HOT_TTL = 10_000;
+
+/**
+ * One access line per request on stdout - the same greppable shape the CLI's
+ * `rosefn serve` writes, so one grep works across every rosefn server.
+ *
+ * prod-server had NO access log at all: the platform request log showed a
+ * status and a duration, and the server itself said nothing, so a blank first
+ * visit was reported repeatedly with nothing to read. Every response exit in
+ * the http handler calls this, which makes a log export readable line by line
+ * against what the render actually produced.
+ */
+function writeAccessLine(req: any, res: any, bytes: number): void {
+  console.log(`${new Date().toISOString().slice(0, 19)}Z ${req.method} ${req.url} ${res.statusCode} ${bytes}B`);
+}
 
 function fnv(s: string): string {
   let h = 0x811c9dc5;
@@ -68,7 +133,7 @@ function fnv(s: string): string {
 async function refetchHot(pathname: string, cookieHeader: string): Promise<void> {
   const headers: Record<string, string> = { 'user-agent': 'rosefn-hot' };
   if (cookieHeader) headers.cookie = cookieHeader;
-  const response = await handle!(new Request('http://localhost' + pathname, { headers }));
+  const response = await runIsolated(() => handle!(new Request('http://localhost' + pathname, { headers })));
   const csp = response.headers.get('content-security-policy') || '';
   const key = pathname + '|' + fnv(cookieHeader);
   if (response.status !== 200 || csp.includes('nonce-')) {
@@ -122,6 +187,7 @@ function tryHot(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   if (req.headers['if-none-match'] === entry.etag) {
     res.statusCode = 304;
     res.end();
+    writeAccessLine(req, res, 0);
     return true;
   }
   const compressed = (entry as any).compressed !== false;
@@ -129,9 +195,12 @@ function tryHot(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const enc = compressed ? (/br\b/i.test(accept) ? 'br' : /gzip\b/i.test(accept) ? 'gzip' : null) : null;
   if (enc) {
     res.setHeader('Content-Encoding', enc);
-    res.end(enc === 'br' ? entry.br : entry.gzip);
+    const body = enc === 'br' ? entry.br : entry.gzip;
+    res.end(body);
+    writeAccessLine(req, res, body.length);
   } else {
     res.end(entry.raw);
+    writeAccessLine(req, res, entry.raw.length);
   }
   return true;
 }
@@ -224,17 +293,24 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, rawUrl
     return false;
   }
   if (pathname.includes('\0') || pathname.includes('..')) return false;
-  const filePath = path.join(dist, pathname);
-  if (!filePath.startsWith(dist)) return false;
-  let st: fs.Stats;
-  try {
-    st = fs.statSync(filePath);
-    if (!st.isFile()) return false;
-  } catch {
-    return false;
-  }
-  const ext = path.extname(filePath).toLowerCase();
+  const ext = path.extname(pathname).toLowerCase();
   if (!TYPES[ext]) return false;
+  let filePath = '';
+  let st: fs.Stats | null = null;
+  for (const root of resolveStaticRoots()) {
+    const candidate = path.join(root, pathname);
+    if (!candidate.startsWith(root)) continue;
+    try {
+      const s = fs.statSync(candidate);
+      if (!s.isFile()) continue;
+      filePath = candidate;
+      st = s;
+      break;
+    } catch {
+      // not under this root; try the next one
+    }
+  }
+  if (!st) return false;
   let entry = fileCache.get(filePath);
   if (!entry || entry.mtimeMs !== st.mtimeMs) {
     const raw = fs.readFileSync(filePath);
@@ -258,21 +334,25 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, rawUrl
   if (req.headers['if-none-match'] === entry.etag) {
     res.statusCode = 304;
     res.end();
+    writeAccessLine(req, res, 0);
     return true;
   }
   const compressed = (entry as any).compressed !== false;
-    const accept = String(req.headers['accept-encoding'] || '');
+  const accept = String(req.headers['accept-encoding'] || '');
   const enc = compressed ? (/br\b/i.test(accept) ? 'br' : /gzip\b/i.test(accept) ? 'gzip' : null) : null;
   if (enc) {
     res.setHeader('Content-Encoding', enc);
-    res.end(enc === 'br' ? entry.br : entry.gzip);
+    const body = enc === 'br' ? entry.br : entry.gzip;
+    res.end(body);
+    writeAccessLine(req, res, body.length);
   } else {
     res.end(entry.raw);
+    writeAccessLine(req, res, entry.raw.length);
   }
   return true;
 }
 
-http.createServer(async (req, res) => {
+const server = http.createServer(async (req, res) => {
   try {
     await ready;
     if (handleRevalidate(req, res)) return;
@@ -288,8 +368,23 @@ http.createServer(async (req, res) => {
     if (hotCache.size > 0 && tryHot(req, res)) return;
     if (req.method === 'GET' || req.method === 'HEAD') {
       if (serveStatic(req, res, req.url || '/')) return;
+      let p = '/';
+      try {
+        p = decodeURIComponent(new URL('http://localhost' + (req.url || '/')).pathname);
+      } catch {
+        p = req.url || '/';
+      }
+      p = p.split('?')[0]!;
+      if (isBakedAssetPath(p)) {
+        res.statusCode = 404;
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.setHeader('Cache-Control', 'public, max-age=60');
+        res.end('not found');
+        writeAccessLine(req, res, 0);
+        return;
+      }
     }
-    const url = 'http://' + (req.headers.host || `localhost:${port}`) + (req.url || '/');
+    const url = requestOrigin(req, port) + (req.url || '/');
     const init: RequestInit = { method: req.method, headers: req.headers as any };
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       (init as any).body = Readable.toWeb(req) as any;
@@ -299,7 +394,16 @@ http.createServer(async (req, res) => {
     if (earlyHintLinks.length && req.method === 'GET' && String(req.headers.accept ?? '').includes('text/html')) {
       try { res.writeEarlyHints({ link: earlyHintLinks }); } catch { /* client gone: the render still finishes */ }
     }
-    const response = await handle!(new Request(url, init));
+    const replayable = req.method === 'GET' || req.method === 'HEAD';
+    let response: Response;
+    try {
+      response = await runIsolated(() => handle!(new Request(url, init)));
+    } catch (err) {
+      if (!replayable) throw err;
+      console.warn('[rosefn] render failed, retrying once:', (err as Error)?.message ?? err);
+      await new Promise((r) => setTimeout(r, 200));
+      response = await runIsolated(() => handle!(new Request(url, init)));
+    }
     if (req.method === 'GET') fillHot(req.url || '/', cookieHeader, response.clone());
     res.statusCode = response.status;
     response.headers.forEach((v, k) => res.setHeader(k, v));
@@ -311,31 +415,61 @@ http.createServer(async (req, res) => {
       if (req.method === 'GET' && req.headers['if-none-match'] === etag) {
         res.statusCode = 304;
         res.end();
+        writeAccessLine(req, res, 0);
         return;
       }
       res.setHeader('ETag', etag);
-      res.setHeader('Content-Length', String(raw.length));
-      if (accept.includes('br')) {
-        res.setHeader('Content-Encoding', 'br');
-        res.end(zlib.brotliCompressSync(raw));
-      } else {
-        res.setHeader('Content-Encoding', 'gzip');
-        res.end(zlib.gzipSync(raw));
-      }
+      const compressed = accept.includes('br')
+        ? zlib.brotliCompressSync(raw)
+        : zlib.gzipSync(raw);
+      res.setHeader('Content-Encoding', accept.includes('br') ? 'br' : 'gzip');
+      res.setHeader('Content-Length', String(compressed.length));
+      res.end(compressed);
+      writeAccessLine(req, res, compressed.length);
     } else if (response.body) {
-      Readable.fromWeb(response.body as any).pipe(res);
+      const raw = Buffer.from(await response.arrayBuffer());
+      res.end(raw);
+      writeAccessLine(req, res, raw.length);
     } else {
       res.end();
+      writeAccessLine(req, res, 0);
     }
   } catch (err) {
+    console.error('[rosefn] request failed:', (err as Error)?.stack ?? err);
     if (!res.headersSent) {
       res.statusCode = 500;
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     }
     res.end('server error');
+    writeAccessLine(req, res, 13);
   }
-}).listen(port, () => {
-  console.log(`🌹 rosefn prod server on http://localhost:${port}`);
 });
+
+if (!process.env.VERCEL) {
+  server.listen(port, () => {
+    console.log(`🌹 rosefn prod server on http://localhost:${port}`);
+  });
+
+  let stopping = false;
+  const stop = (signal: NodeJS.Signals) => {
+    if (stopping) return;
+    stopping = true;
+    const force = setTimeout(() => process.exit(1), 10_000);
+    force.unref?.();
+    server.close(() => {
+      void runShutdownHooks(signal).finally(() => {
+        clearTimeout(force);
+        process.exit(0);
+      });
+    });
+    server.closeIdleConnections?.();
+  };
+  process.on('SIGINT', () => stop('SIGINT'));
+  process.on('SIGTERM', () => stop('SIGTERM'));
+}
+
+export default server;
+
+export { onShutdown, runShutdownHooks };
 
 void mod?.invalidateRenderCache;
