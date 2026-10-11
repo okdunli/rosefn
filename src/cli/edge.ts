@@ -1,5 +1,5 @@
-// Rosefn Edge adapter - Web-standard fetch handler.
 
+// Rosefn Edge adapter - Web-standard fetch handler.
 import { pathToFileURL } from 'url';
 import { join } from 'path';
 import { buildShell, shellOpen, clientScriptTag, securityHeaders, mintNonce } from './shell.js';
@@ -41,6 +41,7 @@ type ServerModule = {
   /** P0-1: the query of the request being rendered, for $query() */
   setQuery(query: Record<string, string>): void;
 };
+
 
 export { onShutdown, runShutdownHooks, shutdownHookCount } from './shutdown.js';
 
@@ -155,7 +156,7 @@ export async function createEdgeHandler(
       const fn = (mod as any).invalidateRenderCache;
       if (typeof fn === 'function') fn();
     }
-    if (!form && !broken.has(pathname) && !mod.isBuffered?.(pathname) && mod.canStream(pathname) && !mod.isNoJs(pathname)) {
+    if (!form && !broken.has(pathname) && !mod.isBuffered?.(pathname) && mod.canStream(pathname) && !mod.isNoJs(pathname) && !request.headers.get('x-pjax')) {
       const nonce = mod.cspNonce?.(pathname) ? mintNonce() : '';
       const streamed = new Response(null, {
         status: 200,
@@ -178,18 +179,31 @@ export async function createEdgeHandler(
       return new Response(stream, { status: head.status, headers: head.headers });
     }
     const cookieHeader = request.headers.get('cookie') || '';
+    const qs = searchParams.toString();
     const memoHit = !form && (mod as any).isCachedRoute?.(pathname)
-      ? (mod as any).peekRenderCache?.(pathname, cookieHeader)
+      ? (mod as any).peekRenderCache?.(pathname, cookieHeader, qs)
       : null;
     const page = memoHit ?? ((mod as any).renderPageCached && !form
-      ? await (mod as any).renderPageCached(pathname, cookieHeader)
+      ? await (mod as any).renderPageCached(pathname, cookieHeader, qs)
       : await mod.renderPage(pathname, form));
     const nonce = mod.cspNonce?.(pathname) ? mintNonce() : '';
-    const html = buildShell(page.html, page.state, client, page.head, styles, page.csr !== false, page.lang, page.dir, nonce, page.shell !== false);
+    let html = buildShell(page.html, page.state, client, page.head, styles, page.csr !== false, page.lang, page.dir, nonce, page.shell !== false);
+    if (request.headers.get('x-pjax')) html = pjaxFragment(html);
     const buffered = new Response(html, {
       status: page.status ?? 200,
       headers: { 'content-type': 'text/html; charset=utf-8', ...pageHeaders(pathname, nonce) }
     });
     return hookCtx ? mod.runResponseHooks(hookCtx, buffered) : buffered;
   };
+}
+
+function pjaxFragment(html: string): string {
+  const mi = html.indexOf('<main id="sk-main"');
+  if (mi < 0) return html;
+  const me = html.indexOf('</main>', mi);
+  if (me < 0) return html;
+  const main = html.slice(mi, me + '</main>'.length);
+  const tm = html.match(/<title>([\s\S]*?)<\/title>/i);
+  const title = tm ? tm[0] : '';
+  return title + main;
 }
