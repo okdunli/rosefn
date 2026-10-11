@@ -67,18 +67,39 @@ if (!__app) {
 }
 // Native View Transitions around client-side navigation (progressive:
 // browsers without the API navigate normally, no polyfill, no CSS required).
-function __navigate(pathname) {
-  const paint = () => start(__app, pathname);
+// F35: stash the CURRENT entry's scroll position into its history state
+// before a new push - the browser only restores scroll on full page loads; a
+// pjax swap would land wherever the swap left it.
+function __saveScroll() {
+  try {
+    const s = history.state || {};
+    history.replaceState(Object.assign({}, s, { __rosefnScroll: window.scrollY }), '');
+  } catch (e) { /* history state unavailable (file:// edge): best effort */ }
+}
+function __navigate(pathname, restore) {
+  const paint = () => {
+    const p = start(__app, pathname);
+    if (restore) {
+      // back/forward: restore the entry's scroll (top when it has none)
+      const s = history.state || {};
+      const y = typeof s.__rosefnScroll === 'number' ? s.__rosefnScroll : 0;
+      return Promise.resolve(p).then(() => { window.scrollTo(0, y); }, () => { window.scrollTo(0, y); });
+    }
+    // a fresh navigation starts at the top, like a full page load
+    window.scrollTo(0, 0);
+    return p;
+  };
   if (document.startViewTransition) {
     return document.startViewTransition(paint).updateCallbackDone;
   }
   return paint();
 }
-window.addEventListener('popstate', () => __navigate(window.location.pathname));
+window.addEventListener('popstate', () => __navigate(window.location.pathname, true));
 document.addEventListener('click', (e) => {
   const a = e.target.tagName === 'A' ? e.target : e.target.closest && e.target.closest('a');
   if (a && a.getAttribute('href') && a.getAttribute('href').startsWith('/')) {
     e.preventDefault();
+    __saveScroll();
     history.pushState(null, '', a.getAttribute('href'));
     __navigate(window.location.pathname);
   }
@@ -186,6 +207,15 @@ function bootstrap(): string {
 }
 
 const CSP_TAIL = `style-src 'unsafe-inline'; img-src 'self' data: https://fastly.picsum.photos; font-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`;
+
+
+const BASELINE_SECURITY_HEADERS: Record<string, string> = {
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+  'permissions-policy': 'accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), camera=(), display-capture=(), document-domain=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=()',
+};
+
 let cspCache: { for: string | null; value: string } | null = null;
 let EXTERNAL_BOOTSTRAP_CACHE: string | null = null;
 function externalBootstrap(): string {
@@ -242,7 +272,11 @@ export function mintNonce(): string {
  *   the route opts into, per route, not a framework default.
  */
 export function securityHeaders(client: string | null, nonce = ''): Record<string, string> {
-  if (nonce) return { 'Content-Security-Policy': `script-src 'nonce-${nonce}' 'strict-dynamic'; ${CSP_TAIL}` };
+  const headers: Record<string, string> = { ...BASELINE_SECURITY_HEADERS };
+  if (nonce) {
+    headers['Content-Security-Policy'] = `script-src 'nonce-${nonce}' 'strict-dynamic'; ${CSP_TAIL}`;
+    return headers;
+  }
   if (!cspCache || cspCache.for !== client) {
     const scriptSrc = client
       ? `'sha256-${createHash('sha256').update(inlineScript(client), 'utf-8').digest('base64')}'`
@@ -252,7 +286,8 @@ export function securityHeaders(client: string | null, nonce = ''): Record<strin
       value: `script-src ${scriptSrc}; ${CSP_TAIL}`,
     };
   }
-  return { 'Content-Security-Policy': cspCache.value };
+  headers['Content-Security-Policy'] = cspCache.value;
+  return headers;
 }
 
 const FAVICON = '<link rel="icon" href="data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 100 100\'><text y=\'.9em\' font-size=\'90\'>🌹</text></svg>">';
