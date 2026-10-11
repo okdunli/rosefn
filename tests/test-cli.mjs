@@ -1841,7 +1841,7 @@ export default [{
     for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${barePort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
     const mint = await fetch(`http://localhost:${barePort}/api/token`, { method: 'POST', body: new URLSearchParams({ user: 'ada', pass: 'lovelace' }), headers: { 'content-type': 'application/x-www-form-urlencoded' } });
     assert(mint.status === 500 && (await mint.json()).error.includes('JWT_SECRET'), 'an unconfigured mint answers 500 naming the variable');
-    const me = await fetch(`http://localhost:${barePort}/`);
+    const me = await fetch(`http://localhost:${barePort}/api/me`);
     assert(me.status === 500 && (await me.json()).error.includes('JWT_SECRET'), 'the walled route refuses to guess a secret either');
   } finally {
     bareProc.kill();
@@ -1924,7 +1924,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
     assert(jsonld.includes(`nonce="${bnonce}"`), 'a non-executed script type is stamped too (harmless, and uniform)');
     const bnonces = [...bhtml.matchAll(/nonce="([^"]+)"/g)].map((m) => m[1]);
     assert(bnonces.every((n) => n === bnonce), 'every stamped tag carries the one nonce, nothing else');
-    const pres = await fetch(`http://localhost:${bufPort}/`);
+    const pres = await fetch(`http://localhost:${bufPort}/plain`);
     const phtml = await pres.text();
     const pcsp = pres.headers.get('content-security-policy') ?? '';
     assert(/script-src 'sha256-/.test(pcsp), 'the hashed route answers a sha256 policy');
@@ -2073,7 +2073,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
     assert((await text('/a/b/c')).includes('segments: a/b/c'), 'the optional catch-all absorbs many segments into the array');
     assert((await text('/blog/7')).includes('id: 7'), 'a specific param route wins over the root catch-all (specificity order)');
     assert((await text('/blog/x/y')).includes('rest: x/y'), 'a prefixed catch-all absorbs the tail');
-    const api = await fetch(`http://localhost:${caPort}/`);
+    const api = await fetch(`http://localhost:${caPort}/api/plugin/seo-schema/sitemap.xml`);
     assert(api.status === 200, 'the api catch-all gateway answers 200');
     assert(JSON.stringify(await api.json()) === '{"plugin":"seo-schema","path":"sitemap.xml"}', 'the api gateway route splits its param and its tail');
     const noTail = await fetch(`http://localhost:${caPort}/api/plugin/x`);
@@ -2107,10 +2107,10 @@ ${bufHead.replace('buffered nonce', 'plain head')}
     const goneHtml = await gone.text();
     assert(gone.status === 404, `notFound() answers a real 404 (got ${gone.status})`);
     assert(goneHtml.includes('app 404') && goneHtml.includes('this url has no content'), "notFound() renders the app's own 404 route");
-    const moved = await fetch(`http://localhost:${sigPort}/`);
+    const moved = await fetch(`http://localhost:${sigPort}/moved`, { redirect: 'manual' });
     assert(moved.status === 307 && moved.headers.get('location') === '/', `redirect() answers a 30x with the Location (got ${moved.status} ${moved.headers.get('location')})`);
     assert((await moved.text()).includes('Redirecting'), 'the redirect carries a small HTML body for a no-JS visitor');
-    const posted = await fetch(`http://localhost:${sigPort}/`);
+    const posted = await fetch(`http://localhost:${sigPort}/login`, { method: 'POST', redirect: 'manual' });
     assert(posted.status === 303 && posted.headers.get('location') === '/', `an action's redirect answers 303 (got ${posted.status} ${posted.headers.get('location')})`);
   } finally {
     sigProc.kill();
@@ -2139,14 +2139,14 @@ ${bufHead.replace('buffered nonce', 'plain head')}
     for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${tsPort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
     const bare = await fetch(`http://localhost:${tsPort}/admin`);
     assert(bare.status === 200, `the bare path still answers 200 (got ${bare.status})`);
-    const slash = await fetch(`http://localhost:${tsPort}/`);
+    const slash = await fetch(`http://localhost:${tsPort}/admin/`, { redirect: 'manual' });
     assert(slash.status === 308, `the slashed path answers 308 (got ${slash.status})`);
     assert(slash.headers.get('location') === '/admin', `the Location is the bare path (got ${slash.headers.get('location')})`);
-    const q = await fetch(`http://localhost:${tsPort}/`);
+    const q = await fetch(`http://localhost:${tsPort}/admin/?tab=posts&x=1`, { redirect: 'manual' });
     assert(q.headers.get('location') === '/admin?tab=posts&x=1', `the query rides along (got ${q.headers.get('location')})`);
     const root = await fetch(`http://localhost:${tsPort}/`);
     assert(root.status === 200, `the root is exempt (got ${root.status})`);
-    const followed = await fetch(`http://localhost:${tsPort}/`);
+    const followed = await fetch(`http://localhost:${tsPort}/admin/`);
     assert(followed.status === 200 && (await followed.text()).includes('dash'), 'following the redirect lands on the route');
   } finally {
     tsProc.kill();
@@ -2215,7 +2215,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
     assert(thrown.status === 404 && thrownHtml.includes('POSTS-404'), `a notFound() thrown under a segment answers that segment's 404 (got ${thrown.status})`);
     const httpMiss = await fetch(`http://localhost:${nfPort}/admin/nope`);
     assert(httpMiss.status === 404 && (await httpMiss.text()).includes('ADMIN-404'), 'the server answers the segment 404 over HTTP too');
-    const publicMiss = await fetch(`http://localhost:${nfPort}/`);
+    const publicMiss = await fetch(`http://localhost:${nfPort}/nope`);
     assert(publicMiss.status === 404 && (await publicMiss.text()).includes('ROOT-404'), 'the public miss still answers the root 404');
   } finally {
     nfProc.kill();
