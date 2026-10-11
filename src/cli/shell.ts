@@ -9,6 +9,7 @@ const OUT_DIR = path.join(process.cwd(), 'dist');
 
 let clientCache: { mtimeMs: number; source: string } | null = null;
 
+
 let splitMode = false;
 export function setBundleMode(mode: string): void {
   splitMode = mode === 'split';
@@ -17,6 +18,7 @@ export function setBundleMode(mode: string): void {
 /** Read dist/client.js with an mtime-based cache (dev server rebuilds it). */
 export function getClientSource(): string | null {
   if (splitMode) return null;
+  
   const file = path.join(OUT_DIR, 'client.js');
   try {
     const st = fs.statSync(file);
@@ -45,6 +47,7 @@ export function getStyles(): string {
   }
 }
 
+// Bootstrap appended after the inlined bundle: client-side navigation. Distinct names avoid any collision with minified bundle identifiers.
 const BOOTSTRAP_SOURCE = `
 // shell = false: the document's SSR content sits directly in <body> - no
 // #app wrapper, no demo styles, so a real theme's CSS owns the document from
@@ -190,9 +193,11 @@ if (__state.__notFound) {
   start(__app, window.location.pathname);
 }
 `;
+// Lazy + best-effort: the transform runs on first use, not at module load - the bundled prod server (dist/prod.mjs) boots without esbuild's worker.
 let BOOTSTRAP_CACHE: string | null = null;
 function bootstrap(): string {
   if (BOOTSTRAP_CACHE === null) {
+    // The bundled prod server (dist/prod.mjs) sets the skip flag: esbuild's transformSync spawns a worker thread whose entry is the bundle itself.
     if ((globalThis as any).__ROSEFN_SKIP_MINIFY) {
       BOOTSTRAP_CACHE = BOOTSTRAP_SOURCE;
     } else {
@@ -206,6 +211,7 @@ function bootstrap(): string {
   return BOOTSTRAP_CACHE;
 }
 
+
 const CSP_TAIL = `style-src 'unsafe-inline'; img-src 'self' data: https://fastly.picsum.photos; font-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`;
 
 
@@ -213,10 +219,11 @@ const BASELINE_SECURITY_HEADERS: Record<string, string> = {
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
   'referrer-policy': 'strict-origin-when-cross-origin',
-  'permissions-policy': 'accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), camera=(), display-capture=(), document-domain=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=()',
+  'permissions-policy': 'accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=()',
 };
 
 let cspCache: { for: string | null; value: string } | null = null;
+// The exact bytes between the external bootstrap's script tags - the single source of truth shared by the tag and the CSP hash.
 let EXTERNAL_BOOTSTRAP_CACHE: string | null = null;
 function externalBootstrap(): string {
   if (EXTERNAL_BOOTSTRAP_CACHE === null) EXTERNAL_BOOTSTRAP_CACHE = `\nimport { start, startNotFound, prefetch, postForm, prefetchStats, serializeState } from '/client.js';\n${bootstrap()}`;
@@ -402,8 +409,6 @@ export function shellOpen(styles: string = getStyles(), lang = 'en', dir = '', s
 
 /** Build the document from an explicit client source (edge runtimes have no fs). */
 export function buildShell(ssrHtml: string, stateJson: string, client: string | null, head: string[] = [], styles: string = getStyles(), js = true, lang = 'en', dir = '', nonce = '', shell = true): string {
-  const clientTag = clientScriptTag(client, nonce);
-
   const mergedHead = mergeHeadBlocks(head);
   const headStamped = nonce
     ? mergedHead.replace(/<script\b([^>]*)>/gi, (m, attrs: string) => (/\bnonce=/.test(attrs) ? m : `<script${attrs} nonce="${nonce}">`))
@@ -411,18 +416,21 @@ export function buildShell(ssrHtml: string, stateJson: string, client: string | 
   let htmlAttrs = ` lang="${lang}"${dir ? ` dir="${dir}"` : ''}`;
   let bodyAttrs = '';
   const headClean = headStamped.replace(/<(html|body)\b([^>]*)>/gi, (_m, tag: string, attrs: string) => {
+    // mergeHeadBlocks stamps every passthrough element with its key; the
     const clean = attrs.replace(/\s*data-rosefn-head="[^"]*"/, '');
     if (tag === 'html') htmlAttrs = clean;
     else bodyAttrs = clean;
     return '';
   });
+  
   const titleTag = /<title>/i.test(mergedHead) ? '' : '<title>Rosefn</title>';
+  
   const iconTag = /rel=["']?icon/i.test(mergedHead) ? '' : `\n  ${FAVICON}`;
   const headTags = headClean ? `\n  ${headClean}` : '';
   const styleTag = styles ? `\n  <style>${styles}</style>` : '';
   const stateSafe = stateJson.replace(/</g, '\\u003c');
   const jsTail = js
-    ? `\n  <script type="application/json" id="__rosefn_state">${stateSafe}</script>\n  ${clientTag}`
+    ? `\n  <script type="application/json" id="__rosefn_state">${stateSafe}</script>\n  ${clientScriptTag(client, nonce)}`
     : '';
   const open = js && shell ? '<div id="app">' : '';
   const close = js && shell ? '</div>' : '';
