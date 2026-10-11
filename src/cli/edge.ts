@@ -42,7 +42,9 @@ type ServerModule = {
   setQuery(query: Record<string, string>): void;
 };
 
-// CSRF: the edge twin of the Node server's guard.
+export { onShutdown, runShutdownHooks, shutdownHookCount } from './shutdown.js';
+
+// CSRF guard: a state-changing request that did not come from this site is refused before middleware, hooks and routing see it.
 function crossSiteWrite(request: Request): Response | null {
   const m = request.method;
   if (m !== 'POST' && m !== 'PUT' && m !== 'PATCH' && m !== 'DELETE') return null;
@@ -113,7 +115,8 @@ export async function createEdgeHandler(
 
   const pageHeaders = (pathname: string, nonce = ''): Record<string, string> => {
     const headers: Record<string, string> = {};
-    if (client) for (const [k, v] of Object.entries(securityHeaders(client, nonce))) headers[k.toLowerCase()] = v;
+    for (const [k, v] of Object.entries(securityHeaders(client, nonce))) headers[k.toLowerCase()] = v;
+    if (!headers['cache-control']) headers['cache-control'] = 'no-cache';
     const own = mod.headersFor?.(pathname);
     if (own) for (const [k, v] of Object.entries(own)) headers[k.toLowerCase()] = v;
     return headers;

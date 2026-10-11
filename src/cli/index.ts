@@ -11,6 +11,8 @@ import { getHtmlShell, getClientSource, getStyles, shellOpen, clientScriptTag, s
 import { AI_PROMPT } from './prompt.js';
 import { Readable } from 'stream';
 import { createEdgeHandler } from './edge.js';
+import { runShutdownHooks } from './shutdown.js';
+import { requestOrigin } from './origin.js';
 import type * as ts from 'typescript';
 
 type Encoding = 'br' | 'gzip' | 'deflate';
@@ -42,6 +44,9 @@ function sendHtml(req: any, res: any, status: number, html: string, extraHeaders
   res.statusCode = status;
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Vary', 'Accept-Encoding');
+  if (!Object.keys(extraHeaders || {}).some((k) => k.toLowerCase() === 'cache-control')) {
+    res.setHeader('Cache-Control', 'no-cache');
+  }
   if (extraHeaders) for (const [k, v] of Object.entries(extraHeaders)) res.setHeader(k, v);
   let hash = 0x811c9dc5;
   for (let i = 0; i < html.length; i++) {
@@ -502,6 +507,18 @@ function crossSiteWrite(req: any): { status: number; body: string } | null {
  * in front when several workers share one stdout. Logged on the response's
  * finish, so a streamed route is recorded when it is actually done.
  */
+/**
+ * The access line itself, shared by withAccessLog and the dynamic-render
+ * branch of `serve` (which returns before baseHandler, so it never goes
+ * through the wrapper). One formatter means both paths emit byte-identical
+ * shapes - the greppable contract test-cli asserts on.
+ */
+function writeAccessLine(req: any, res: any, bytes: number, tag?: string, startedNs?: bigint): void {
+  const ms = Number(process.hrtime.bigint() - (startedNs ?? process.hrtime.bigint())) / 1e6;
+  const dur = ms >= 1 ? `${ms.toFixed(3)}ms` : `${(ms * 1000).toFixed(0)}us`;
+  console.log(`${new Date().toISOString().slice(0, 19)}Z${tag ? ` [${tag}]` : ''} ${req.method} ${req.url} ${res.statusCode} ${bytes}B ${dur}`);
+}
+
 function withAccessLog(handler: (req: any, res: any) => void, tag?: string): (req: any, res: any) => void {
   return (req, res) => {
     const started = process.hrtime.bigint();
@@ -510,11 +527,7 @@ function withAccessLog(handler: (req: any, res: any) => void, tag?: string): (re
     const end = res.end.bind(res);
     res.write = (chunk: any, ...rest: any[]) => { if (chunk) bytes += Buffer.byteLength(chunk); return write(chunk, ...rest); };
     res.end = (chunk: any, ...rest: any[]) => { if (chunk) bytes += Buffer.byteLength(chunk); return end(chunk, ...rest); };
-    res.on('finish', () => {
-      const ms = Number(process.hrtime.bigint() - started) / 1e6;
-      const dur = ms >= 1 ? `${ms.toFixed(3)}ms` : `${(ms * 1000).toFixed(0)}us`;
-      console.log(`${new Date().toISOString().slice(0, 19)}Z${tag ? ` [${tag}]` : ''} ${req.method} ${req.url} ${res.statusCode} ${bytes}B ${dur}`);
-    });
+    res.on('finish', () => writeAccessLine(req, res, bytes, tag, started));
     handler(req, res);
   };
 }
@@ -963,33 +976,29 @@ function queryOf(url: string | undefined): Record<string, string> {
   return q;
 }
 
-/**
- * P0-0 (bug report): listen on `port`, hopping to the next free one when it
- * is taken instead of crashing with EADDRINUSE. Two projects on one machine
- * (or a dev server that did not exit cleanly) is the everyday case, and a
- * stack trace plus a dead process is the worst possible answer to it: the
- * banner names the port actually used, so the URL is never a guess.
- *
- * The hop is bounded (20 tries) and every other error is fatal - silently
- * retrying a real fault would hide it.
- */
+/** Listen on `port`, hopping to the next free one on EADDRINUSE. */
 function listenFree(server: any, port: number, onReady: (port: number) => void): void {
   const attempt = (p: number): void => {
-    const onError = (err: any) => {
+    const cleanup = (): void => {
       server.removeListener('error', onError);
+      server.removeListener('listening', onListening);
+    };
+    const onError = (err: any): void => {
+      cleanup();
       if (err && err.code === 'EADDRINUSE' && p - port < 20) {
-        console.log(`🌹 port ${p} is in use - trying ${p + 1}`);
         attempt(p + 1);
         return;
       }
       console.error(`Rosefn: cannot listen on port ${p}:`, err instanceof Error ? err.message : err);
       process.exit(1);
     };
-    server.once('error', onError);
-    server.listen(p, () => {
-      server.removeListener('error', onError);
+    const onListening = (): void => {
+      cleanup();
       onReady(p);
-    });
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(p);
   };
   attempt(port);
 }
@@ -1016,18 +1025,9 @@ async function freePort(from: number): Promise<number> {
 }
 
 /**
- * The FRAMEWORK's version - one source of truth, no constant to drift.
- *
- * Three layouts answer, in order:
- *  1. src/FRAMEWORK_VERSION, a one-line stamp that ships beside the CLI
- *     source. It is the only candidate that survives EMBEDDING: a real app
- *     copies the framework's src/ into its own tree, where the nearest
- *     package.json is the APP's - which is how a banner ended up naming the
- *     app's version as the framework's for weeks, with no way to tell which
- *     framework build was actually running.
- *  2. the package.json two directories up (this repo: the framework's own),
- *  3. the one beside the bundle (the published package: dist-cli/ + src/).
- * A test asserts the stamp equals package.json, so the two cannot drift.
+ * The FRAMEWORK's version. FRAMEWORK_VERSION first because it is the only
+ * candidate that survives embedding: an app copies this src/ into its own
+ * tree, where the nearest package.json is the APP's.
  */
 function version(): string {
   for (const rel of ['../FRAMEWORK_VERSION', '../../FRAMEWORK_VERSION', '../../package.json', '../package.json']) {
@@ -1184,14 +1184,17 @@ async function serve(): Promise<void> {
     return dynRouteSet;
   };
   const server = http.createServer(async (req: any, res: any) => {
+    let bytesWritten = 0;
+    const started = process.hrtime.bigint();
     try {
       if ((req.method === 'GET' || req.method === 'HEAD') && dynRoutesOf().has(pathnameOf(req.url || '/'))) {
         const handle = await edgeReady;
         if (earlyHintLinks.length && req.method === 'GET' && String(req.headers.accept ?? '').includes('text/html')) {
           try { res.writeEarlyHints({ link: earlyHintLinks }); } catch { /* client gone: the render still finishes */ }
         }
-        const url = 'http://' + (req.headers.host || `localhost:${PORT}`) + (req.url || '/');
+        const url = requestOrigin(req, PORT) + (req.url || '/');
         const response = await handle(new Request(url, { method: req.method, headers: req.headers }));
+        const access = () => writeAccessLine(req, res, bytesWritten, `w${process.pid}`, started);
         res.statusCode = response.status;
         response.headers.forEach((v: string, k: string) => res.setHeader(k, v));
         const htmlDoc = (response.headers.get('content-type') ?? '').startsWith('text/html');
@@ -1201,7 +1204,9 @@ async function serve(): Promise<void> {
           const etag = 'W/"' + createHash('sha1').update(raw).digest('base64url').slice(0, 24) + '"';
           if (req.headers['if-none-match'] === etag) {
             res.statusCode = 304;
+            bytesWritten = 0;
             res.end();
+            access();
             return;
           }
           const body = compress(enc, raw);
@@ -1209,12 +1214,19 @@ async function serve(): Promise<void> {
           res.setHeader('Content-Encoding', enc);
           res.setHeader('Content-Length', String(body.length));
           res.end(body);
+          bytesWritten = body.length;
+          access();
           return;
         }
         if (response.body) {
-          Readable.fromWeb(response.body as any).pipe(res);
+          const raw = Buffer.from(await response.arrayBuffer());
+          bytesWritten = raw.length;
+          res.end(raw);
+          access();
         } else {
           res.end();
+          bytesWritten = 0;
+          access();
         }
         return;
       }
@@ -1245,7 +1257,9 @@ async function serve(): Promise<void> {
         console.error('Rosefn: plugin', p.name, 'onShutdown failed:', err instanceof Error ? err.message : err);
       }
     }
-    server.close(() => process.exit(0));
+    server.close(() => {
+      void runShutdownHooks('worker signal').finally(() => process.exit(0));
+    });
     server.closeIdleConnections?.();
     setTimeout(() => process.exit(0), 5000).unref();
   };
