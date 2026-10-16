@@ -252,6 +252,13 @@ async function loadServer(): Promise<any> {
   return serverModule;
 }
 
+/** Write only when the bytes differ: an unchanged file keeps its mtime, so writeBrotli's freshness check skips it and the server's prebuiltBro stays valid. */
+async function writeIfChanged(file: string, content: string): Promise<void> {
+  let prev: string | null = null;
+  try { prev = await fs.promises.readFile(file, 'utf-8'); } catch { /* new file: always write */ }
+  if (prev !== content) await fs.promises.writeFile(file, content);
+}
+
 async function build(): Promise<void> {
   const minify = !devMode && !argv.includes('--no-minify');
   const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR, { minify, incremental: devMode });
@@ -261,9 +268,9 @@ async function build(): Promise<void> {
   // passes are pure waste in the edit loop and, here, also dodge a sandbox that
   // blocks .br writes. Production (and --static verification) keeps them.
   const skipped = devMode ? [] : await prerender(routes);
-  await fs.promises.writeFile(path.join(OUT_DIR, 'broken.json'), JSON.stringify(skipped));
+  await writeIfChanged(path.join(OUT_DIR, 'broken.json'), JSON.stringify(skipped));
   const ssrModule = await loadServer();
-  await fs.promises.writeFile(path.join(OUT_DIR, 'headers.json'), JSON.stringify({
+  await writeIfChanged(path.join(OUT_DIR, 'headers.json'), JSON.stringify({
     default: securityHeaders(getClientSource()),
     routes: ssrModule.routeHeaders ?? [],
   }));
@@ -464,6 +471,11 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
   const apiPrerender = (ssrModule.apiPrerender as Record<string, boolean>) ?? {};
   const apiPlanned = Object.entries(apiPrerender).filter(([, on]) => on).map(([routePath]) => routePath);
   for (const routePath of apiPlanned) keep.add(path.join(OUT_DIR, routePath.slice(1) + '.json'));
+  // Build-owned metadata, not route output: the prune below runs BEFORE this
+  // build writes them, so without this they were deleted (and their .br with
+  // them) only to be rewritten - and recompressed - seconds later.
+  keep.add(path.join(OUT_DIR, 'broken.json'));
+  keep.add(path.join(OUT_DIR, 'headers.json'));
   await prunePrerendered(OUT_DIR, keep);
 
   const write = async (routePath: string, file: string) => {
@@ -1672,11 +1684,20 @@ async function check(): Promise<void> {
     process.exit(1);
   }
 
-  let tsMod: typeof ts;
-  try {
-    const req = createRequire(pathToFileURL(path.join(SRC_DIR, 'package.json')));
-    tsMod = await import(pathToFileURL(req.resolve('typescript')).href) as typeof ts;
-  } catch {
+  let tsMod: typeof ts | null = null;
+  // Two roots, in order: the framework's own installation (a dev checkout has
+  // typescript next to the compiler), then the project's. A project without
+  // typescript must not silently resolve some unrelated global copy whose
+  // entry file lacks the compiler API - the shape check below rejects those.
+  for (const root of [import.meta.url, pathToFileURL(path.join(SRC_DIR, 'package.json')).href]) {
+    try {
+      const req = createRequire(root);
+      const mod = await import(pathToFileURL(req.resolve('typescript')).href) as typeof ts & { default?: typeof ts };
+      const api = (mod && mod.ScriptTarget ? mod : mod.default) as typeof ts | undefined;
+      if (api && api.ScriptTarget && api.createProgram) { tsMod = api; break; }
+    } catch { /* try the next root */ }
+  }
+  if (!tsMod) {
     console.error(`RoseSpan: type checking needs typescript in this project - npm i -D typescript`);
     process.exit(1);
   }
