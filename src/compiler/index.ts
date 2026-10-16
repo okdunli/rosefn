@@ -4072,7 +4072,22 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
     return expr;
   };
 
-  const bundleMode = compiled.find((c) => c.bundle)?.bundle ?? 'inline';
+  // The bundle mode is an APP-level switch, so only the root layout may set
+  // it: `compiled.find(...)` used to let the first file that exported it win,
+  // and a leaf page carrying `export const bundle = 'split'` silently flipped
+  // every document in the app to the external-runtime mode (two extra requests
+  // on routes that never asked for it). A misplacement is a build error that
+  // names the file, not a surprise.
+  const rootLayout = path.join(root, 'src', 'pages', '_layout.rose');
+  const misplaced = files.findIndex((f, i) => compiled[i].bundle && f !== rootLayout);
+  if (misplaced >= 0) {
+    throw new RoseError(
+      'E-BUNDLE',
+      `${path.basename(files[misplaced])}: export const bundle switches the whole app's bundle mode, so it belongs in the root layout (src/pages/_layout.rose)`,
+      { file: files[misplaced], hint: "move `export const bundle = 'split'` (or 'inline') to src/pages/_layout.rose - the mode is per-app, not per-page" },
+    );
+  }
+  const bundleMode = compiled[files.indexOf(rootLayout)]?.bundle ?? 'inline';
   const split = bundleMode === 'split';
   const chainOf = (idx: number): number[] => [idx, ...layoutsOf(infos, idx)];
   const loaderInner = (idx: number): string =>
