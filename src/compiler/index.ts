@@ -5,6 +5,20 @@ import * as path from 'path';
 import * as os from 'os';
 import { pathToFileURL, fileURLToPath } from 'url';
 import * as esbuild from 'esbuild';
+
+// A dev hot-rebuild reuses an esbuild build context so a one-file edit only
+// rebundles the changed module instead of re-walking the whole graph (the warm
+// rebuild used to cost as much as the cold one). esbuild 0.24 dropped the old
+// `incremental` flag for the context() API; one-shot builds (production) skip
+// the cache so the context never holds the service open and hangs process exit.
+const __esbuildCache = new Map<string, esbuild.BuildContext>();
+function runEsbuild(key: string, opts: esbuild.BuildOptions, incremental: boolean): Promise<esbuild.BuildResult> {
+  // esbuild.context() cannot be used with code splitting (outdir+splitting); fall back to a plain one-shot build there.
+  if (!incremental || opts.splitting) return esbuild.build(opts);
+  const ex = __esbuildCache.get(key);
+  if (ex) return ex.rebuild().catch((e) => { __esbuildCache.delete(key); throw e; });
+  return esbuild.context(opts).then((c) => { __esbuildCache.set(key, c); return c.rebuild(); });
+}
 // The error contract every compiler failure speaks: a stable code, the file, the line when known.
 import { RoseError, lineOf, lineAt } from './errors.js';
 import { rmTreeParallel, sweepStaleBuildDirs } from './rm-fast.js';
@@ -3776,8 +3790,9 @@ for (const el of document.querySelectorAll('[data-rosespan]')) {
 const __writtenContent = new Map<string, string>();
 let __writtenFor: string | null = null;
 
-export async function buildProject(root: string, outDir: string, opts: { minify?: boolean } = {}): Promise<{ routes: RouteInfo[]; bundle: string; config: RoseSpanConfig }> {
+export async function buildProject(root: string, outDir: string, opts: { minify?: boolean; incremental?: boolean } = {}): Promise<{ routes: RouteInfo[]; bundle: string; config: RoseSpanConfig }> {
   const minify = opts.minify !== false;
+  const incremental = opts.incremental === true;
   await fs.promises.mkdir(outDir, { recursive: true });
 
   const stale = (await fs.promises.readdir(outDir)).filter((f) =>
@@ -3806,7 +3821,6 @@ export async function buildProject(root: string, outDir: string, opts: { minify?
   const compiled = await Promise.all(
     files.map((f, i) => compileComponentMemo(f, path.join(root, 'public'), scopeKeys[i], infos[i].isApi, plugins, registry))
   );
-
   const importsOf = new Map<number, number[]>();
   files.forEach((_, i) => {
     const list: number[] = [];
@@ -3939,14 +3953,14 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
   // generates (the prod server imports dist/server.js at runtime; the runtime
   // entry is self-contained) - so they start here and overlap the whole
   // compile + write phase instead of serializing ahead of it.
-  const runtimeBuild = esbuild.build({
+  const runtimeBuild = runEsbuild(runtimeEntry, {
     entryPoints: [runtimeEntry],
     bundle: true,
     outfile: path.join(buildDir, 'runtime.js'),
     format: 'esm',
     platform: 'browser',
     write: true,
-  });
+  }, incremental);
   const prodEntry = (() => {
     const here = path.dirname(fileURLToPath(import.meta.url));
     for (const cand of [path.join(here, '..', 'cli', 'prod-server.ts'), path.join(here, '..', 'src', 'cli', 'prod-server.ts')]) {
@@ -3954,19 +3968,23 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
     }
     return path.join(here, '..', 'cli', 'prod-server.ts');
   })();
-  const prodBuild = esbuild.build({
-    entryPoints: [prodEntry],
-    bundle: true,
-    outfile: path.join(outDir, 'prod.mjs'),
-    format: 'esm',
-    platform: 'node',
-    write: true,
-    banner: {
-      js: "import { createRequire } from 'node:module'; import { fileURLToPath as __f2p } from 'node:url'; import { dirname as __dn } from 'node:path'; const require = createRequire(import.meta.url); const __filename = __f2p(import.meta.url); const __dirname = __dn(__filename);"
-    },
-    ...TS_LOADER,
-    ...(minify ? { minify: true, keepNames: true } : {}),
-  });
+  // prod.mjs is the serverless/Vercel entry - the dev server and `rosespan serve`
+  // run server.js, so a dev hot-rebuild never needs it.
+  const prodBuild: Promise<esbuild.BuildResult> = incremental
+    ? Promise.resolve({} as esbuild.BuildResult)
+    : runEsbuild(prodEntry, {
+      entryPoints: [prodEntry],
+      bundle: true,
+      outfile: path.join(outDir, 'prod.mjs'),
+      format: 'esm',
+      platform: 'node',
+      write: true,
+      banner: {
+        js: "import { createRequire } from 'node:module'; import { fileURLToPath as __f2p } from 'node:url'; import { dirname as __dn } from 'node:path'; const require = createRequire(import.meta.url); const __filename = __f2p(import.meta.url); const __dirname = __dn(__filename);"
+      },
+      ...TS_LOADER,
+      ...(minify ? { minify: true, keepNames: true } : {}),
+    }, incremental);
   runtimeBuild.catch(() => {});
   prodBuild.catch(() => {});
 
@@ -4963,7 +4981,7 @@ export { installContextStore };
 
   await fs.promises.writeFile(path.join(buildDir, 'server-entry.js'), serverEntry);
   await runtimeBuild;
-  const bundleBuilds = esbuild.build({
+  const bundleBuilds = runEsbuild(path.join(buildDir, 'server-entry.js'), {
     entryPoints: [path.join(buildDir, 'server-entry.js')],
     bundle: true,
     outfile: path.join(outDir, 'server.js'),
@@ -4972,7 +4990,7 @@ export { installContextStore };
     write: true,
     ...TS_LOADER,
     ...(minify ? { minify: true, keepNames: true } : {}),
-  });
+  }, incremental);
   bundleBuilds.catch(() => {}); // an esbuild failure in the window before the await below must surface there, not as a fatal unhandled rejection
   const clientImports = split ? '' : compiled
     .map((_, i) => ({ i }))
@@ -5428,10 +5446,10 @@ setRefreshHook(async () => {
 });
 `;
   await fs.promises.writeFile(path.join(buildDir, 'client-entry.js'), clientEntry);
-  const clientBuild: Promise<void> = split
+  const clientBuild: Promise<esbuild.BuildResult> = split
     ? (async () => {
         await rmTreeParallel(path.join(outDir, 'chunks'));
-        await esbuild.build({
+        return runEsbuild(path.join(buildDir, 'client-entry.js') + ':split', {
           entryPoints: [path.join(buildDir, 'client-entry.js')],
           bundle: true,
           format: 'esm',
@@ -5443,9 +5461,9 @@ setRefreshHook(async () => {
           chunkNames: 'chunks/[name]-[hash]',
           write: true,
           ...TS_LOADER,
-        });
+        }, incremental);
       })()
-    : esbuild.build({
+    : runEsbuild(path.join(buildDir, 'client-entry.js'), {
         entryPoints: [path.join(buildDir, 'client-entry.js')],
         bundle: true,
         outfile: path.join(outDir, 'client.js'),
@@ -5454,7 +5472,7 @@ setRefreshHook(async () => {
         minify: true,
         write: true,
         ...TS_LOADER,
-      });
+      }, incremental);
   await Promise.all([bundleBuilds, clientBuild, prodBuild]);
 
   // mount.js shares the document's runtime module: its import carries the same
