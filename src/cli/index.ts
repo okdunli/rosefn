@@ -57,6 +57,10 @@ const NO_COMPRESS_EXT = new Set([
   '.woff', '.woff2', '.mp4', '.webm', '.mp3', '.pdf', '.zip', '.gz', '.br',
 ]);
 
+// Extensions a vanished watch target must carry to count as a deleted source
+// (the dev watcher's catch-up heuristic; scratch files have none).
+const SOURCE_EXT = new Set(['.rose', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.css', '.json', '.html', '.svg']);
+
 // The static layer's brotli form, built on demand and memoised on the cache entry: a client that only speaks gzip never pays a brotli pass.
 function encodedFile(entry: { raw: Buffer; br?: Buffer; gzip?: Buffer }, enc: 'br' | 'gzip'): Buffer {
   if (enc === 'br') return (entry.br ??= zlib.brotliCompressSync(entry.raw, { params: brotliFast }));
@@ -242,9 +246,12 @@ async function loadServer(): Promise<any> {
     if (devMode) {
       const dir = path.join(os.tmpdir(), `rosespan-dev-${process.pid}`);
       const copy = path.join(dir, `server-${serverVersion}.mjs`);
-      await fs.promises.rm(dir, { recursive: true, force: true });
+      // Write the new version, then drop the previous one: an rm -rf + mkdir
+      // per rebuild measured 2.5x the cost of copy+unlink on Windows, and the
+      // import cache is keyed by path - only the newest file has to exist.
       await fs.promises.mkdir(dir, { recursive: true });
       await fs.promises.copyFile(file, copy);
+      await fs.promises.rm(path.join(dir, `server-${serverVersion - 1}.mjs`), { force: true });
       target = pathToFileURL(copy).href;
     }
     serverModule = await import(target);
@@ -775,11 +782,21 @@ function devNotify(): void {
 }
 
 // Q2 (bug report): dev rebuild orchestration - one build at a time.
+// devDirty marks a change no started build has consumed yet; devDirtyMid marks
+// one that landed WHILE a build was running AND was written after that build
+// began (so the build may have read the old bytes). The running build's
+// completion consumes devDirtyMid with exactly one catch-up pass, so a burst
+// of watch events - or events racing the build - never costs more than one
+// extra rebuild, and never zero.
 let devBuild: Promise<void> | null = null;
-let devBuildPending = false;
+let devDirty = false;
+let devDirtyMid = false;
+let devBuildStartMs = 0;
 
 function startDevBuild(): Promise<void> {
   if (!devBuild) {
+    devDirty = false;
+    devBuildStartMs = Date.now();
     devBuild = (async () => {
       try {
         console.log('Rebuilding...');
@@ -787,11 +804,13 @@ function startDevBuild(): Promise<void> {
         devNotify();
         devNotify();
       } catch (err) {
-        
         console.error('Build failed (server still running):', err instanceof Error ? err.message : String(err));
       } finally {
         devBuild = null;
-        devBuildPending = false;
+        if (devDirtyMid) {
+          devDirtyMid = false;
+          startDevBuild();
+        }
       }
     })();
   }
@@ -800,7 +819,7 @@ function startDevBuild(): Promise<void> {
 
 /** Q2: the promise to await before routing, or null when nothing is building. */
 function settleDevBuild(): Promise<void> | null {
-  if (!devMode || (!devBuild && !devBuildPending)) return null;
+  if (!devMode || (!devBuild && !devDirty)) return null;
   return startDevBuild();
 }
 
@@ -1279,7 +1298,22 @@ async function dev(): Promise<void> {
       const segs = String(filename).replace(/\\/g, '/').split('/');
       if (segs.some((s) => s === 'dist' || s === 'node_modules' || s === '.git' || s === '.rosespan' || s === '.rosespan-build')) return;
     }
-    devBuildPending = true;
+    if (devBuild) {
+      // A change racing a running build. The build reads sources within its
+      // first instants, so a file last written BEFORE the build began is
+      // already in it; only a write that landed after (or a vanished SOURCE
+      // file - a route the build must drop) can have been missed and owes a
+      // catch-up. Editor/rename scratch files (sed's sedyXXXXXX, ~$ locks)
+      // carry no source extension and vanish by design: they are not deletions.
+      try {
+        const st = fs.statSync(path.join(SRC_DIR, filename));
+        if (st.mtimeMs > devBuildStartMs) devDirtyMid = true;
+      } catch {
+        if (SOURCE_EXT.has(path.extname(filename).toLowerCase())) devDirtyMid = true;
+      }
+      return;
+    }
+    devDirty = true;
     clearTimeout(timeout);
     timeout = setTimeout(() => { void startDevBuild(); }, 200);
   });
