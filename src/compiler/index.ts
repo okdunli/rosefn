@@ -1,5 +1,5 @@
 
-// Rosefn Compiler - Compile .rose components to SSR + client-resume JS
+// RoseSpan Compiler - Compile .rose components to SSR + client-resume JS
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -101,8 +101,8 @@ export interface CompileResult {
    * baked file cannot carry a fresh nonce.
    */
   cspNonce?: boolean;
-  /** a route's script references globalThis.__rosefnAuth - emit the node:crypto auth helpers */
-  usesRosefnAuth?: boolean;
+  /** a route's script references globalThis.__rosespanAuth - emit the node:crypto auth helpers */
+  usesRoseSpanAuth?: boolean;
   /**
    * A prop is a plain value the caller passes per invocation (never a
    * signal: the parent re-renders the child when a prop changes), so it is
@@ -560,14 +560,14 @@ export interface I18nConfig {
   preload?: string[];
 }
 
-export interface RosefnConfig {
+export interface RoseSpanConfig {
   plugins: Plugin[];
   i18n: I18nConfig;
   pwa?: PwaOptions;
 }
 
-export async function loadConfig(root: string): Promise<RosefnConfig> {
-  const file = path.join(root, 'rosefn.config.js');
+export async function loadConfig(root: string): Promise<RoseSpanConfig> {
+  const file = path.join(root, 'rosespan.config.js');
   if (!fs.existsSync(file)) return { plugins: [], i18n: {} };
   const mod = await import(pathToFileURL(file).href + `?t=${Date.now()}`);
   return {
@@ -646,7 +646,7 @@ function rewriteRoseImports(script: string, kind: 'ssr' | 'client'): string {
 /**
  * The specifiers that can never reach a browser
  * bundle. Node builtins by prefix, plus the database drivers the docs tell
- * you to use - the packages a rosefn app reaches for on the server and
+ * you to use - the packages a rosespan app reaches for on the server and
  * nowhere else.
  *
  * Trade-off: a specifier list, not a resolver. A package that merely LOOKS
@@ -840,24 +840,55 @@ function hoistImports(script: string): { imports: string; rest: string } {
 }
 
 const __compileMemo = new Map<string, CompileResult>();
+const __memoCap = 2000;
+const __regKeyCache = new WeakMap<RoseRegistry, string>();
+const __pluginFpCache = new WeakMap<Plugin[], string>();
+function registryKey(registry: RoseRegistry): string {
+  let k = __regKeyCache.get(registry);
+  if (k === undefined) {
+    const reg: string[] = [];
+    for (const [p, e] of registry) reg.push(`${p}#${e.index}:${e.scopeKey}:${e.slots.join('|')}`);
+    k = reg.join(';');
+    __regKeyCache.set(registry, k);
+  }
+  return k;
+}
+// Only transform() can change what compileComponent() emits; onRequest/
+// onResponse/onServe/onShutdown run at serve time and never touch the compile.
+// fn.toString() is the transform's source identity: editing the plugin changes
+// the hash, so the cache self-invalidates without any file watching.
+function pluginFingerprint(plugins: Plugin[]): string {
+  let fp = __pluginFpCache.get(plugins);
+  if (fp === undefined) {
+    const parts: string[] = [];
+    for (const p of plugins) {
+      if (!p.transform) continue;
+      let src: string;
+      try { src = String(p.transform); } catch { src = 'opaque'; }
+      parts.push(`${p.name}\u0001${__fnv1a(src)}`);
+    }
+    fp = parts.join('\u0002');
+    __pluginFpCache.set(plugins, fp);
+  }
+  return fp;
+}
 function compileMemoKey(
   filePath: string,
   scopeKey: string,
   isApi: boolean,
   registry: RoseRegistry,
+  plugins: Plugin[],
 ): string | null {
   let st: fs.Stats;
   try { st = fs.statSync(filePath); } catch { return null; }
-  const reg: string[] = [];
-  for (const [p, e] of registry) reg.push(`${p}#${e.index}:${e.scopeKey}:${e.slots.join('|')}`);
-  return [filePath, String(st.mtimeMs), String(st.size), scopeKey, isApi ? '1' : '0', reg.join(';')].join('\u0000');
+  return [filePath, String(st.mtimeMs), String(st.size), scopeKey, isApi ? '1' : '0', registryKey(registry), pluginFingerprint(plugins)].join('\u0000');
 }
 const __compilerStamp = (() => {
   try { return String(fs.statSync(fileURLToPath(import.meta.url)).mtimeMs); } catch { return 'noid'; }
 })();
 const __diskCacheDir = (() => {
   try {
-    const dir = path.join(os.tmpdir(), 'rosefn-compile-cache');
+    const dir = path.join(os.tmpdir(), 'rosespan-compile-cache');
     fs.mkdirSync(dir, { recursive: true });
     return dir;
   } catch { return null; }
@@ -875,7 +906,7 @@ function __diskFile(key: string): string {
   return path.join(__diskCacheDir!, __fnv1a(key + '|' + __compilerStamp) + '.json');
 }
 function __diskGet(key: string): CompileResult | null {
-  if (!__diskCacheDir || process.env.ROSEFN_NO_DISK_CACHE === '1') return null;
+  if (!__diskCacheDir || process.env.ROSESPAN_NO_DISK_CACHE === '1') return null;
   try {
     const obj = JSON.parse(fs.readFileSync(__diskFile(key), 'utf-8'));
     if (obj && typeof obj === 'object' && typeof (obj as any).ssr === 'string') return obj as CompileResult;
@@ -883,18 +914,28 @@ function __diskGet(key: string): CompileResult | null {
   return null;
 }
 function __diskSet(key: string, result: CompileResult): void {
-  if (!__diskCacheDir || process.env.ROSEFN_NO_DISK_CACHE === '1') return;
+  if (!__diskCacheDir || process.env.ROSESPAN_NO_DISK_CACHE === '1') return;
+  const file = __diskFile(key);
+  const payload = JSON.stringify(result);
+  // Fire-and-forget: the compile phase already runs every file in parallel, so
+  // serial sync writes were pure cold-build tax (~1 ms each on Windows/AV).
+  // A lost write only costs a cache miss next build - never correctness. The
+  // catch is mandatory: an unhandled rejection is fatal on modern Node.
+  void fs.promises.writeFile(file, payload).catch(() => {
+    // The OS tmp reaper (or a user clean-up) can delete the cache dir under us:
+    // recreate it once and retry, or the cache stays dark until restart.
+    fs.promises.mkdir(__diskCacheDir!, { recursive: true })
+      .then(() => fs.promises.writeFile(file, payload))
+      .catch(() => { /* disk full / permission: ignore, in-process memo still holds */ });
+  });
   try {
-    fs.writeFileSync(__diskFile(key), JSON.stringify(result));
     if ((__diskWrites++ & 511) === 0) {
-      try {
-        const entries = fs.readdirSync(__diskCacheDir!);
-        if (entries.length > 5000) {
-          for (const e of entries) { try { fs.unlinkSync(path.join(__diskCacheDir!, e)); } catch { /* ignore */ } }
-        }
-      } catch { /* ignore */ }
+      const entries = fs.readdirSync(__diskCacheDir!);
+      if (entries.length > 5000) {
+        for (const e of entries) { try { fs.unlinkSync(path.join(__diskCacheDir!, e)); } catch { /* ignore */ } }
+      }
     }
-  } catch { /* disk full / permission: ignore, in-process memo still holds */ }
+  } catch { /* ignore */ }
 }
 
 async function compileComponentMemo(
@@ -905,8 +946,7 @@ async function compileComponentMemo(
   plugins: Plugin[],
   registry: RoseRegistry,
 ): Promise<CompileResult> {
-  if (plugins.length > 0) return compileComponent(filePath, publicDir, scopeKey, isApi, plugins, registry);
-  const key = compileMemoKey(filePath, scopeKey, isApi, registry);
+  const key = compileMemoKey(filePath, scopeKey, isApi, registry, plugins);
   if (key) {
     const hit = __compileMemo.get(key);
     if (hit) return { ...hit };
@@ -915,7 +955,10 @@ async function compileComponentMemo(
   }
   const result = await compileComponent(filePath, publicDir, scopeKey, isApi, plugins, registry);
   if (key) {
-    if (__compileMemo.size > 500) __compileMemo.clear();
+    if (__compileMemo.size >= __memoCap) {
+      const oldest = __compileMemo.keys().next().value;
+      if (oldest !== undefined) __compileMemo.delete(oldest);
+    }
     __compileMemo.set(key, result);
     __diskSet(key, result);
   }
@@ -932,7 +975,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
       throw new RoseError(
         'E-PLUGIN',
         `plugin ${p.name} failed on ${path.basename(filePath)}: ${err instanceof Error ? err.message : String(err)}`,
-        { file: filePath, hint: 'the error above came from inside the plugin - fix its transform() (or remove the plugin from rosefn.config.js)' },
+        { file: filePath, hint: 'the error above came from inside the plugin - fix its transform() (or remove the plugin from rosespan.config.js)' },
       );
     }
   }
@@ -977,8 +1020,8 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   const scriptMatch = source.match(COMPONENT_RE);
   const roseResolved = resolveRoseImports(scriptMatch?.[1] ?? '', filePath, registry);
   const rawScript = roseResolved.script;
-  // The server-entry's node:crypto auth helpers (globalThis.__rosefnAuth) are emitted ONLY for apps that reference them - a bundle without the flag.
-  const usesRosefnAuth = rawScript.includes('__rosefnAuth');
+  // The server-entry's node:crypto auth helpers (globalThis.__rosespanAuth) are emitted ONLY for apps that reference them - a bundle without the flag.
+  const usesRoseSpanAuth = rawScript.includes('__rosespanAuth');
   const roseImports = roseResolved.imports;
  
   const { imports: importStmts, rest: scriptNoImports } = hoistImports(rawScript);
@@ -1194,7 +1237,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
       const ttl = mTtl ? mTtl[2] : '300';
       return `const __seeded_${d.name} = isSeeded(${JSON.stringify(key)});
 const [${d.name}, set${capitalize(d.name)}] = state(${JSON.stringify(key)}, null);
-if (!__seeded_${d.name}) { const __v_${d.name} = await globalThis.__rosefnKvApi.kvMemo(${JSON.stringify('__kvh:' + scopeKey + ':' + d.name)}, ${fnExpr}, ${ttl}); set${capitalize(d.name)}(__v_${d.name}); markSeeded(${JSON.stringify(key)}); }`;
+if (!__seeded_${d.name}) { const __v_${d.name} = await globalThis.__rosespanKvApi.kvMemo(${JSON.stringify('__kvh:' + scopeKey + ':' + d.name)}, ${fnExpr}, ${ttl}); set${capitalize(d.name)}(__v_${d.name}); markSeeded(${JSON.stringify(key)}); }`;
     }
     return `const __seeded_${d.name} = isSeeded(${JSON.stringify(key)});
 const [${d.name}, set${capitalize(d.name)}] = state(${JSON.stringify(key)}, null);
@@ -1405,7 +1448,7 @@ if (!__seeded_${d.name}) { const __v_${d.name} = await $data(${fn}); set${capita
   // True components are excluded: their CSS is genuinely global and stays in
   // styles.css (handled above), not duplicated here.
   if (!isComponent && scopedStyle) {
-    const styleId = 'rosefn-style-' + scopeKey.replace(/[^a-zA-Z0-9_-]/g, '-');
+    const styleId = 'rosespan-style-' + scopeKey.replace(/[^a-zA-Z0-9_-]/g, '-');
     const pageStyleBlock = `<style id="${styleId}">${scopedStyle}</style>`;
     compiledHead = (compiledHead ? compiledHead + '\n' : '') + `__hd += ${JSON.stringify(pageStyleBlock)};`;
   }
@@ -1445,7 +1488,7 @@ if (!__seeded_${d.name}) { const __v_${d.name} = await $data(${fn}); set${capita
     jsWarnings,
     headers,
     cspNonce,
-    usesRosefnAuth,
+    usesRoseSpanAuth,
     props,
     roseImports,
     isComponent,
@@ -1475,7 +1518,7 @@ function minifyDecls(block: string): string {
  * Global element rules (:root/html/body) belong in the shell's STYLES.
  */
 export function scopeCss(css: string, key: string): string {
-  const attr = `[data-rosefn-c="${key}"]`;
+  const attr = `[data-rosespan-c="${key}"]`;
   const scopeOneSelector = (s: string): string => {
     const t = s.trim();
     if (!t.includes(':global')) return `${attr} ${t}`;
@@ -1522,7 +1565,7 @@ export function scopeCss(css: string, key: string): string {
  * top-level {#if}/{#each} block are top-level at render time and get it too.
  */
 function injectScopeAttr(template: string, key: string): string {
-  const attr = ` data-rosefn-c="${key}"`;
+  const attr = ` data-rosespan-c="${key}"`;
   let out = '';
   let depth = 0;
   let i = 0;
@@ -2565,7 +2608,7 @@ function findBlock(src: string, kind: 'if' | 'each' | 'boundary' | 'island' | 's
 
 /**
  *
- *   TEXT, not template source. CSS braces are not rosefn expressions
+ *   TEXT, not template source. CSS braces are not rosespan expressions
  *   and broke the build the first time a route shipped a head-level style),
  *   emit a real URL, not literal braces.
  * - an HTML comment is a NOTE, not content: it is dropped. A note that
@@ -2610,11 +2653,11 @@ function compileHead(head: string): string {
 
 /**
  * - "errors an agent can fix" - closed on a real
- * failure from the field. A template directive rosefn does not implement
+ * failure from the field. A template directive rosespan does not implement
  * used to reach esbuild as generated code and die THERE: the xoboe port
  * never wrote, a construct never named, a fix never suggested. An unknown
  * directive is now a build error at the .rose file, with the line, the
- * construct and the rosefn shape that replaces it.
+ * construct and the rosespan shape that replaces it.
  *
  * The same gate catches the two shapes findBlock cannot match at all - an
  * Adversarial probing found all three in one afternoon; a template compiler
@@ -2711,8 +2754,8 @@ function assertKnownDirectives(template: string, filePath: string): void {
     }
     throw new RoseError(
       'E-TEMPLATE',
-      `${filePath}: {:${word}} is not a rosefn directive`,
-      { file: filePath, line: lineAt(template, m), hint: 'rosefn templates support {#if}/{:else}, {#each} and {#boundary}' },
+      `${filePath}: {:${word}} is not a rosespan directive`,
+      { file: filePath, line: lineAt(template, m), hint: 'rosespan templates support {#if}/{:else}, {#each} and {#boundary}' },
     );
   }
   const OPENER_RE = /\{#(if|each|boundary|island|await)\b([^}]*)\}/g;
@@ -3060,8 +3103,8 @@ function compileTemplate(
         if (before) result += emitChunk(before, acc, closes, scope);
         const names = dbgMatch[1].trim().replace(/,$/, '');
         result += names
-          ? `console.log('[rosefn:debug]', { ${names} });\n`
-          : `console.log('[rosefn:debug]'); debugger;\n`;
+          ? `console.log('[rosespan:debug]', { ${names} });\n`
+          : `console.log('[rosespan:debug]'); debugger;\n`;
         remaining = remaining.substring(earliest.index + earliest.match[0].length);
         continue;
       }
@@ -3669,10 +3712,10 @@ export function buildReport(infos: RouteInfo[], compiled: CompileResult[]): stri
 
 /**
  * The mount entry - the migration door. A foreign
- * page (the legacy half of a micro-frontend, or an old app adopting rosefn
+ * page (the legacy half of a micro-frontend, or an old app adopting rosespan
  * one route at a time) marks containers and includes this one file:
  *
- *   <div data-rosefn="/checkout"></div>
+ *   <div data-rosespan="/checkout"></div>
  *   <script type="module" src="/mount.js"></script>
  *
  * Each container fetches its route's own document - the same one-request,
@@ -3684,15 +3727,15 @@ export function buildReport(infos: RouteInfo[], compiled: CompileResult[]): stri
  *
  * Written verbatim, not minified: it ships once per app (not once per
  * document) and the servers compress it like any other asset. The cost to a
- * normal rosefn document is zero bytes - nothing references it unless the
+ * normal rosespan document is zero bytes - nothing references it unless the
  * host page does.
  */
 const MOUNT_ENTRY = `
 
 import { start, postForm } from '/client.js';
 
-for (const el of document.querySelectorAll('[data-rosefn]')) {
-  const route = el.getAttribute('data-rosefn');
+for (const el of document.querySelectorAll('[data-rosespan]')) {
+  const route = el.getAttribute('data-rosespan');
   const doc = await fetch(route).then((r) => (r.ok ? r.text() : ''));
   const parsed = new DOMParser().parseFromString(doc, 'text/html');
   // A JS-shipping document wraps its content in #app; a zero-JS route's content is the body's own (no wrapper).
@@ -3704,8 +3747,8 @@ for (const el of document.querySelectorAll('[data-rosefn]')) {
       if (!/^(?:SCRIPT|LINK|STYLE)$/.test(node.tagName)) el.appendChild(node);
     }
   }
-  // start() resumes from #__rosefn_state (zero hydration), so the state
-  const state = parsed.getElementById('__rosefn_state');
+  // start() resumes from #__rosespan_state (zero hydration), so the state
+  const state = parsed.getElementById('__rosespan_state');
   if (state) el.appendChild(state);
   
   const rendered = state ? JSON.parse(state.textContent || '{}').__route : null;
@@ -3716,7 +3759,7 @@ for (const el of document.querySelectorAll('[data-rosefn]')) {
     const a = e.target.closest && e.target.closest('a[href^="/"]');
     if (!a || !el.contains(a)) return;
     e.preventDefault();
-    el.setAttribute('data-rosefn', a.getAttribute('href'));
+    el.setAttribute('data-rosespan', a.getAttribute('href'));
     start(el, a.getAttribute('href'), false);
   });
   // Progressive-enhancement forms work inside a mount too: the native POST would replace the HOST page.
@@ -3725,14 +3768,15 @@ for (const el of document.querySelectorAll('[data-rosefn]')) {
     if (!f || f.tagName !== 'FORM' || f.hasAttribute('data-on-submit')) return;
     if ((f.getAttribute('method') || '').toLowerCase() !== 'post') return;
     e.preventDefault();
-    postForm(new FormData(f), el, el.getAttribute('data-rosefn'));
+    postForm(new FormData(f), el, el.getAttribute('data-rosespan'));
   });
 }
 `;
 
-let __buildSeq = 0;
+const __writtenContent = new Map<string, string>();
+let __writtenFor: string | null = null;
 
-export async function buildProject(root: string, outDir: string, opts: { minify?: boolean } = {}): Promise<{ routes: RouteInfo[]; bundle: string; config: RosefnConfig }> {
+export async function buildProject(root: string, outDir: string, opts: { minify?: boolean } = {}): Promise<{ routes: RouteInfo[]; bundle: string; config: RoseSpanConfig }> {
   const minify = opts.minify !== false;
   await fs.promises.mkdir(outDir, { recursive: true });
 
@@ -3745,7 +3789,7 @@ export async function buildProject(root: string, outDir: string, opts: { minify?
   if (pageFiles.length === 0) {
     throw new RoseError(
       'E-ROUTE',
-      `no .rose pages found under ${path.join(root, 'src', 'pages')} - run rosefn from a project root, or pass one: rosefn build <dir>`,
+      `no .rose pages found under ${path.join(root, 'src', 'pages')} - run rosespan from a project root, or pass one: rosespan build <dir>`,
       { file: path.join(root, 'src', 'pages'), hint: 'create src/pages/index.rose in that directory (or run the command from the project root)' },
     );
   }
@@ -3836,7 +3880,7 @@ export async function buildProject(root: string, outDir: string, opts: { minify?
   const preload: string[] = config.i18n.preload ?? Object.keys(locales);
   const packed = Object.keys(locales).filter((l) => !preload.includes(l));
   for (const l of preload) {
-    if (!locales[l]) console.warn(`Rosefn: i18n.preload lists '${l}' but there is no src/locales/${l}.json - ignored`);
+    if (!locales[l]) console.warn(`RoseSpan: i18n.preload lists '${l}' but there is no src/locales/${l}.json - ignored`);
   }
   await fs.promises.rm(path.join(outDir, 'locales'), { recursive: true, force: true });
   if (packed.length > 0) {
@@ -3853,17 +3897,27 @@ export async function buildProject(root: string, outDir: string, opts: { minify?
   // latency, not concurrency). dist then stays clean by construction, and the
   // project-local location keeps every generated import relative (and so
   // resolvable by esbuild, which rejects file:// specifiers).
-  const buildRoot = path.join(root, '.rosefn-build');
-  const buildDir = path.join(buildRoot, `${process.pid}-${++__buildSeq}`);
-  sweepStaleBuildDirs(buildRoot);
+  const buildRoot = path.join(root, '.rosespan-build');
+  const buildDir = path.join(buildRoot, `${process.pid}-${__fnv1a(path.resolve(root))}`);
+  // Stable across this process's builds of this project: intermediates whose
+  // content is unchanged stay on disk instead of being rewritten (a hot dev
+  // rebuild then writes nothing but the entries). mkdir + utimes run BEFORE
+  // the sweep so an idle-but-live dir is refreshed, never reaped mid-session;
+  // a dir that appeared from nothing (swept or user-deleted) drops the skip
+  // map so every intermediate is rewritten against the empty dir.
+  const dirExisted = fs.existsSync(buildDir);
   await fs.promises.mkdir(buildDir, { recursive: true });
+  const stamp = new Date();
+  await fs.promises.utimes(buildDir, stamp, stamp);
+  if (!dirExisted || __writtenFor !== buildDir) { __writtenContent.clear(); __writtenFor = buildDir; }
+  sweepStaleBuildDirs(buildRoot);
   const contentSrcCands = [path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli', 'content.ts'), path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'cli', 'content.ts')];
   const contentSrc = contentSrcCands.find((c) => fs.existsSync(c)) ?? contentSrcCands[0];
   fs.copyFileSync(contentSrc, path.join(buildDir, 'content-md.ts'));
 
   const runtimePlugins = plugins.filter((p) => p && (p.onRequest || p.onResponse));
   if (runtimePlugins.length > 0) {
-    const configRel = path.relative(buildDir, path.join(root, 'rosefn.config.js')).replace(/\\/g, '/');
+    const configRel = path.relative(buildDir, path.join(root, 'rosespan.config.js')).replace(/\\/g, '/');
     await fs.promises.writeFile(path.join(buildDir, 'plugins.js'), `
 import config from ${JSON.stringify(configRel)};
 
@@ -3880,7 +3934,7 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
   const runtimeEntry = ['../runtime/index.ts', '../src/runtime/index.ts']
     .map((rel) => fileURLToPath(new URL(rel, import.meta.url)))
     .find((p) => fs.existsSync(p));
-  if (!runtimeEntry) throw new RoseError('E-INTERNAL', 'Rosefn: the runtime source (src/runtime/index.ts) was not found next to the compiler', { hint: 'the published package ships src/ beside dist-cli/ - reinstall it, or run from a checkout' });
+  if (!runtimeEntry) throw new RoseError('E-INTERNAL', 'RoseSpan: the runtime source (src/runtime/index.ts) was not found next to the compiler', { hint: 'the published package ships src/ beside dist-cli/ - reinstall it, or run from a checkout' });
   // Both bundle framework sources only - neither reads anything this build
   // generates (the prod server imports dist/server.js at runtime; the runtime
   // entry is self-contained) - so they start here and overlap the whole
@@ -3917,11 +3971,20 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
   prodBuild.catch(() => {});
 
   const compWrites: Promise<void>[] = [];
+  const writeIfChanged = (name: string, content: string): void => {
+    // A memo hit hands back the very string references the previous build
+    // wrote, so === proves the bytes already on disk are these bytes. A fresh
+    // compile (or a disk-cache hit, which JSON-parses new strings) always
+    // rewrites - the skip only fires on the hot path it is meant for.
+    if (__writtenContent.get(name) === content) return;
+    __writtenContent.set(name, content);
+    compWrites.push(fs.promises.writeFile(path.join(buildDir, name), content));
+  };
   for (let i = 0; i < compiled.length; i++) {
     const src = compiled[i].api ?? compiled[i].ssr;
-    compWrites.push(fs.promises.writeFile(path.join(buildDir, `comp-${i}.ssr.js`), src));
+    writeIfChanged(`comp-${i}.ssr.js`, src);
     if (!infos[i].isApi) {
-      compWrites.push(fs.promises.writeFile(path.join(buildDir, `comp-${i}.client.js`), compiled[i].client));
+      writeIfChanged(`comp-${i}.client.js`, compiled[i].client);
     }
   }
   for (let c = 0; c < compWrites.length; c += 64) {
@@ -4067,12 +4130,12 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
     })
     .join(',\n  ');
 
-  const appUsesAuth = compiled.some((c) => c.usesRosefnAuth);
+  const appUsesAuth = compiled.some((c) => c.usesRoseSpanAuth);
 
   const serverEntry = `
 ${serverImports}
 import { renderMarkdown } from './content-md.ts';
-${appUsesAuth ? "import crypto from 'node:crypto';" : "// no route references __rosefnAuth: the node:crypto auth helpers are omitted, keeping the bundle edge-loadable"}
+${appUsesAuth ? "import crypto from 'node:crypto';" : "// no route references __rosespanAuth: the node:crypto auth helpers are omitted, keeping the bundle edge-loadable"}
 import { setState, persistState, clearRequestState, isolateRender, serializeState, resetRequestContext, installContextStore, setRequestQuery, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta, esc } from './runtime.js';
 ${runtimePlugins.length > 0
     ? `import { hooks as __pluginHooks, hasRequestHooks as __hasRequestHooks, hasResponseHooks as __hasResponseHooks } from './plugins.js';`
@@ -4091,7 +4154,7 @@ export async function runRequestHooks(ctx) {
       const r = await p.onRequest(ctx);
       if (r instanceof Response) return r;
     } catch (err) {
-      console.error('Rosefn: plugin', p.name, 'onRequest failed:', err instanceof Error ? err.message : err);
+      console.error('RoseSpan: plugin', p.name, 'onRequest failed:', err instanceof Error ? err.message : err);
     }
   }
   return null;
@@ -4105,7 +4168,7 @@ export async function runResponseHooks(ctx, res) {
       const r = await p.onResponse(ctx, out);
       if (r instanceof Response) out = r;
     } catch (err) {
-      console.error('Rosefn: plugin', p.name, 'onResponse failed:', err instanceof Error ? err.message : err);
+      console.error('RoseSpan: plugin', p.name, 'onResponse failed:', err instanceof Error ? err.message : err);
     }
   }
   return out;
@@ -4125,9 +4188,9 @@ setLocales(${localesJson}, '${defaultLocale}');
 
 
 if (typeof process !== 'undefined' && typeof process.send === 'function') {
-  setStoreTransport((name, value) => process.send({ type: 'rosefn:store', name, value }));
+  setStoreTransport((name, value) => process.send({ type: 'rosespan:store', name, value }));
   process.on('message', (msg) => {
-    if (msg && msg.type === 'rosefn:store') applyStorePatch(msg.name, msg.value);
+    if (msg && msg.type === 'rosespan:store') applyStorePatch(msg.name, msg.value);
   });
 }
 
@@ -4207,8 +4270,8 @@ export const kv = {
     return !!e && e.exp >= Date.now();
   },
 };
-globalThis.__rosefnKvApi = { kv, kvMemo: $kv };
-globalThis.__rosefnContent = {
+globalThis.__rosespanKvApi = { kv, kvMemo: $kv };
+globalThis.__rosespanContent = {
   list: (coll: string, filter?: { tag: string }) => {
     let items = contentCollections[coll] ?? [];
     if (filter?.tag) items = items.filter((e) => ((e.frontmatter.tags as string[] | undefined) ?? []).includes(filter.tag));
@@ -4293,7 +4356,7 @@ function sse(handler: (send: (event: string, data: unknown) => void) => Promise<
     headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", "connection": "keep-alive" },
   });
 }
-globalThis.__rosefnExtras = { v, jobs, sse };
+globalThis.__rosespanExtras = { v, jobs, sse };
 ${appUsesAuth ? `
 const auth = {
   hashPassword(password: string): string {
@@ -4335,8 +4398,8 @@ const auth = {
     } catch { return false; }
   },
 };
-globalThis.__rosefnAuth = auth;
-` : "// __rosefnAuth helpers omitted: no route references them (keeps the bundle free of node:crypto and edge-loadable)"}
+globalThis.__rosespanAuth = auth;
+` : "// __rosespanAuth helpers omitted: no route references them (keeps the bundle free of node:crypto and edge-loadable)"}
 
 // Concurrent missers on a cold key share ONE compute through this inflight map - the check-then-set shape alone lets N simultaneous cold readers hammer.
 const __kvInflight = new Map<string, Promise<unknown>>();
@@ -4628,7 +4691,7 @@ export async function renderPage(pathname, form) {
 async function renderPageIsolated(pathname, form) {
   clearRequestState();
   // Cold-start readiness gate (xoboe #8): await the app's published DB-ready promise before any $data() read.
-  const appReady = globalThis.__rosefnAppReady;
+  const appReady = globalThis.__rosespanAppReady;
   if (appReady) await appReady;
   const route = routeClass(pathname).route;
   if (route) {
@@ -4669,10 +4732,10 @@ async function renderPageIsolated(pathname, form) {
             if (err instanceof ActionError) {
               setState('actionError', { action: actionName, message: err.message, code: err.code, field: err.field });
               actionStatus = err.code;
-            } else if (err && err.__rosefn === 'redirect') {
+            } else if (err && err.__rosespan === 'redirect') {
               
               return { redirect: err.path, status: err.status ?? 303, ...docAttrs(pathname) };
-            } else if (err && err.__rosefn === 'notFound') {
+            } else if (err && err.__rosespan === 'notFound') {
   
               return await notFoundPage(pathname);
             } else {
@@ -4686,7 +4749,7 @@ async function renderPageIsolated(pathname, form) {
         rendered = extractHead(await route.render([], ''));
       } catch (err) {
         // The control-flow pair: redirect() and notFound() are THROWN from inside the render (a $data body resolving a slug that no longer exists).
-        const signal = err && err.__rosefn;
+        const signal = err && err.__rosespan;
         if (signal === 'redirect') {
           return { redirect: err.path, status: err.status ?? 307, ...docAttrs(pathname) };
         }
@@ -4694,10 +4757,10 @@ async function renderPageIsolated(pathname, form) {
           return await notFoundPage(pathname);
         }
         
-        console.error('Rosefn: render failed for', pathname, err instanceof Error ? err.message : err);
+        console.error('RoseSpan: render failed for', pathname, err instanceof Error ? err.message : err);
         // F10: in dev the response body carries the real error — message, file:line and the fix hint.
         let devDetail = '';
-        if (process.env.ROSEFN_DEV === '1' && err) {
+        if (process.env.ROSESPAN_DEV === '1' && err) {
           const msg = esc(err instanceof Error ? err.message : String(err));
           const file = esc(String(err.file || ''));
           const line = err.line != null ? esc(String(err.line)) : '';
@@ -4769,7 +4832,7 @@ export async function handleApi(method, pathname, request) {
         return toResponse(await fn(request));
       } catch (err) {
         
-        const signal = err && err.__rosefn;
+        const signal = err && err.__rosespan;
         if (signal === 'redirect') {
           return new Response(JSON.stringify({ error: 'redirect', location: err.path }), {
             status: err.status ?? 307,
@@ -4801,7 +4864,7 @@ export async function renderPageStream(pathname, write, shellOpen, clientTag) {
 async function renderPageStreamIsolated(pathname, write, shellOpen, clientTag) {
   clearRequestState();
   // Cold-start readiness gate (xoboe #8): same contract as renderPage — await the app's published DB-ready promise before streaming the shell.
-  const appReady = globalThis.__rosefnAppReady;
+  const appReady = globalThis.__rosespanAppReady;
   if (appReady) await appReady;
   const route = routeClass(pathname).route;
   if (route) {
@@ -4822,10 +4885,10 @@ async function renderPageStreamIsolated(pathname, write, shellOpen, clientTag) {
         // nonce routes: an un-nonced inline <style> would be CSP-blocked, so strip to markers (applyHead re-injects under the nonce). Otherwise keep the head content in the streamed body so page/layout <style> applies on first paint (no FOUC) and no-JS routes stay styled.
         html = routeClass(pathname).nonce ? extractHead(await route.render([], '')).html : await route.render([], '');
       } catch (err) {
-        console.error('Rosefn: render failed for', pathname, err instanceof Error ? err.message : err);
+        console.error('RoseSpan: render failed for', pathname, err instanceof Error ? err.message : err);
         // F10: dev carries the real error in the body here too — the shell
         let devDetail = '';
-        if (process.env.ROSEFN_DEV === '1' && err) {
+        if (process.env.ROSESPAN_DEV === '1' && err) {
           const msg = esc(err instanceof Error ? err.message : String(err));
           const file = esc(String(err.file || ''));
           const line = err.line != null ? esc(String(err.line)) : '';
@@ -4850,7 +4913,7 @@ async function renderPageStreamIsolated(pathname, write, shellOpen, clientTag) {
       const state = JSON.stringify({ __route: pathname, ...JSON.parse(serializeState()) });
       // P1-6 (bug report): the JSON data block is embedded in the document.
       const stateSafe = state.replace(/</g, '\\\\u003c');
-      write('</div>\\n  <script type="application/json" id="__rosefn_state">' + stateSafe + '</script>\\n  ' + clientTag + '\\n</body>\\n</html>');
+      write('</div>\\n  <script type="application/json" id="__rosespan_state">' + stateSafe + '</script>\\n  ' + clientTag + '\\n</body>\\n</html>');
       return 200;
   }
   return 404;
@@ -4874,10 +4937,10 @@ export { installContextStore };
         return "  " + JSON.stringify(p) + ": { " + ps.map((n) => n + ": string | number").join("; ") + " };\n";
       })
       .join("");
-    const outDirTs = path.join(root, "src", ".rosefn");
+    const outDirTs = path.join(root, "src", ".rosespan");
     await fs.promises.mkdir(outDirTs, { recursive: true });
     const srcLines = [
-      "// GENERATED by rosefn build - do not edit.",
+      "// GENERATED by rosespan build - do not edit.",
       "export type RoutePath = " + lit + ";",
       "export const routePatterns = " + JSON.stringify(uniq) + " as const;",
       "export type RouteParams = {",
@@ -4969,7 +5032,7 @@ ${hasLang ? `// the default locale, kept beside setLocales' own copy so <html la
 const __defLocale = '${defaultLocale}';` : ''}
 ${vitalsOn ? `// the app asked for web-vitals. The import is what keeps\n// reportVitals alive through minification and tree-shaking; the call is one\n// statement at boot, before the first render.\nimport { reportVitals } from './runtime.js';`: ''}
 // Lazy hydration: when the app opts in (export const lazyHydration = true in\n// the root _layout.rose), the bootstrap defers the initial wire() to\n// requestIdleCallback. The flag is set here (module eval runs before the\n// bootstrap's start() call) so the bootstrap can read it without a second channel.
-if (typeof window !== 'undefined') window.__rosefnLazy = ${JSON.stringify(lazyHydrationFlag)};
+if (typeof window !== 'undefined') window.__rosespanLazy = ${JSON.stringify(lazyHydrationFlag)};
 // The two pack doors, re-exported for an app that wants to warm a language before its visitor asks for it (ensureLocale) or to feed a dictionary.
 export { ensureLocale, loadLocale } from './runtime.js';
 ${vitalsBlock}
@@ -5032,7 +5095,7 @@ async function paintFallback(container, page, builtin, keepState = false) {
 
 
 export async function startNotFound(container, pathname) {
-  const el = document.getElementById('__rosefn_state');
+  const el = document.getElementById('__rosespan_state');
   if (el) resumeState(el.textContent);
   await paintFallback(container, notFoundFor(pathname), '<h1>404</h1><p>Page not found</p>', true);
 }
@@ -5151,8 +5214,8 @@ export function prefetchStats() {
 // One delegated listener per event type on the app container: survives DOM swaps and cloned blocks, so handlers never need re-binding.
 const DELEGATED = ['click', 'input', 'change', 'submit'];
 function bindEvents(container) {
-  if (container.__rosefn_bound) return;
-  container.__rosefn_bound = true;
+  if (container.__rosespan_bound) return;
+  container.__rosespan_bound = true;
   for (const ev of DELEGATED) {
     container.addEventListener(ev, (e) => {
       const el = e.target.closest('[data-on-' + ev + ']');
@@ -5174,7 +5237,7 @@ async function postForm(body, container, pathname) {
   const html = await res.text();
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const next = doc.getElementById('app');
-  const st = doc.getElementById('__rosefn_state');
+  const st = doc.getElementById('__rosespan_state');
   const paint = () => {
     adopt(box, next ? next.innerHTML : '', st ? st.textContent : '{}', route);
   };
@@ -5191,9 +5254,9 @@ export async function $action(name, e) {
   const body = new FormData();
   body.append('__action', name);
  // An event inside a mount belongs to that mount - the attribute is kept in step with what is currently mounted.
-  const box = e && e.target && e.target.closest ? e.target.closest('[data-rosefn]') : null;
+  const box = e && e.target && e.target.closest ? e.target.closest('[data-rosespan]') : null;
   try {
-    return await postForm(body, box || undefined, box ? box.getAttribute('data-rosefn') : undefined);
+    return await postForm(body, box || undefined, box ? box.getAttribute('data-rosespan') : undefined);
   } finally {
     __rvSetPending(false);
   }
@@ -5244,7 +5307,7 @@ export async function start(container, pathname, initial) {
   clearMounts(); 
   // stale mounts from a failed render never fire
   if (initial) {
-    const el = document.getElementById('__rosefn_state');
+    const el = document.getElementById('__rosespan_state');
     if (el) resumeState(el.textContent);
   }
   for (const route of routes) {
@@ -5289,10 +5352,10 @@ ${langDirBlock}
           html = await render(closes, '');
         } catch (err) {
           
-          if (err && err.__rosefn === 'notFound') { signal = 'notFound'; return; }
-          if (err && err.__rosefn === 'redirect') { signal = err.path; return; }
+          if (err && err.__rosespan === 'notFound') { signal = 'notFound'; return; }
+          if (err && err.__rosespan === 'redirect') { signal = err.path; return; }
           
-          console.error('Rosefn: client render failed for', pathname, err instanceof Error ? err.message : err);
+          console.error('RoseSpan: client render failed for', pathname, err instanceof Error ? err.message : err);
           broken = true;
           return;
         }
@@ -5336,7 +5399,7 @@ export async function adopt(container, html, stateJson, pathname) {
   resumeState(stateJson);
   container.innerHTML = html;
   
-  const st = document.getElementById('__rosefn_state');
+  const st = document.getElementById('__rosespan_state');
   if (st) st.textContent = stateJson;
   for (const route of routes) {
     if (matchRoute(route.pattern, route0)) {
@@ -5409,7 +5472,7 @@ setRefreshHook(async () => {
     await fs.promises.cp(publicDir, path.join(outDir, 'public'), { recursive: true });
   }
 
-  console.log('Rosefn zero-JS report:');
+  console.log('RoseSpan zero-JS report:');
   for (const line of buildReport(infos, compiled)) console.log('  ' + line);
   const warnGroups = new Map<string, { why: string; files: Map<string, Set<string>> }>();
   for (const { info, i } of pages) {
@@ -5439,7 +5502,7 @@ setRefreshHook(async () => {
       .map(([file, routes]) => `${file} (${routes.size === 1 ? [...routes][0] : `${routes.size} routes`})`);
     const shown = parts.slice(0, 4).join(', ');
     const more = parts.length > 4 ? `, +${parts.length - 4} more files` : '';
-    console.warn(`Rosefn warning: ${allRoutes.size} routes ship zero JavaScript while their chain contains ${g.why} - ${shown}${more}`);
+    console.warn(`RoseSpan warning: ${allRoutes.size} routes ship zero JavaScript while their chain contains ${g.why} - ${shown}${more}`);
   }
 
   return { routes: pages.map(({ info }) => info), bundle: bundleMode, config };
