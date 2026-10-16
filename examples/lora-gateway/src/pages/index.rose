@@ -1,8 +1,8 @@
 <script>
   // A LoRa-gateway-style listener: every UDP datagram on :1700 lands here, gets
-  // parsed, and is prepended to a shared store. $store is reactive on the client
-  // and the server pushes each write over /__rosespan_store, so the table below
-  // updates live - no polling, no manual wiring.
+  // parsed as a real LoRaWAN PHYPayload, and is prepended to a shared store.
+  // $store is reactive on the client and the server pushes each write over
+  // /__rosespan_store, so the table below updates live - no polling, no wiring.
   //
   // $udp only REGISTERS the spec at boot; the framework binds it when the serve
   // worker starts, so a `rosespan build` / prerender never opens a socket. On the
@@ -11,10 +11,13 @@
 
   $udp(1700, {
     onMessage: (msg, rinfo) => {
+      const f = parseLoRaWAN(msg);
       frames.update((prev) => [
         {
-          devEUI: msg.slice(0, 8).toString('hex'),
-          payload: msg.slice(8).toString('hex'),
+          devAddr: f && f.kind === 'data' ? f.devAddr : f && f.kind === 'join-request' ? f.devEUI : '(not LoRaWAN)',
+          kind: f ? f.kind === 'data' ? f.mtype : f.kind : 'raw',
+          fCnt: f && f.kind === 'data' ? f.fCnt : null,
+          payload: f && f.kind === 'data' && f.frmPayload ? Buffer.from(f.frmPayload).toString('hex') : Buffer.from(msg).toString('hex'),
           from: rinfo.address,
           at: Date.now(),
         },
@@ -52,12 +55,14 @@
   {:else}
     <table>
       <thead>
-        <tr><th>DevEUI</th><th>Payload</th><th>From</th><th>At</th></tr>
+        <tr><th>Device</th><th>Frame</th><th>FCnt</th><th>Payload (hex)</th><th>From</th><th>At</th></tr>
       </thead>
       <tbody>
         {#each frames.get() as f}
           <tr>
-            <td>{f.devEUI}</td>
+            <td>{f.devAddr}</td>
+            <td>{f.kind}</td>
+            <td>{f.fCnt ?? '-'}</td>
             <td>{f.payload}</td>
             <td>{f.from}</td>
             <td>{new Date(f.at).toLocaleTimeString()}</td>
