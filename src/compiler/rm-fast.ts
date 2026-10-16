@@ -45,7 +45,11 @@ export async function rmTreeParallel(dir: string): Promise<void> {
 
 const PRERENDERED_RE = /\.(?:html|json)(?:\.br)?$/;
 
-export async function prunePrerendered(dir: string, depth = 0): Promise<void> {
+// Delete prerendered files that are NOT in `keep` (their routes vanished).
+// Without a keep-set this deleted everything, and the write pass immediately
+// recreated it - a full unlink tax per build on files whose bytes had not
+// changed. With one, a steady-state rebuild deletes nothing.
+export async function prunePrerendered(dir: string, keep?: Set<string>, depth = 0): Promise<void> {
   const entries = await entriesOf(dir);
   const files: string[] = [];
   const dirs: string[] = [];
@@ -56,10 +60,13 @@ export async function prunePrerendered(dir: string, depth = 0): Promise<void> {
       dirs.push(p);
       continue;
     }
-    if (PRERENDERED_RE.test(e.name)) files.push(p);
+    if (!PRERENDERED_RE.test(e.name)) continue;
+    const base = p.endsWith('.br') ? p.slice(0, -3) : p;
+    if (keep && keep.has(base)) continue;
+    files.push(p);
   }
   await chunked(files);
-  await Promise.all(dirs.map((d) => prunePrerendered(d, depth + 1)));
+  await Promise.all(dirs.map((d) => prunePrerendered(d, keep, depth + 1)));
 }
 
 export function sweepStaleBuildDirs(parent: string): void {
