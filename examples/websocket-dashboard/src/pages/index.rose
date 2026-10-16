@@ -1,0 +1,68 @@
+<script>
+  // A WebSocket room: every client that connects to ws://host:8080/ws joins, and
+  // each message is appended to a shared store. $store is reactive on the client
+  // and the server pushes each write over /__rosespan_store, so the log below
+  // updates live - no polling, no manual wiring.
+  //
+  // $websocket only REGISTERS the spec at boot; the framework binds it when the
+  // serve worker starts, so a `rosespan build` / prerender never opens a socket.
+  // On the client the same $websocket is an inert no-op, so this page hydrates
+  // cleanly. The returned facade stays live: broadcast()/close() reach the bound
+  // server whenever the app calls them.
+  const messages = $store('wsMessages', []);
+  const online = $store('wsOnline', 0);
+
+  const room = $websocket(8080, {
+    path: '/ws',
+    onConnection: (ws) => {
+      online.update((n) => n + 1);
+      room.broadcast(JSON.stringify({ kind: 'system', text: 'a client joined' }));
+    },
+    onMessage: (ws, data) => {
+      const text = typeof data === 'string' ? data : data.toString('utf8');
+      messages.update((prev) => [...prev, { text, at: Date.now() }].slice(-50));
+      room.broadcast(text);
+    },
+    onClose: (ws) => {
+      online.update((n) => Math.max(0, n - 1));
+      room.broadcast(JSON.stringify({ kind: 'system', text: 'a client left' }));
+    },
+  });
+</script>
+
+<style>
+  :global(body) { margin: 0; padding: 2rem 1.25rem 3rem; background: #0f1115; color: #e8ecf1; font: 15px/1.6 system-ui, sans-serif; }
+  :global(main) { max-width: 52rem; margin: 0 auto; }
+  :global(h1) { font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -0.01em; }
+  :global(.lede) { color: #9aa4b2; margin: 0 0 1.5rem; }
+  :global(code) { background: #1a1e26; border: 1px solid #262c38; border-radius: 5px; padding: .1em .4em; font-size: .85em; }
+  :global(.pill) { display: inline-block; background: #16202a; border: 1px solid #24384a; color: #7fd4ff; border-radius: 999px; padding: .15rem .8rem; font-size: .85rem; margin-bottom: 1.25rem; }
+  :global(.log) { list-style: none; margin: 0; padding: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; }
+  :global(.log li) { padding: .4rem .6rem; border-bottom: 1px solid #232833; white-space: pre-wrap; word-break: break-all; }
+  :global(.log .t) { color: #6b7482; margin-right: .75rem; }
+  :global(.wait) { color: #6b7482; font-style: italic; }
+</style>
+
+<head>
+  <title>WebSocket room · rosespan</title>
+</head>
+
+<main>
+  <h1>🔌 WebSocket room</h1>
+  <p class="lede">
+    A zero-dependency RFC 6455 server on <code>ws://localhost:8080/ws</code>. Connect any client,
+    send a message, and watch it land here live — the server pushes each write over a
+    Server-Sent Events channel.
+  </p>
+  <p class="pill">online: {online.get()}</p>
+
+  {#if messages.get().length === 0}
+    <p class="wait">No messages yet…</p>
+  {:else}
+    <ul class="log">
+      {#each messages.get() as m}
+        <li><span class="t">{new Date(m.at).toLocaleTimeString()}</span>{m.text}</li>
+      {/each}
+    </ul>
+  {/if}
+</main>
