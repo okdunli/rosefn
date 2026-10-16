@@ -396,11 +396,22 @@ const wired = new WeakSet<Node>();
 
 const pendingIslandObservers = new Set<IntersectionObserver>();
 
-/** Parse an html string into a DocumentFragment. */
+const TPL_CACHE_MAX = 512;
+const tplCache = new Map<string, HTMLTemplateElement>();
+
+/** Parse an html string into a DocumentFragment. Parsed templates are cached per string and cloned per call, so repeated renders (keyed each rows, if-branch re-entry) skip the innerHTML parse. */
 export function tpl(html: string): DocumentFragment {
-  const t = document.createElement('template');
-  t.innerHTML = html;
-  return t.content;
+  let t = tplCache.get(html);
+  if (!t) {
+    t = document.createElement('template');
+    t.innerHTML = html;
+    if (tplCache.size >= TPL_CACHE_MAX) {
+      const oldest = tplCache.keys().next().value;
+      if (oldest !== undefined) tplCache.delete(oldest);
+    }
+    tplCache.set(html, t);
+  }
+  return t.content.cloneNode(true) as DocumentFragment;
 }
 
 const HEAD_ATTR = 'data-rosefn-head';
@@ -847,8 +858,8 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
     created.push(() => setState(key, null));
   });
 
-  if ((holder as Element).querySelectorAll('[data-transition]').length > 0) {
-    const trans = (holder as Element).querySelectorAll('[data-transition]');
+  const trans = (holder as Element).querySelectorAll('[data-transition]');
+  if (trans.length > 0) {
     trans.forEach((el) => {
       if (islandSkip && el.closest('[data-rv-island]')) return;
       const transAttr = el.getAttribute('data-transition')!;
@@ -941,8 +952,8 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
     });
   }
 
-  if ((holder as Element).querySelectorAll('[data-animate]').length > 0) {
-    const anim = (holder as Element).querySelectorAll('[data-animate]');
+  const anim = (holder as Element).querySelectorAll('[data-animate]');
+  if (anim.length > 0) {
     anim.forEach((el) => {
       if (islandSkip && el.closest('[data-rv-island]')) return;
       const animAttr = el.getAttribute('data-animate')!;
