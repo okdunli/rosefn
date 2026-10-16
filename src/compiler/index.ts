@@ -3559,7 +3559,7 @@ function compileSlot(acc: string): string {
   return `${acc} += String(children);\n`;
 }
 
-const RUNTIME_IMPORTS = `import { state, setState, persistState, $data, hasState, isSeeded, markSeeded, esc, refresh, onMount, onCleanup, $effect, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $store, $udp, $tcp, $listen, $websocket, ActionError, $actionError, $actionErrorOrThrow, $actionPending, $boundaryFallback, $setBoundaryError, $boundaryError, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound, aggregate, loader, encodeSdui, decodeSdui } from './runtime.js';`;
+const RUNTIME_IMPORTS = `import { state, setState, persistState, $data, hasState, isSeeded, markSeeded, esc, refresh, onMount, onCleanup, $effect, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $store, $udp, $tcp, $listen, $websocket, $mqtt, ActionError, $actionError, $actionErrorOrThrow, $actionPending, $boundaryFallback, $setBoundaryError, $boundaryError, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound, aggregate, loader, encodeSdui, decodeSdui } from './runtime.js';`;
 
 const API_RUNTIME_HELPERS = RUNTIME_IMPORTS
   .replace(/^import\s*\{/, '')
@@ -4155,7 +4155,7 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
     .join(',\n  ');
 
   const appUsesAuth = compiled.some((c) => c.usesRoseSpanAuth);
-  const appUsesNet = compiled.some((c) => /\$(?:udp|tcp|listen)\s*\(/.test((c.ssr || '') + (c.client || '') + (c.api || '')));
+  const appUsesNet = compiled.some((c) => /\$(?:udp|tcp|listen|mqtt)\s*\(/.test((c.ssr || '') + (c.client || '') + (c.api || '')));
   const appUsesWs = compiled.some((c) => /\$websocket\s*\(/.test((c.ssr || '') + (c.client || '') + (c.api || '')));
 
   const serverEntry = `
@@ -4164,7 +4164,7 @@ import { renderMarkdown } from './content-md.ts';
 ${appUsesAuth ? "import crypto from 'node:crypto';" : "// no route references __rosespanAuth: the node:crypto auth helpers are omitted, keeping the bundle edge-loadable"}
 ${appUsesNet ? "import * as __rosespanDgram from 'node:dgram';\nimport * as __rosespanNet from 'node:net';" : "// no route opens a network listener ($udp/$tcp/$listen): the node:dgram/node:net imports are omitted, keeping the bundle edge-loadable"}
 ${appUsesWs ? "import * as __rosespanHttp from 'node:http';\nimport * as __rosespanCrypto from 'node:crypto';" : "// no route opens a WebSocket server ($websocket): the node:http/node:crypto imports are omitted, keeping the bundle edge-loadable"}
-import { setState, persistState, clearRequestState, isolateRender, serializeState, resetRequestContext, installContextStore, setRequestQuery, getRequestQuery, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta, esc, __startNetwork, __stopNetwork, $udp, $tcp, $listen, $websocket } from './runtime.js';
+import { setState, persistState, clearRequestState, isolateRender, serializeState, resetRequestContext, installContextStore, setRequestQuery, getRequestQuery, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta, esc, __startNetwork, __stopNetwork, $udp, $tcp, $listen, $websocket, $mqtt } from './runtime.js';
 export { __startNetwork, __stopNetwork };
 ${runtimePlugins.length > 0
     ? `import { hooks as __pluginHooks, hasRequestHooks as __hasRequestHooks, hasResponseHooks as __hasResponseHooks } from './plugins.js';`
@@ -4411,7 +4411,7 @@ function sse(handler: (send: (event: string, data: unknown) => void) => Promise<
 }
 ${appUsesNet ? `// The isomorphic runtime's $udp/$tcp reach Node's dgram/net only through these globals; injecting them at server boot is what lets __startNetwork() turn a registered spec into a bound socket.\n(globalThis as any).__rosespan_dgram = __rosespanDgram;\n(globalThis as any).__rosespan_net = __rosespanNet;` : ''}
 ${appUsesWs ? `// The isomorphic runtime's $websocket performs the RFC 6455 handshake (sha1) on a node:http upgrade socket; both reach it only through these globals.\n(globalThis as any).__rosespan_http = __rosespanHttp;\n(globalThis as any).__rosespan_crypto = __rosespanCrypto;` : ''}
-globalThis.__rosespanExtras = { v, jobs, sse, udp: $udp, tcp: $tcp, listen: $listen, websocket: $websocket };
+globalThis.__rosespanExtras = { v, jobs, sse, udp: $udp, tcp: $tcp, listen: $listen, websocket: $websocket, mqtt: $mqtt };
 ${appUsesAuth ? `
 const auth = {
   hashPassword(password: string): string {
