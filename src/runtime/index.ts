@@ -1,4 +1,9 @@
 
+// The LoRaWAN parser lives in its own module (it is pure and large enough to
+// deserve one) but reaches pages through this module's surface.
+export { parseLoRaWAN } from './lorawan.js';
+export type { LoRaWANFrame, LoRaWANDataFrame, LoRaWANJoinRequest, LoRaWANJoinAccept, LoRaWANMessageType } from './lorawan.js';
+
 // === Reactive Primitives ===
 type Subscriber = () => void;
 type Cleanup = () => void;
