@@ -7,7 +7,7 @@ import { createHash } from 'crypto';
 import { createRequire } from 'module';
 import { pathToFileURL, fileURLToPath } from 'url';
 import { promisify } from 'util';
-import { buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadPlugins, loadConfig, RoseError, errorInfo, type RouteInfo } from '../compiler/index.js';
+import { buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadPlugins, loadConfig, RoseError, errorInfo, codeFrame, type RouteInfo } from '../compiler/index.js';
 import { getHtmlShell, getClientSource, getStyles, shellOpen, clientScriptTag, securityHeaders, mintNonce, setBundleMode } from './shell.js';
 import { generatePWA, injectPwaHead, type PwaOptions } from '../pwa.js';
 import { AI_PROMPT } from './prompt.js';
@@ -1336,7 +1336,7 @@ async function serve(): Promise<void> {
             access();
             return;
           }
-          const body = compress(enc, raw);
+          const body = await compressAsync(enc, raw);
           res.setHeader('ETag', etag);
           res.setHeader('Content-Encoding', enc);
           res.setHeader('Content-Length', String(body.length));
@@ -1714,6 +1714,9 @@ function reportFailure(err: unknown): never {
   } else if (err instanceof RoseError) {
     console.error(`Rosefn: ${err.message}`);
     if (err.hint) console.error(`  hint: ${err.hint}`);
+    if (err.file && err.line) {
+      try { console.error(codeFrame(fs.readFileSync(err.file, 'utf-8'), err.line)); } catch {  }
+    }
     const at = err.file ? `${err.file}${err.line ? `:${err.line}` : ''}` : null;
     if (at) console.error(`  at ${at}`);
   } else {
