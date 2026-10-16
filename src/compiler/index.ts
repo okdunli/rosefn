@@ -7,6 +7,7 @@ import { pathToFileURL, fileURLToPath } from 'url';
 import * as esbuild from 'esbuild';
 // The error contract every compiler failure speaks: a stable code, the file, the line when known.
 import { RoseError, lineOf, lineAt } from './errors.js';
+import { rmTreeParallel, sweepStaleBuildDirs } from './rm-fast.js';
 import { fnv1a32 } from '../hash.js';
 export { RoseError, lineOf, lineAt, errorInfo, codeFrame } from './errors.js';
 export type { RoseErrorInfo } from './errors.js';
@@ -3729,6 +3730,8 @@ for (const el of document.querySelectorAll('[data-rosefn]')) {
 }
 `;
 
+let __buildSeq = 0;
+
 export async function buildProject(root: string, outDir: string): Promise<{ routes: RouteInfo[]; bundle: string; config: RosefnConfig }> {
   await fs.promises.mkdir(outDir, { recursive: true });
 
@@ -3843,8 +3846,15 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
   const clientLocales = Object.fromEntries(Object.keys(locales).filter((l) => !packed.includes(l)).map((l) => [l, locales[l]]));
   const clientLocalesJson = JSON.stringify(clientLocales).replace(/</g, '\\u003c');
 
-  const buildDir = path.join(outDir, '.build');
-  await fs.promises.rm(buildDir, { recursive: true, force: true });
+  // Build intermediates live in a per-build dir under the project, never in
+  // dist: they are pure esbuild inputs, and deleting ~570 of them out of dist
+  // at the end of every build costs seconds on Windows (per-file unlink
+  // latency, not concurrency). dist then stays clean by construction, and the
+  // project-local location keeps every generated import relative (and so
+  // resolvable by esbuild, which rejects file:// specifiers).
+  const buildRoot = path.join(root, '.rosefn-build');
+  const buildDir = path.join(buildRoot, `${process.pid}-${++__buildSeq}`);
+  sweepStaleBuildDirs(buildRoot);
   await fs.promises.mkdir(buildDir, { recursive: true });
   const contentSrcCands = [path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli', 'content.ts'), path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'cli', 'content.ts')];
   const contentSrc = contentSrcCands.find((c) => fs.existsSync(c)) ?? contentSrcCands[0];
@@ -3870,7 +3880,11 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
     .map((rel) => fileURLToPath(new URL(rel, import.meta.url)))
     .find((p) => fs.existsSync(p));
   if (!runtimeEntry) throw new RoseError('E-INTERNAL', 'Rosefn: the runtime source (src/runtime/index.ts) was not found next to the compiler', { hint: 'the published package ships src/ beside dist-cli/ - reinstall it, or run from a checkout' });
-  await esbuild.build({
+  // Both bundle framework sources only - neither reads anything this build
+  // generates (the prod server imports dist/server.js at runtime; the runtime
+  // entry is self-contained) - so they start here and overlap the whole
+  // compile + write phase instead of serializing ahead of it.
+  const runtimeBuild = esbuild.build({
     entryPoints: [runtimeEntry],
     bundle: true,
     outfile: path.join(buildDir, 'runtime.js'),
@@ -3878,6 +3892,27 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
     platform: 'browser',
     write: true,
   });
+  const prodEntry = (() => {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    for (const cand of [path.join(here, '..', 'cli', 'prod-server.ts'), path.join(here, '..', 'src', 'cli', 'prod-server.ts')]) {
+      if (fs.existsSync(cand)) return cand;
+    }
+    return path.join(here, '..', 'cli', 'prod-server.ts');
+  })();
+  const prodBuild = esbuild.build({
+    entryPoints: [prodEntry],
+    bundle: true,
+    outfile: path.join(outDir, 'prod.mjs'),
+    format: 'esm',
+    platform: 'node',
+    write: true,
+    banner: {
+      js: "import { createRequire } from 'node:module'; import { fileURLToPath as __f2p } from 'node:url'; import { dirname as __dn } from 'node:path'; const require = createRequire(import.meta.url); const __filename = __f2p(import.meta.url); const __dirname = __dn(__filename);"
+    },
+    ...TS_LOADER,
+  });
+  runtimeBuild.catch(() => {});
+  prodBuild.catch(() => {});
 
   const compWrites: Promise<void>[] = [];
   for (let i = 0; i < compiled.length; i++) {
@@ -4862,35 +4897,16 @@ export { installContextStore };
   } catch { /* types are a convenience: never fail the build over them */ }
 
   await fs.promises.writeFile(path.join(buildDir, 'server-entry.js'), serverEntry);
-  const bundleBuilds = Promise.all([
-    esbuild.build({
-      entryPoints: [path.join(buildDir, 'server-entry.js')],
-      bundle: true,
-      outfile: path.join(outDir, 'server.js'),
-      format: 'esm',
-      platform: 'node',
-      write: true,
-      ...TS_LOADER,
-    }),
-    esbuild.build({
-      entryPoints: [(() => {
-        const here = path.dirname(fileURLToPath(import.meta.url));
-        for (const cand of [path.join(here, '..', 'cli', 'prod-server.ts'), path.join(here, '..', 'src', 'cli', 'prod-server.ts')]) {
-          if (fs.existsSync(cand)) return cand;
-        }
-        return path.join(here, '..', 'cli', 'prod-server.ts');
-      })()],
-      bundle: true,
-      outfile: path.join(outDir, 'prod.mjs'),
-      format: 'esm',
-      platform: 'node',
-      write: true,
-      banner: {
-        js: "import { createRequire } from 'node:module'; import { fileURLToPath as __f2p } from 'node:url'; import { dirname as __dn } from 'node:path'; const require = createRequire(import.meta.url); const __filename = __f2p(import.meta.url); const __dirname = __dn(__filename);"
-      },
-      ...TS_LOADER,
-    }),
-  ]);
+  await runtimeBuild;
+  const bundleBuilds = esbuild.build({
+    entryPoints: [path.join(buildDir, 'server-entry.js')],
+    bundle: true,
+    outfile: path.join(outDir, 'server.js'),
+    format: 'esm',
+    platform: 'node',
+    write: true,
+    ...TS_LOADER,
+  });
   bundleBuilds.catch(() => {}); // an esbuild failure in the window before the await below must surface there, not as a fatal unhandled rejection
   const clientImports = split ? '' : compiled
     .map((_, i) => ({ i }))
@@ -5348,7 +5364,7 @@ setRefreshHook(async () => {
   await fs.promises.writeFile(path.join(buildDir, 'client-entry.js'), clientEntry);
   const clientBuild: Promise<void> = split
     ? (async () => {
-        await fs.promises.rm(path.join(outDir, 'chunks'), { recursive: true, force: true });
+        await rmTreeParallel(path.join(outDir, 'chunks'));
         await esbuild.build({
           entryPoints: [path.join(buildDir, 'client-entry.js')],
           bundle: true,
@@ -5373,7 +5389,7 @@ setRefreshHook(async () => {
         write: true,
         ...TS_LOADER,
       });
-  await Promise.all([bundleBuilds, clientBuild]);
+  await Promise.all([bundleBuilds, clientBuild, prodBuild]);
 
   // mount.js shares the document's runtime module: its import carries the same
   // content-hash URL the shell emits, so a host page using both loads the
@@ -5384,8 +5400,6 @@ setRefreshHook(async () => {
     mountEntry = MOUNT_ENTRY.replace("from '/client.js'", `from '/client.js?v=${fnv1a32(cb)}'`);
   } catch { /* no client bundle: keep the unversioned import */ }
   await fs.promises.writeFile(path.join(outDir, 'mount.js'), mountEntry);
-
-  await fs.promises.rm(buildDir, { recursive: true, force: true });
 
   const publicDir = path.join(root, 'public');
   if (fs.existsSync(publicDir)) {
