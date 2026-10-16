@@ -3729,15 +3729,14 @@ for (const el of document.querySelectorAll('[data-rosefn]')) {
 }
 `;
 
-export async function buildProject(root: string, outDir: string): Promise<{ routes: RouteInfo[]; bundle: string }> {
+export async function buildProject(root: string, outDir: string): Promise<{ routes: RouteInfo[]; bundle: string; config: RosefnConfig }> {
   await fs.promises.mkdir(outDir, { recursive: true });
 
   const stale = (await fs.promises.readdir(outDir)).filter((f) =>
     /^(?:comp-\d+\.(?:ssr|client)|runtime|(?:server|client)-entry)\.js$/.test(f));
   await Promise.all(stale.map((f) => fs.promises.rm(path.join(outDir, f), { force: true })));
 
-  const pageFiles = await scanRoseFiles(root);
-  const compFiles = await scanComponentFiles(root);
+  const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
   const files = [...pageFiles, ...compFiles];
   if (pageFiles.length === 0) {
     throw new RoseError(
@@ -3820,10 +3819,10 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
 
   let locales: Record<string, Record<string, string>> = {};
   try {
-    for (const f of await fs.promises.readdir(path.join(root, 'src', 'locales'))) {
-      if (!f.endsWith('.json')) continue;
-      locales[f.slice(0, -5)] = JSON.parse(await fs.promises.readFile(path.join(root, 'src', 'locales', f), 'utf-8'));
-    }
+    const localeDir = path.join(root, 'src', 'locales');
+    const localeFiles = (await fs.promises.readdir(localeDir)).filter((f) => f.endsWith('.json'));
+    const loaded = await Promise.all(localeFiles.map(async (f) => [f.slice(0, -5), JSON.parse(await fs.promises.readFile(path.join(localeDir, f), 'utf-8'))] as const));
+    locales = Object.fromEntries(loaded);
   } catch {
     locales = {};
   }
@@ -3880,12 +3879,16 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
     write: true,
   });
 
+  const compWrites: Promise<void>[] = [];
   for (let i = 0; i < compiled.length; i++) {
     const src = compiled[i].api ?? compiled[i].ssr;
-    await fs.promises.writeFile(path.join(buildDir, `comp-${i}.ssr.js`), src);
+    compWrites.push(fs.promises.writeFile(path.join(buildDir, `comp-${i}.ssr.js`), src));
     if (!infos[i].isApi) {
-      await fs.promises.writeFile(path.join(buildDir, `comp-${i}.client.js`), compiled[i].client);
+      compWrites.push(fs.promises.writeFile(path.join(buildDir, `comp-${i}.client.js`), compiled[i].client));
     }
+  }
+  for (let c = 0; c < compWrites.length; c += 64) {
+    await Promise.all(compWrites.slice(c, c + 64));
   }
 
   const pages = infos
@@ -4859,7 +4862,7 @@ export { installContextStore };
   } catch { /* types are a convenience: never fail the build over them */ }
 
   await fs.promises.writeFile(path.join(buildDir, 'server-entry.js'), serverEntry);
-  await Promise.all([
+  const bundleBuilds = Promise.all([
     esbuild.build({
       entryPoints: [path.join(buildDir, 'server-entry.js')],
       bundle: true,
@@ -4888,7 +4891,7 @@ export { installContextStore };
       ...TS_LOADER,
     }),
   ]);
-
+  bundleBuilds.catch(() => {}); // an esbuild failure in the window before the await below must surface there, not as a fatal unhandled rejection
   const clientImports = split ? '' : compiled
     .map((_, i) => ({ i }))
     .filter(({ i }) => !infos[i].isApi && !infos[i].isMiddleware && reachable.has(i))
@@ -5343,34 +5346,34 @@ setRefreshHook(async () => {
 });
 `;
   await fs.promises.writeFile(path.join(buildDir, 'client-entry.js'), clientEntry);
-  if (split) {
-    await fs.promises.rm(path.join(outDir, 'chunks'), { recursive: true, force: true });
-    await esbuild.build({
-      entryPoints: [path.join(buildDir, 'client-entry.js')],
-      bundle: true,
-      format: 'esm',
-      platform: 'browser',
-      minify: true,
-      splitting: true,
-      outdir: outDir,
-      entryNames: 'client',
-      chunkNames: 'chunks/[name]-[hash]',
-      write: true,
-      ...TS_LOADER,
-    });
-  } else {
-    await esbuild.build({
-      entryPoints: [path.join(buildDir, 'client-entry.js')],
-      bundle: true,
-      outfile: path.join(outDir, 'client.js'),
-      format: 'esm',
-      platform: 'browser',
-      minify: true,
-
-      write: true,
-      ...TS_LOADER,
-    });
-  }
+  const clientBuild: Promise<void> = split
+    ? (async () => {
+        await fs.promises.rm(path.join(outDir, 'chunks'), { recursive: true, force: true });
+        await esbuild.build({
+          entryPoints: [path.join(buildDir, 'client-entry.js')],
+          bundle: true,
+          format: 'esm',
+          platform: 'browser',
+          minify: true,
+          splitting: true,
+          outdir: outDir,
+          entryNames: 'client',
+          chunkNames: 'chunks/[name]-[hash]',
+          write: true,
+          ...TS_LOADER,
+        });
+      })()
+    : esbuild.build({
+        entryPoints: [path.join(buildDir, 'client-entry.js')],
+        bundle: true,
+        outfile: path.join(outDir, 'client.js'),
+        format: 'esm',
+        platform: 'browser',
+        minify: true,
+        write: true,
+        ...TS_LOADER,
+      });
+  await Promise.all([bundleBuilds, clientBuild]);
 
   // mount.js shares the document's runtime module: its import carries the same
   // content-hash URL the shell emits, so a host page using both loads the
@@ -5422,7 +5425,7 @@ setRefreshHook(async () => {
     console.warn(`Rosefn warning: ${allRoutes.size} routes ship zero JavaScript while their chain contains ${g.why} - ${shown}${more}`);
   }
 
-  return { routes: pages.map(({ info }) => info), bundle: bundleMode };
+  return { routes: pages.map(({ info }) => info), bundle: bundleMode, config };
 }
 
 /** Every .rose file under <root>/src/pages, recursively (layouts and api included). */
