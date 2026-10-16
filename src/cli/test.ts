@@ -96,7 +96,7 @@ function projectRootOf(file: string): string {
   for (;;) {
     if (fs.existsSync(path.join(dir, 'src', 'pages'))) return dir;
     const parent = path.dirname(dir);
-    if (parent === dir) throw new Error(`rosefn/test: ${file} is not inside a project (no src/pages found above it)`);
+    if (parent === dir) throw new Error(`rosespan/test: ${file} is not inside a project (no src/pages found above it)`);
     dir = parent;
   }
 }
@@ -142,17 +142,17 @@ let tmpCount = 0;
  */
 export async function test(file: string, opts: TestOptions = {}): Promise<TestApp> {
   const target = path.resolve(file);
-  if (!fs.existsSync(target)) throw new Error(`rosefn/test: no such file: ${target}`);
+  if (!fs.existsSync(target)) throw new Error(`rosespan/test: no such file: ${target}`);
   const root = projectRootOf(target);
   const rel = path.relative(root, target).replace(/\\/g, '/');
   const isComponent = rel.startsWith('src/components/');
 
-  const dir = opts.dir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'rosefn-test-'));
+  const dir = opts.dir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'rosespan-test-'));
   for (const item of ['src', 'public']) {
     const from = path.join(root, item);
     if (fs.existsSync(from)) copyTree(from, path.join(dir, item));
   }
-  for (const item of ['rosefn.config.js']) {
+  for (const item of ['rosespan.config.js']) {
     const from = path.join(root, item);
     if (fs.existsSync(from)) fs.copyFileSync(from, path.join(dir, item));
   }
@@ -162,8 +162,8 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
     const specifier = path.relative(path.join(dir, 'src', 'pages'), path.join(dir, rel)).replace(/\\/g, '/');
     const attrs = propAttrs(opts.props ?? {});
     const page = `<script>\n  import Target from '${specifier}';\n</script>\n\n<template>\n  <Target ${attrs} />\n</template>\n`;
-    fs.writeFileSync(path.join(dir, 'src', 'pages', '__rosefn_test.rose'), page);
-    route = '/__rosefn_test';
+    fs.writeFileSync(path.join(dir, 'src', 'pages', '__rosespan_test.rose'), page);
+    route = '/__rosespan_test';
   } else {
     route = opts.route ?? routeOf(target, root);
   }
@@ -171,16 +171,27 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
   const outDir = path.join(dir, 'dist');
   await buildProject(dir, outDir);
 
-  const serverUrl = pathToFileURL(path.join(outDir, 'server.js')).href;
-  const clientUrl = pathToFileURL(path.join(outDir, 'client.js')).href;
-  const mod = await import(serverUrl);
+  // Import through a .mjs copy, not the built .js: tsx (how the CLI and this
+  // suite run) routes a .js import through its CJS interop, i.e. require(esm),
+  // and node refuses that for a module inside the loader's own cycle
+  // (ERR_REQUIRE_CYCLE_MODULE). A .mjs sibling is unambiguously ESM, imports
+  // clean, and is the same bytes - one extra small file in an out dir that is
+  // already temporary (or kept, with --keep, alongside the build).
+  const esmCopy = (file: string): string => {
+    const copy = file.replace(/\.js$/, '.import.mjs');
+    fs.copyFileSync(file, copy);
+    return copy;
+  };
+  const serverImport = esmCopy(path.join(outDir, 'server.js'));
+  const clientImport = esmCopy(path.join(outDir, 'client.js'));
+  const mod = await import(pathToFileURL(serverImport).href);
   const clientSource = fs.readFileSync(path.join(outDir, 'client.js'), 'utf-8');
   let styles = '';
   try {
     styles = fs.readFileSync(path.join(outDir, 'styles.css'), 'utf-8');
   } catch { /* no component styles: shell styles only */ }
 
-  if (opts.keep) console.log(`rosefn/test: built ${target} -> ${outDir}`);
+  if (opts.keep) console.log(`rosespan/test: built ${target} -> ${outDir}`);
   if (!opts.dir && !opts.keep) {
     process.once('exit', () => {
       try {
@@ -207,8 +218,11 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
   const toRequest = (pathname: string, req: TestRequest = {}, body?: FormData) => {
     const headers = new Headers(req.headers ?? {});
     for (const [k, v] of Object.entries(req.cookies ?? {})) headers.append('cookie', `${k}=${v}`);
-    return new Request(`http://localhost${pathname}`, { method: req.method ?? 'GET', headers, body: body ?? undefined });
-    
+    // The fetch standard forbids a body on GET/HEAD; constructing one throws,
+    // so the body rides only on the methods that may carry it.
+    const method = req.method ?? 'GET';
+    const mayBody = method !== 'GET' && method !== 'HEAD';
+    return new Request(`http://localhost${pathname}`, { method, headers, body: mayBody ? (body ?? undefined) : undefined });
   };
 
   // One request through the real server pipeline: middleware first (it can short-circuit - a redirect, an auth wall), then the render.
@@ -230,20 +244,27 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
     
     const win = ((opts.dom as any)?.window ?? opts.dom ?? globalThis) as any;
     if (!win?.document || !win?.DOMParser) {
-      throw new Error('rosefn/test: mount() needs a DOM. Pass one - test("src/components/Counter.rose", { dom: new JSDOM() }) - or run under a jsdom environment.');
+      throw new Error('rosespan/test: mount() needs a DOM. Pass one - test("src/components/Counter.rose", { dom: new JSDOM() }) - or run under a jsdom environment.');
     }
     const page = await request(route, req);
 
     const doc = win.document;
     const app = doc.getElementById('app') ?? doc.body;
     // Reuse the state element across mounts of the same document: a second one would lose getElementById's first-match race and the client would //.
-    let stateEl = doc.getElementById('__rosefn_state');
+    let stateEl = doc.getElementById('__rosespan_state');
     if (!stateEl) {
       stateEl = doc.createElement('script');
-      stateEl.id = '__rosefn_state';
+      stateEl.id = '__rosespan_state';
       doc.body.appendChild(stateEl);
     }
-    stateEl.textContent = page.state;
+    // The client's start(container, route, true) resumes from this element's
+    // text as JSON (the browser bootstrap reads the same bytes off the real
+    // document). TestResult.state is the parsed object, so it must be
+    // re-serialized: assigning the object directly stringifies to
+    // "[object Object]", resumeState's parse fails silently, and the client
+    // render falls back to declared initials - a guests list shorter than the
+    // SSR rows shifts every marker index and wire() crashes.
+    stateEl.textContent = typeof page.state === 'string' ? page.state : JSON.stringify(page.state);
     app.innerHTML = page.html;
 
     const saved = new Map<string, unknown>();
@@ -264,7 +285,7 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
       return { ok: next.status < 400, status: next.status, text: async () => next.document };
     };
 
-    const client = await import(clientUrl);
+    const client = await import(pathToFileURL(clientImport).href);
     await client.start(app, route, true);
 
     const one = (sel?: string): Element | null => (sel ? doc.querySelector(sel) : app);
@@ -277,18 +298,18 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
       exists: (sel: string) => !!doc.querySelector(sel),
       click: async (sel: string) => {
         const el = doc.querySelector(sel);
-        if (!el) throw new Error(`rosefn/test: no element matches ${sel}`);
+        if (!el) throw new Error(`rosespan/test: no element matches ${sel}`);
         el.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
         await new Promise((r) => setTimeout(r, 0));
       },
       fill: (sel: string, value: string) => {
         const el = doc.querySelector(sel) as any;
-        if (!el) throw new Error(`rosefn/test: no element matches ${sel}`);
+        if (!el) throw new Error(`rosespan/test: no element matches ${sel}`);
         el.value = value;
       },
       submit: async (formSel = 'form', fields?: Record<string, unknown>) => {
         const form = doc.querySelector(formSel) as any;
-        if (!form) throw new Error(`rosefn/test: no form matches ${formSel}`);
+        if (!form) throw new Error(`rosespan/test: no form matches ${formSel}`);
         const body = new win.FormData(form);
         for (const [k, v] of Object.entries(fields ?? {})) body.append(k, String(v));
         await client.postForm(body);
@@ -306,7 +327,7 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
         await client.start(app, pathname, false);
       },
       state: () => {
-        const el = doc.getElementById('__rosefn_state');
+        const el = doc.getElementById('__rosespan_state');
         return el?.textContent ? JSON.parse(el.textContent) : {};
       },
       requestCount: () => requests,
