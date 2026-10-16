@@ -11,8 +11,8 @@ let trackingDeps: Set<SignalEntry> | null = null;
 
 // Trade-off: global signal map, shared across all inlined modules
 let signalMap: Map<string, SignalEntry> =
-  (globalThis as any).__rosefn_signalMap ?? new Map();
-(globalThis as any).__rosefn_signalMap = signalMap;
+  (globalThis as any).__rosespan_signalMap ?? new Map();
+(globalThis as any).__rosespan_signalMap = signalMap;
 
 // One get-or-create helper shared by state / setState / resumeState.
 function entry(key: string, initial: unknown): { value: unknown; subs: Set<Subscriber> } {
@@ -88,12 +88,12 @@ export function setState<T>(key: string, value: T): void {
   if (persistedKeys.has(key)) writeStorage(key, value);
 }
 
-// F9 ($persist): keys declared with $persist survive reloads — every write lands in localStorage (JSON-encoded under a rosefn: prefix) and every client.
+// F9 ($persist): keys declared with $persist survive reloads — every write lands in localStorage (JSON-encoded under a rosespan: prefix) and every client.
 const persistedKeys = new Set<string>();
 
 function writeStorage(key: string, v: unknown): void {
   try {
-    (globalThis as { localStorage?: Storage }).localStorage?.setItem('rosefn:' + key, JSON.stringify(v));
+    (globalThis as { localStorage?: Storage }).localStorage?.setItem('rosespan:' + key, JSON.stringify(v));
   } catch {  }
 }
 
@@ -103,7 +103,7 @@ export function persistState<T>(key: string, initial: T): [() => T, (v: T) => vo
   let seeded = initial;
   let hasStored = false;
   try {
-    const raw = (globalThis as { localStorage?: Storage }).localStorage?.getItem('rosefn:' + key);
+    const raw = (globalThis as { localStorage?: Storage }).localStorage?.getItem('rosespan:' + key);
     if (raw != null) {
       seeded = JSON.parse(raw) as T;
       hasStored = true;
@@ -181,6 +181,9 @@ export function effect(fn: () => void): Cleanup {
   currentEffect = prev;
   const cleanup: Cleanup = () => {
     renderMaps().signals.forEach((e: { subs: Set<Subscriber> }) => e.subs.delete(wrapped));
+    // $store() boxes live in a separate map: detach them too, or a live store
+    // patch keeps re-running an unmounted effect (stale render + leak).
+    STORES.forEach((e: { subs: Set<Subscriber> }) => e.subs.delete(wrapped));
     fxSet().delete(cleanup);
   };
   fxSet().add(cleanup);
@@ -327,7 +330,7 @@ interface EachRow {
   disp?: Cleanup;
   norm?: string;
 }
-const EACH_REUSE_FORBID = /data-(?:on|use|bind-this|transition|animate)|data-rosefn-c|data-rv-island/;
+const EACH_REUSE_FORBID = /data-(?:on|use|bind-this|transition|animate)|data-rosespan-c|data-rv-island/;
 const EACH_HTML_NORM = (h: string): string => h.replace(/\u27e6\/?[a-z]+:\d+\u27e7/g, '').replace(/data-b\d+/g, 'data-b');
 const normHtml = (row: EachRow): string => (row.norm ??= EACH_HTML_NORM(row.html));
 
@@ -415,10 +418,10 @@ export function tpl(html: string): DocumentFragment {
   return t.content.cloneNode(true) as DocumentFragment;
 }
 
-const HEAD_ATTR = 'data-rosefn-head';
+const HEAD_ATTR = 'data-rosespan-head';
 
 export const handlers: Record<string, (e: Event) => void> =
-  (globalThis as { __rosefn_handlers?: Record<string, (e: Event) => void> }).__rosefn_handlers ??= {};
+  (globalThis as { __rosespan_handlers?: Record<string, (e: Event) => void> }).__rosespan_handlers ??= {};
 
 let actionDispatch: ((name: string, e: Event) => void) | null = null;
 export function setActionDispatcher(fn: (name: string, e: Event) => void): void {
@@ -437,8 +440,8 @@ const directBound = new WeakMap<Element, Set<string>>();
  * of the reactive graph keeps the action contract one argument.
  */
 export const directives: Record<string, (el: Element, param?: unknown) => void | (() => void) | { update?: (p: unknown) => void; destroy?: () => void }> =
-  (globalThis as { __rosefn_directives?: Record<string, (el: Element, param?: unknown) => void | (() => void) | { update?: (p: unknown) => void; destroy?: () => void }> })
-    .__rosefn_directives ??= {};
+  (globalThis as { __rosespan_directives?: Record<string, (el: Element, param?: unknown) => void | (() => void) | { update?: (p: unknown) => void; destroy?: () => void }> })
+    .__rosespan_directives ??= {};
 
 const actionRecords = new WeakMap<Element, { update?: (p: unknown) => void; destroy?: () => void }>();
 
@@ -490,7 +493,7 @@ export function applyHead(html: string): void {
   }
 }
 
-/** Drop every rosefn-managed head element (routes without <head> blocks). */
+/** Drop every rosespan-managed head element (routes without <head> blocks). */
 export function clearHead(): void {
   document.head.querySelectorAll(`[${HEAD_ATTR}]`).forEach((el) => el.remove());
 }
@@ -896,7 +899,7 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
               }, duration + delay);
             });
           } else {
-            const custom = (globalThis as any).__rosefnTransitions?.[name];
+            const custom = (globalThis as any).__rosespanTransitions?.[name];
             if (custom) {
               const ret = custom(el, duration, 'out');
               if (typeof ret === 'function') created.push(ret);
@@ -942,7 +945,7 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
             }, duration + delay);
           });
         } else {
-          const custom = (globalThis as any).__rosefnTransitions?.[name];
+          const custom = (globalThis as any).__rosespanTransitions?.[name];
           if (custom) {
             const ret = custom(el, duration, dir || 'both');
             if (typeof ret === 'function') created.push(ret);
@@ -1756,7 +1759,7 @@ export function bestLocale(header: string | null | undefined): string | null {
 
 /** The signal `redirect()` throws. */
 export class RoseRedirect extends Error {
-  readonly __rosefn = 'redirect';
+  readonly __rosespan = 'redirect';
   constructor(readonly path: string, readonly status = 307) {
     super(`redirect to ${path}`);
   }
@@ -1764,7 +1767,7 @@ export class RoseRedirect extends Error {
 
 /** The signal `notFound()` throws. */
 export class RoseNotFound extends Error {
-  readonly __rosefn = 'notFound';
+  readonly __rosespan = 'notFound';
   constructor() {
     super('notFound()');
   }
@@ -1855,8 +1858,23 @@ export function $t(key: string, vars?: Record<string, string | number>): string 
   return out;
 }
 
-const STORES = new Map<string, { value: unknown }>();
+const STORES = new Map<string, { value: unknown; subs: Set<Subscriber> }>();
 let storeTransport: ((name: string, value: unknown) => void) | null = null;
+
+// A store write (or an applied patch) fans out to whoever read the store inside a
+// tracked scope - the wire() effects that render {store.get()} / {#each store.get()}.
+// Notify UNTRACKED, exactly like the signal setter: a write must not hand out new
+// subscriptions, and a throwing effect must not kill the route.
+function notifyStoreSubs(box: { subs: Set<Subscriber> }): void {
+  if (box.subs.size === 0) return;
+  const prevEffect = currentEffect;
+  const prevTracking = trackingDeps;
+  currentEffect = null;
+  trackingDeps = null;
+  box.subs.forEach((fn: Subscriber) => fn());
+  currentEffect = prevEffect;
+  trackingDeps = prevTracking;
+}
 
 /**
  * Install the cross-process transport. The generated server entry wires the
@@ -1871,7 +1889,9 @@ export function setStoreTransport(fn: ((name: string, value: unknown) => void) |
  * calls this; a store nobody opened yet is ignored - it has no reader). */
 export function applyStorePatch(name: string, value: unknown): void {
   const entry = STORES.get(name);
-  if (entry) entry.value = value;
+  if (!entry) return;
+  entry.value = value;
+  notifyStoreSubs(entry);
 }
 
 /**
@@ -1887,21 +1907,126 @@ export function applyStorePatch(name: string, value: unknown): void {
 export function $store<T>(name: string, initial: T): { get(): T; set(v: T): void; update(fn: (v: T) => T): void } {
   let entry = STORES.get(name);
   if (!entry) {
-    entry = { value: initial };
+    entry = { value: initial, subs: new Set<Subscriber>() };
     STORES.set(name, entry);
   }
   const box = entry;
   return {
-    get: () => box.value as T,
+    get: () => {
+      if (currentEffect) {
+        box.subs.add(currentEffect);
+        if (trackingDeps) trackingDeps.add(box as unknown as SignalEntry);
+      }
+      return box.value as T;
+    },
     set: (v: T) => {
       box.value = v;
+      notifyStoreSubs(box);
       storeTransport?.(name, v);
     },
     update: (fn: (v: T) => T) => {
       box.value = fn(box.value as T);
+      notifyStoreSubs(box);
       storeTransport?.(name, box.value);
     },
   };
+}
+
+// === Network listeners (isomorphic) ===
+// $udp / $tcp / $listen let an app open a socket and react to the outside world
+// (LoRa gateways, MQTT-ish feeds, raw TCP devices) from inside a rosespan app. They
+// only REGISTER a spec here; the host binds them via __startNetwork() at
+// serve-worker boot - so a build, a prerender, or a dev hot-re-import never opens a
+// socket. The registries live on globalThis: a dev re-import re-registers specs
+// against the same live handles. On the client every handle is an inert no-op, so a
+// page whose <script> opens a listener hydrates without a ReferenceError.
+type NetOpts = Record<string, unknown>;
+const __netSpecs: { kind: string; port: number; host?: string; opts: NetOpts }[] =
+  (globalThis as any).__rosespan_netSpecs || ((globalThis as any).__rosespan_netSpecs = []);
+const __netHandles: any[] = (globalThis as any).__rosespan_netHandles || ((globalThis as any).__rosespan_netHandles = []);
+
+function __netBind(spec: { kind: string; port: number; host?: string; opts: NetOpts }): void {
+  const bound: Set<string> = (globalThis as any).__rosespan_netBound || ((globalThis as any).__rosespan_netBound = new Set());
+  const key = spec.kind + ':' + spec.port + ':' + (spec.host || '');
+  if (bound.has(key)) return;
+  bound.add(key);
+  const o = spec.opts || {};
+  if (spec.kind === 'udp') {
+    const dg = (globalThis as any).__rosespan_dgram;
+    if (!dg) return;
+    const sock = dg.createSocket('udp4');
+    sock.on('message', (msg: Buffer, rinfo: unknown) => (o.onMessage as (m: Buffer, r: unknown) => void)?.(msg, rinfo));
+    sock.on('error', (err: Error) => ((o.onError as (e: Error) => void) || ((e: Error) => console.error('[rosespan] UDP error:', e)))(err));
+    sock.bind(spec.port, spec.host || '0.0.0.0');
+    __netHandles.push(sock);
+  } else if (spec.kind === 'tcp') {
+    const nt = (globalThis as any).__rosespan_net;
+    if (!nt) return;
+    const srv = nt.createServer((socket: any) => {
+      (o.onConnection as (s: unknown) => void)?.(socket);
+      socket.on('data', (data: Buffer) => (o.onData as (s: unknown, d: Buffer) => void)?.(socket, data));
+      socket.on('error', () => {});
+    });
+    srv.on('error', (err: Error) => console.error('[rosespan] TCP server error:', err));
+    srv.listen(spec.port, spec.host || '0.0.0.0');
+    __netHandles.push(srv);
+  }
+}
+function __netReg(kind: string, port: number, host: string | undefined, opts: NetOpts): void {
+  const spec = { kind, port, host, opts };
+  __netSpecs.push(spec);
+  if ((globalThis as any).__rosespan_netStarted === true) __netBind(spec);
+}
+/** Bind every registered listener. Called once at serve-worker boot by the host. */
+export function __startNetwork(): void {
+  (globalThis as any).__rosespan_netStarted = true;
+  for (const spec of __netSpecs) __netBind(spec);
+}
+/** Close every bound listener. Called on worker shutdown. */
+export function __stopNetwork(): void {
+  for (const h of __netHandles) { try { (h as { close?: () => void }).close?.(); } catch { /* already gone */ } }
+  __netHandles.length = 0;
+  ((globalThis as any).__rosespan_netBound as Set<string> | undefined)?.clear?.();
+}
+
+const __NOOP_NET = {
+  send: () => {}, close: () => {}, write: () => {}, end: () => {}, destroy: () => {}, on: () => {},
+  joinMulticast: () => {}, leaveMulticast: () => {},
+  address: () => ({ port: 0, host: 'localhost', family: 'IPv4' }),
+};
+
+export function $udp(port: number, opts: NetOpts = {}): any {
+  if (typeof document === 'undefined') __netReg('udp', port, opts.host as string | undefined, opts);
+  return { ...__NOOP_NET, address: () => ({ port, host: (opts.host as string) || '0.0.0.0', family: 'IPv4' }) };
+}
+
+export function $tcp(portOrHost: number | string, opts: NetOpts = {}): any {
+  if (typeof document !== 'undefined') return { ...__NOOP_NET };
+  const isServer = typeof portOrHost === 'number' || opts.onConnection !== undefined
+    || (opts.port !== undefined && opts.host !== undefined && opts.onConnect === undefined);
+  if (isServer) {
+    const port = typeof portOrHost === 'number' ? portOrHost : (opts.port as number);
+    __netReg('tcp', port, opts.host as string | undefined, opts);
+    return { ...__NOOP_NET, address: () => ({ port, host: (opts.host as string) || '0.0.0.0' }) };
+  }
+  const nt = (globalThis as any).__rosespan_net;
+  if (!nt) return { ...__NOOP_NET };
+  const host = typeof portOrHost === 'string' ? portOrHost : (opts.host as string);
+  const sock = nt.createConnection({ host, port: opts.port as number });
+  sock.on('connect', () => (opts.onConnect as (() => void) | undefined)?.());
+  sock.on('data', (d: Buffer) => (opts.onData as (s: unknown, d: Buffer) => void)?.(sock, d));
+  sock.on('close', () => (opts.onClose as (() => void) | undefined)?.());
+  sock.on('error', (e: Error) => (opts.onError as (e: Error) => void)?.(e));
+  __netHandles.push(sock);
+  return sock;
+}
+
+export function $listen(port: number, opts: NetOpts = {}): any {
+  if (typeof document !== 'undefined') return { ...__NOOP_NET, address: () => ({ port, host: (opts.host as string) || 'localhost' }) };
+  const protocol = (opts.protocol as string) || 'http';
+  if (protocol === 'udp') $udp(port, { host: opts.host, onMessage: opts.onData, onError: opts.onError });
+  else if (protocol === 'tcp') $tcp(port, { host: opts.host, onConnection: opts.onConnection, onData: opts.onData });
+  return { close: () => {}, address: () => ({ port, host: (opts.host as string) || '0.0.0.0' }) };
 }
 
 export class ActionError extends Error {
@@ -1957,7 +2082,7 @@ export function $actionErrorOrThrow(): void {
 
 /** The {#boundary} fallback: the action's own message when the failure is a business one. */
 export function $boundaryFallback(err: unknown): string {
-  if (err instanceof ActionError) return `<p class="rosefn-action-error">${esc(err.message)}</p>`;
+  if (err instanceof ActionError) return `<p class="rosespan-action-error">${esc(err.message)}</p>`;
   return '<p>This section failed to render.</p>';
 }
 
@@ -2045,10 +2170,10 @@ export function $sessionCookie(
 export function reportVitals(): void {
   if (typeof window === 'undefined' || typeof performance === 'undefined') return;
   const live: Record<string, number> = {};
-  (window as unknown as { __rosefn_vitals?: Record<string, number> }).__rosefn_vitals = live;
+  (window as unknown as { __rosespan_vitals?: Record<string, number> }).__rosespan_vitals = live;
   const send = (name: string, value: number) => {
     live[name] = value;
-    window.dispatchEvent(new CustomEvent('rosefn:vitals', { detail: { name, value, route: location.pathname } }));
+    window.dispatchEvent(new CustomEvent('rosespan:vitals', { detail: { name, value, route: location.pathname } }));
   };
   const nav = performance.getEntriesByType?.('navigation')?.[0] as PerformanceNavigationTiming | undefined;
   if (nav) send('ttfb', Math.round(nav.responseStart));
