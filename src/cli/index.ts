@@ -2,6 +2,7 @@
 // Rosefn CLI - simplest possible SSR + static server
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import * as zlib from 'zlib';
 import { createHash } from 'crypto';
 import { createRequire } from 'module';
@@ -9,6 +10,7 @@ import { pathToFileURL, fileURLToPath } from 'url';
 import { promisify } from 'util';
 import { AsyncLocalStorage } from 'async_hooks';
 import { buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadPlugins, loadConfig, RoseError, errorInfo, codeFrame, type RouteInfo } from '../compiler/index.js';
+import { prunePrerendered, rmTreeParallel } from '../compiler/rm-fast.js';
 import { getHtmlShell, getClientSource, getStyles, shellOpen, clientScriptTag, securityHeaders, mintNonce, setBundleMode } from './shell.js';
 import { generatePWA, injectPwaHead, type PwaOptions } from '../pwa.js';
 import { AI_PROMPT } from './prompt.js';
@@ -232,20 +234,27 @@ async function loadServer(): Promise<any> {
   if (!serverModule || mtimeMs !== serverMtime) {
     serverMtime = mtimeMs;
     serverVersion++;
-    let target = file;
+    // A fresh FILE per version, not a ?v= query: the tsx loader (how the CLI
+    // runs) caches by resolved path and would serve a stale module for a
+    // query-busted URL. The copy lives in tmp so dist stays free of
+    // intermediates; only the newest version is kept.
+    let target = pathToFileURL(file).href;
     if (devMode) {
-      target = path.join(OUT_DIR, '.build', `server-${serverVersion}.mjs`);
-      await fs.promises.mkdir(path.dirname(target), { recursive: true });
-      await fs.promises.copyFile(file, target);
+      const dir = path.join(os.tmpdir(), `rosefn-dev-${process.pid}`);
+      const copy = path.join(dir, `server-${serverVersion}.mjs`);
+      await fs.promises.rm(dir, { recursive: true, force: true });
+      await fs.promises.mkdir(dir, { recursive: true });
+      await fs.promises.copyFile(file, copy);
+      target = pathToFileURL(copy).href;
     }
-    serverModule = await import(pathToFileURL(target).href);
+    serverModule = await import(target);
   }
   return serverModule;
 }
 
 async function build(): Promise<void> {
   const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR);
-  await clearPrerendered(OUT_DIR);
+  await prunePrerendered(OUT_DIR);
   setBundleMode(bundle);
   const skipped = await prerender(routes);
   await fs.promises.writeFile(path.join(OUT_DIR, 'broken.json'), JSON.stringify(skipped));
@@ -377,37 +386,6 @@ async function analyze(outDir: string, dynamic: string[]): Promise<void> {
     lines.push(`  dynamic (rendered per request, measured live by \`npm run benchmark\`): ${dynamic.join(' ')}`);
   }
   for (const l of lines) console.log(l);
-}
-
-/**
- * Delete the prerendered output of a previous build: HTML documents and
- * baked API bodies, with their brotli siblings. Everything else in dist/
- * (the bundles, styles) was just rewritten by buildProject.
- *
- * Trade-off: Windows hands out transient EPERM/EBUSY when an antivirus or
- * the search indexer holds a just-written file, so a couple of retries
- * per file - a build that fails because a scanner blinked is the worst
- * kind of flake.
- */
-async function clearPrerendered(dir: string, depth = 0): Promise<void> {
-  for (const e of await fs.promises.readdir(dir, { withFileTypes: true })) {
-    if (depth === 0 && e.name === 'locales' && e.isDirectory()) continue;
-    const p = path.join(dir, e.name);
-    if (e.isDirectory()) {
-      await clearPrerendered(p, depth + 1);
-      continue;
-    }
-    if (!/\.(?:html|json)(?:\.br)?$/.test(e.name)) continue;
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await fs.promises.rm(p, { force: true });
-        break;
-      } catch (err) {
-        if (attempt >= 2 || !/EPERM|EBUSY|EACCES/.test(String(err))) throw err;
-        await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
-      }
-    }
-  }
 }
 
 /**
@@ -1228,7 +1206,17 @@ async function dev(): Promise<void> {
   }
 
   let timeout: any;
-  fs.watch(SRC_DIR, { recursive: true }, () => {
+  fs.watch(SRC_DIR, { recursive: true }, (_ev, filename) => {
+    // Build output must not retrigger the build: dist/ (prerendered HTML,
+    // bundles), .rosefn-build/ (esbuild intermediates) and src/.rosefn/
+    // (generated route types) are all rewritten by every rebuild, and
+    // watching them turns one edit into an endless rebuild loop whose
+    // prune/prerender window serves stale documents. node_modules and .git
+    // are noise for the same reason.
+    if (filename) {
+      const segs = String(filename).replace(/\\/g, '/').split('/');
+      if (segs.some((s) => s === 'dist' || s === 'node_modules' || s === '.git' || s === '.rosefn' || s === '.rosefn-build')) return;
+    }
     devBuildPending = true;
     clearTimeout(timeout);
     timeout = setTimeout(() => { void startDevBuild(); }, 200);
