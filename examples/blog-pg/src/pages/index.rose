@@ -20,12 +20,13 @@
 </script>
 
 <h1>Posts</h1>
-<p>Every row below arrived in the first response - one request, no JavaScript.</p>
-<ul>
+<p class="lede">Every row below arrived in the first response — one request, no JavaScript.</p>
+<div class="cards">
   {#each posts() as post}
-    <li>
-      <a href={'/post/' + post.id}>{post.title}</a>
-      <span> — {post.author}</span>
-    </li>
+    <a class="card" href={'/post/' + post.id}>
+      <h2>{post.title}</h2>
+      <p class="clamp">{post.body}</p>
+      <span class="meta">by {post.author}</span>
+    </a>
   {/each}
-</ul>
+</div>

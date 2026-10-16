@@ -55,31 +55,33 @@
 <h1>Write</h1>
 
 {#if signedIn() || user()}
-  <p>Signed in. A new post is live the moment it is written - no rebuild.</p>
+  <p class="lede">Signed in. A new post is live the moment it is written — no rebuild.</p>
   {#if error()}
-    <p><strong>{error()}</strong></p>
+    <p class="error">{error()}</p>
   {/if}
-  <form on:submit={publish}>
+  <form class="card" on:submit={publish}>
     <input name="title" placeholder="Title" aria-label="Title" required>
     <textarea name="body" placeholder="Body" aria-label="Body" rows="4" required></textarea>
-    <button type="submit">Publish</button>
+    <button class="btn" type="submit">Publish</button>
   </form>
   <h2>Published</h2>
-  <ul>
+  <div class="cards">
     {#each posts() ?? [] as post}
-      <li><a href={'/post/' + post.id}>{post.title}</a></li>
+      <a class="card" href={'/post/' + post.id}>
+        <h2>{post.title}</h2>
+      </a>
     {/each}
-  </ul>
+  </div>
 {/if}
 
 {#if !signedIn() && !user()}
-  <p>Sign in to write. The demo account is <code>ada</code> / <code>lovelace</code>.</p>
+  <p class="lede">Sign in to write. The demo account is <code>ada</code> / <code>lovelace</code>.</p>
   {#if error()}
-    <p><strong>{error()}</strong></p>
+    <p class="error">{error()}</p>
   {/if}
-  <form method="POST" action="/api/login" on:submit={login}>
+  <form class="card" method="POST" action="/api/login" on:submit={login}>
     <input name="user" placeholder="User" aria-label="User" required>
     <input name="pass" type="password" placeholder="Password" aria-label="Password" required>
-    <button type="submit">Sign in</button>
+    <button class="btn" type="submit">Sign in</button>
   </form>
 {/if}

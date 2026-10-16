@@ -23,14 +23,16 @@
 </head>
 
 {#if post()}
-  <article>
+  <article class="card">
     <h1>{post()!.title}</h1>
     <p>{post()!.body}</p>
-    <p><small>by {post()!.author}</small></p>
+    <p class="meta">by {post()!.author}</p>
   </article>
 {/if}
 {#if !post()}
-  <h1>Not found</h1>
-  <p>No post with that id.</p>
+  <div class="card">
+    <h1>Not found</h1>
+    <p>No post with that id.</p>
+  </div>
 {/if}
-<p><a href="/">Back to all posts</a></p>
+<p><a href="/">← Back to all posts</a></p>
