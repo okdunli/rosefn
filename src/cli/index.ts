@@ -7,6 +7,7 @@ import { createHash } from 'crypto';
 import { createRequire } from 'module';
 import { pathToFileURL, fileURLToPath } from 'url';
 import { promisify } from 'util';
+import { AsyncLocalStorage } from 'async_hooks';
 import { buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadPlugins, loadConfig, RoseError, errorInfo, codeFrame, type RouteInfo } from '../compiler/index.js';
 import { getHtmlShell, getClientSource, getStyles, shellOpen, clientScriptTag, securityHeaders, mintNonce, setBundleMode } from './shell.js';
 import { generatePWA, injectPwaHead, type PwaOptions } from '../pwa.js';
@@ -416,73 +417,108 @@ async function clearPrerendered(dir: string, depth = 0): Promise<void> {
  * any other and then kept fresh by the preview server's stale-while-
  * revalidate pass (ISR).
  */
+const PRERENDER_CONCURRENCY = 4;
+
+const requestAls = new AsyncLocalStorage<Record<string, unknown>>();
+
+function installContextStore(ssrModule: any): void {
+  ssrModule.installContextStore?.({
+    getStore: () => requestAls.getStore(),
+    run: (store: Record<string, unknown>, fn: () => unknown) => requestAls.run(store, fn),
+  });
+}
+
+async function runPool(tasks: Array<() => Promise<void>>, limit: number): Promise<void> {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+    while (next < tasks.length) {
+      await tasks[next++]();
+    }
+  }));
+}
+
 async function prerender(routes: RouteInfo[]): Promise<string[]> {
   const ssrModule = await loadServer();
+  installContextStore(ssrModule);
   const skipped: string[] = [];
   const write = async (routePath: string) => {
-    const mw = await ssrModule.runMiddleware({ method: 'GET', url: routePath, headers: {} });
-    if (mw) {
-      console.error(`prerender skipped for ${routePath}: the middleware short-circuits at build time`);
-      skipped.push(routePath);
-      return;
-    }
-    ssrModule.setQuery?.({});
-    const page = await ssrModule.renderPage(routePath);
-    if (page.status === 500) {
-      console.error(`prerender skipped for ${routePath}: render failed, the error page rendered`);
-      skipped.push(routePath);
-      return;
-    }
-    const routeDir = routePath === '/' ? OUT_DIR : path.join(OUT_DIR, routePath.slice(1));
-    await fs.promises.mkdir(routeDir, { recursive: true });
-    await fs.promises.writeFile(path.join(routeDir, 'index.html'), getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false));
-    console.log(`prerendered ${routePath} -> ${path.relative(process.cwd(), path.join(routeDir, 'index.html'))}`);
+    await requestAls.run({}, async () => {
+      const mw = await ssrModule.runMiddleware({ method: 'GET', url: routePath, headers: {} });
+      if (mw) {
+        console.error(`prerender skipped for ${routePath}: the middleware short-circuits at build time`);
+        skipped.push(routePath);
+        return;
+      }
+      ssrModule.setQuery?.({});
+      const page = await ssrModule.renderPage(routePath);
+      if (page.status === 500) {
+        console.error(`prerender skipped for ${routePath}: render failed, the error page rendered`);
+        skipped.push(routePath);
+        return;
+      }
+      const routeDir = routePath === '/' ? OUT_DIR : path.join(OUT_DIR, routePath.slice(1));
+      await fs.promises.mkdir(routeDir, { recursive: true });
+      await fs.promises.writeFile(path.join(routeDir, 'index.html'), getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false));
+      console.log(`prerendered ${routePath} -> ${path.relative(process.cwd(), path.join(routeDir, 'index.html'))}`);
+    });
   };
 
+  const tasks: Array<() => Promise<void>> = [];
   for (const info of routes) {
     if (((ssrModule.prerenderSkipRoutes as string[]) ?? []).includes(info.routePath)) {
       console.log(`dynamic route ${info.routePath}: per-request state (getContext/$store), rendered on demand`);
       continue;
     }
     if (info.paramNames.length === 0) {
-      try {
-        await write(info.routePath);
-      } catch (err) {
-        console.error(`prerender skipped for ${info.routePath}: ${err instanceof Error ? err.message : err}`);
-        skipped.push(info.routePath);
-      }
+      const routePath = info.routePath;
+      tasks.push(() => write(routePath).catch((err) => {
+        console.error(`prerender skipped for ${routePath}: ${err instanceof Error ? err.message : err}`);
+        skipped.push(routePath);
+      }));
       continue;
     }
     try {
       const paramsExport = (ssrModule.routeParams as Record<string, unknown>)?.[info.routePath];
       const raw = typeof paramsExport === 'function' ? await (paramsExport as () => unknown)() : paramsExport;
       const paths = enumerateParams(info.pattern, info.paramNames, (raw ?? {}) as Record<string, unknown>);
-      for (const p of paths) await write(p);
+      for (const p of paths) {
+        tasks.push(() => write(p).catch((err) => {
+          console.error(`prerender skipped for ${p}: ${err instanceof Error ? err.message : err}`);
+          skipped.push(p);
+        }));
+      }
       if (paths.length === 0) console.log(`dynamic route ${info.routePath}: no params export, rendered on demand`);
     } catch (err) {
       console.error(`prerender skipped for ${info.routePath}: ${err instanceof Error ? err.message : err}`);
       skipped.push(info.routePath);
     }
   }
+  await runPool(tasks, PRERENDER_CONCURRENCY);
 
   const apiPrerender = (ssrModule.apiPrerender as Record<string, boolean>) ?? {};
+  const apiTasks: Array<() => Promise<void>> = [];
   for (const [routePath, on] of Object.entries(apiPrerender)) {
     if (!on) continue;
-    try {
-      const res = await ssrModule.handleApi('GET', routePath, new Request('http://localhost' + routePath));
-      if (res.status !== 200) {
-        console.error(`api prerender skipped for ${routePath}: GET answered ${res.status}`);
-        continue;
+    apiTasks.push(async () => {
+      try {
+        await requestAls.run({}, async () => {
+          const res = await ssrModule.handleApi('GET', routePath, new Request('http://localhost' + routePath));
+          if (res.status !== 200) {
+            console.error(`api prerender skipped for ${routePath}: GET answered ${res.status}`);
+            return;
+          }
+          const body = await res.text();
+          const outFile = path.join(OUT_DIR, routePath.slice(1) + '.json');
+          await fs.promises.mkdir(path.dirname(outFile), { recursive: true });
+          await fs.promises.writeFile(outFile, body);
+          console.log(`prerendered api ${routePath} -> ${path.relative(process.cwd(), outFile)}`);
+        });
+      } catch (err) {
+        console.error(`api prerender skipped for ${routePath}: ${err instanceof Error ? err.message : err}`);
       }
-      const body = await res.text();
-      const outFile = path.join(OUT_DIR, routePath.slice(1) + '.json');
-      await fs.promises.mkdir(path.dirname(outFile), { recursive: true });
-      await fs.promises.writeFile(outFile, body);
-      console.log(`prerendered api ${routePath} -> ${path.relative(process.cwd(), outFile)}`);
-    } catch (err) {
-      console.error(`api prerender skipped for ${routePath}: ${err instanceof Error ? err.message : err}`);
-    }
+    });
   }
+  await runPool(apiTasks, PRERENDER_CONCURRENCY);
   return skipped;
 }
 
@@ -531,13 +567,16 @@ function revalidateInBackground(routePath: string, filePath: string): void {
   void (async () => {
     try {
       const ssrModule = await loadServer();
-      ssrModule.setQuery?.({});
-      const page = await ssrModule.renderPage(routePath);
-      if (page.status === 200) {
-        await fs.promises.writeFile(filePath, getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false));
-        fileCache.delete(filePath);
-        console.log(`Rosefn: revalidated ${routePath} in the background`);
-      }
+      installContextStore(ssrModule);
+      await requestAls.run({}, async () => {
+        ssrModule.setQuery?.({});
+        const page = await ssrModule.renderPage(routePath);
+        if (page.status === 200) {
+          await fs.promises.writeFile(filePath, getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false));
+          fileCache.delete(filePath);
+          console.log(`Rosefn: revalidated ${routePath} in the background`);
+        }
+      });
     } catch (err) {
       console.error('Rosefn: background revalidation failed for', routePath, err instanceof Error ? err.message : err);
     } finally {
@@ -836,7 +875,9 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
     const settled = settleDevBuild();
     const ready = settled ? settled.then(() => loadServer()) : loadServer();
     ready.then(async (ssrModule: any) => {
- // Runtime hooks: onRequest runs after the origin guard and BEFORE middleware and routing.
+      installContextStore(ssrModule);
+      return requestAls.run({}, async () => {
+// Runtime hooks: onRequest runs after the origin guard and BEFORE middleware and routing.
       const hookCtx = ssrModule.hasRequestHooks === true || ssrModule.hasResponseHooks === true
         ? await hookContext(req)
         : null;
@@ -1043,6 +1084,7 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
         ? await ssrModule.renderPageCached(safe2, String(req.headers.cookie || ''))
         : await ssrModule.renderPage(safe2);
       await sendPage(req, res, ssrModule, hookCtx, page, safe2);
+      });
     }).catch((err: unknown) => {
       console.error(`Rosefn: ${req.method} ${req.url} failed:`, err instanceof Error ? err.stack ?? err.message : err);
       if (res.headersSent) {

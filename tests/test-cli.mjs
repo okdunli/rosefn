@@ -1101,7 +1101,7 @@ fs.writeFileSync(path.join(mntDir, 'src', 'pages', 'plain.rose'), `<h1>Plain mou
 const mntBuilt = await run(['build'], mntDir);
 assert(mntBuilt.code === 0, `the mount fixture project builds (stderr: ${mntBuilt.err.slice(0, 200)})`);
 const mountSrc = fs.readFileSync(path.join(mntDir, 'dist', 'mount.js'), 'utf8');
-assert(mountSrc.includes('[data-rosefn]') && /from '\/client\.js'/.test(mountSrc), 'the build emits dist/mount.js (the embeddable entry)');
+assert(mountSrc.includes('[data-rosefn]') && /from '\/client\.js(\?v=[0-9a-z]+)?'/.test(mountSrc), 'the build emits dist/mount.js (the embeddable entry)');
 const mntPort = await takePort(0);
 const mntProc = spawn(process.execPath, [...TSX, 'serve'], {
   cwd: mntDir,
@@ -1120,7 +1120,7 @@ try {
     const decls = exp[1].split(',').map((s) => { const [o, a] = s.split(/\s+as\s+/); return `${a || o}=${o}`; }).join(',');
     client = client.replace(exp[0], `const ${decls};`);
   }
-  const mountBody = mountSrc.replace(/^import \{[^}]*\} from '\/client\.js';$/m, '');
+  const mountBody = mountSrc.replace(/^import \{[^}]*\} from '\/client\.js(\?v=[0-9a-z]+)?';$/m, '');
   const classic = `${client}\n;(async () => {\n${mountBody}\n})();`;
   const requests = [];
   let hostPrevented = true;
@@ -1184,6 +1184,39 @@ try {
  } finally {
    mntProc.kill();
  }
+}
+
+{
+  const isoScratch = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'rosefn-isolate-'));
+  fs.writeFileSync(path.join(isoScratch, 'runner.mjs'), `
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { pathToFileURL } from 'node:url';
+const RT = await import(pathToFileURL(${JSON.stringify(path.join(REPO, 'src/runtime/index.ts'))}).href);
+const als = new AsyncLocalStorage();
+RT.installContextStore({ getStore: () => als.getStore(), run: (s, fn) => als.run(s, fn) });
+const render = (name, delay) => als.run({}, () => RT.isolateRender(async () => {
+  RT.setState('route', name);
+  await new Promise((r) => setTimeout(r, delay));
+  RT.setState('afterAwait', name);
+  return JSON.parse(RT.serializeState());
+}));
+const [a, b] = await Promise.all([render('A', 5), render('B', 30)]);
+console.log(JSON.stringify({ a, b, leak: RT.hasState('route') }));
+`);
+  const isoRun = await new Promise((resolve) => {
+    const p = spawn(process.execPath, [path.join(REPO, 'node_modules/tsx/dist/cli.mjs'), path.join(isoScratch, 'runner.mjs')], { cwd: isoScratch });
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (c) => { out += c; });
+    p.stderr.on('data', (c) => { err += c; });
+    p.on('close', (code) => resolve({ code, out, err }));
+  });
+  fs.rmSync(isoScratch, { recursive: true, force: true });
+  assert(isoRun.code === 0, `the isolation runner loads the runtime (stderr: ${isoRun.err.slice(-300)})`);
+  const iso = JSON.parse(isoRun.out.trim());
+  assert(iso.a.route === 'A' && iso.a.afterAwait === 'A', `an overlapping render keeps its own state across awaits (got ${JSON.stringify(iso.a)})`);
+  assert(iso.b.route === 'B' && iso.b.afterAwait === 'B', `the second overlapping render is not wiped by the first one's restore (got ${JSON.stringify(iso.b)})`);
+  assert(iso.leak === false, 'no render state survives into the process-wide map');
 }
 
 {
