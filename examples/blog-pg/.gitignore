@@ -12,13 +12,5 @@ node_modules
 *.log
 tmp/
 .vfy/
-# Windows reserved-name junk a stray shell redirect can create
-nul
-_nul
 # captured sessions / local credentials
 cookies.txt
-# release tarballs and design sources
-*.tar.gz
-*.psd
-# prebuilt binaries
-*.exe
