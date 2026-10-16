@@ -253,7 +253,8 @@ async function loadServer(): Promise<any> {
 }
 
 async function build(): Promise<void> {
-  const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR);
+  const minify = !devMode && !argv.includes('--no-minify');
+  const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR, { minify });
   await prunePrerendered(OUT_DIR);
   setBundleMode(bundle);
   const skipped = await prerender(routes);
@@ -1761,4 +1762,4 @@ else if (cmd === 'serve') void serve().catch(reportFailure);
 else if (cmd === 'new') void scaffold().catch(reportFailure);
 else if (cmd === 'check') void check().catch(reportFailure);
 else if (cmd === 'prompt') console.log(AI_PROMPT);
-else console.log('Usage: rosefn dev|build|preview|serve|new|check|prompt [dir] [--json] [--static]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; `new <name> [--template blog|api|admin|site]` scaffolds a project)');
+else console.log('Usage: rosefn dev|build|preview|serve|new|check|prompt [dir] [--json] [--static] [--no-minify]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; `new <name> [--template blog|api|admin|site]` scaffolds a project)');

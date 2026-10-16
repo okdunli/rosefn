@@ -3732,7 +3732,8 @@ for (const el of document.querySelectorAll('[data-rosefn]')) {
 
 let __buildSeq = 0;
 
-export async function buildProject(root: string, outDir: string): Promise<{ routes: RouteInfo[]; bundle: string; config: RosefnConfig }> {
+export async function buildProject(root: string, outDir: string, opts: { minify?: boolean } = {}): Promise<{ routes: RouteInfo[]; bundle: string; config: RosefnConfig }> {
+  const minify = opts.minify !== false;
   await fs.promises.mkdir(outDir, { recursive: true });
 
   const stale = (await fs.promises.readdir(outDir)).filter((f) =>
@@ -3910,6 +3911,7 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
       js: "import { createRequire } from 'node:module'; import { fileURLToPath as __f2p } from 'node:url'; import { dirname as __dn } from 'node:path'; const require = createRequire(import.meta.url); const __filename = __f2p(import.meta.url); const __dirname = __dn(__filename);"
     },
     ...TS_LOADER,
+    ...(minify ? { minify: true, keepNames: true } : {}),
   });
   runtimeBuild.catch(() => {});
   prodBuild.catch(() => {});
@@ -4906,6 +4908,7 @@ export { installContextStore };
     platform: 'node',
     write: true,
     ...TS_LOADER,
+    ...(minify ? { minify: true, keepNames: true } : {}),
   });
   bundleBuilds.catch(() => {}); // an esbuild failure in the window before the await below must surface there, not as a fatal unhandled rejection
   const clientImports = split ? '' : compiled

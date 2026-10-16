@@ -972,6 +972,11 @@ assert(!/Cannot access|before initialization/.test(tdzBuilt.err), 'the build rep
 const tdzHtml = fs.readFileSync(path.join(tdzDir, 'dist', 'index.html'), 'utf8');
 assert(!/render failed/i.test(tdzHtml), 'the page is not the error page');
 assert(/<p><!--⟦m:0⟧-->1<\/p>/.test(tdzHtml), 'the top-level read renders the state value (declaration first, read after)');
+// The textual assertions below read compiler output: minification renames
+// locals, so they run against a --no-minify build (the functional checks
+// above already proved the minified bundle renders identically).
+const tdzDebug = await run(['build', '--no-minify'], tdzDir);
+assert(tdzDebug.code === 0, `the same page builds unminified (stderr: ${tdzDebug.err.slice(0, 200)})`);
 const tdzServer = fs.readFileSync(path.join(tdzDir, 'dist', 'server.js'), 'utf8');
 const declAt = tdzServer.indexOf('const [st, setSt] = state("st"');
 const readAt = tdzServer.indexOf('const counts = st().counts');
@@ -996,7 +1001,7 @@ fs.writeFileSync(path.join(tdzDir, 'src', 'pages', 'nested.rose'), `<script>
 </script>
 <p>{n()}</p>
 `);
-const nestedBuilt = await run(['build'], tdzDir);
+const nestedBuilt = await run(['build', '--no-minify'], tdzDir);
 assert(nestedBuilt.code === 0, `a declaration inside onMount still builds (stderr: ${nestedBuilt.err.slice(0, 200)})`);
 const nestedHtml = fs.readFileSync(path.join(tdzDir, 'dist', 'nested', 'index.html'), 'utf8');
 assert(/<p><!--⟦m:0⟧-->0<\/p>/.test(nestedHtml), 'the page with the nested declaration renders');
