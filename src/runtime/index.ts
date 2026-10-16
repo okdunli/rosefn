@@ -1438,6 +1438,12 @@ export function setRequestQuery(q: Record<string, string>): void {
   requestQuery = q;
 }
 
+/** Read the current per-request query (the SWR background refresh snapshots it so a
+ *  concurrent request's setRequestQuery cannot leak the wrong query into a cached refresh). */
+export function getRequestQuery(): Record<string, string> {
+  return requestQuery;
+}
+
 /** The query of the route a prefetch is rendering, or null outside one. */
 export function setPrefetchOverride(q: Record<string, string> | null): void {
   prefetchOverride = q;

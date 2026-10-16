@@ -4162,7 +4162,7 @@ ${serverImports}
 import { renderMarkdown } from './content-md.ts';
 ${appUsesAuth ? "import crypto from 'node:crypto';" : "// no route references __rosespanAuth: the node:crypto auth helpers are omitted, keeping the bundle edge-loadable"}
 ${appUsesNet ? "import * as __rosespanDgram from 'node:dgram';\nimport * as __rosespanNet from 'node:net';" : "// no route opens a network listener ($udp/$tcp/$listen): the node:dgram/node:net imports are omitted, keeping the bundle edge-loadable"}
-import { setState, persistState, clearRequestState, isolateRender, serializeState, resetRequestContext, installContextStore, setRequestQuery, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta, esc, __startNetwork, __stopNetwork, $udp, $tcp, $listen } from './runtime.js';
+import { setState, persistState, clearRequestState, isolateRender, serializeState, resetRequestContext, installContextStore, setRequestQuery, getRequestQuery, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta, esc, __startNetwork, __stopNetwork, $udp, $tcp, $listen } from './runtime.js';
 export { __startNetwork, __stopNetwork };
 ${runtimePlugins.length > 0
     ? `import { hooks as __pluginHooks, hasRequestHooks as __hasRequestHooks, hasResponseHooks as __hasResponseHooks } from './plugins.js';`
@@ -4511,15 +4511,29 @@ export async function renderPageCached(pathname: string, cookieHeader: string, s
   // Stale-while-revalidate: an EXPIRED entry still answers instantly while one background render refreshes it - the TTL boundary never spikes.
   if (hit && !hit.refreshing) {
     hit.refreshing = true;
+    // BUG.md A: this refresh runs AFTER the live response returned, so the module-global
+    // requestQuery may already belong to a later request. Re-seed it from THIS entry's
+    // search and restore the snapshot afterward, so the cached refresh reflects this query.
+    const __q: Record<string, string> = {};
+    new URLSearchParams(search || '').forEach((v, k) => { __q[k] = v; });
+    const __prevQ = getRequestQuery();
+    setRequestQuery(__q);
     renderPage(pathname).then((fresh: any) => {
+      setRequestQuery(__prevQ);
       if (fresh.status === 200 && !fresh.redirect) {
         __dynCache.set(key, { page: fresh, expires: Date.now() + cfg.seconds * 1000 });
       } else {
         __dynCache.delete(key);
       }
-    }).catch(() => { __dynCache.delete(key); });
+    }).catch(() => { setRequestQuery(__prevQ); __dynCache.delete(key); });
     return hit.page;
   }
+  // Miss: render with this request's query. The caller (edge/cli) already seeded
+  // requestQuery; re-seed from the key's search so the cached entry stays self-consistent
+  // even if a concurrent request overwrote the global during the await.
+  const __q0: Record<string, string> = {};
+  new URLSearchParams(search || '').forEach((v, k) => { __q0[k] = v; });
+  setRequestQuery(__q0);
   const page = await renderPage(pathname);
   if (page.status === 200 && !page.redirect) {
     __dynCache.set(key, { page, expires: Date.now() + cfg.seconds * 1000 });
