@@ -1,5 +1,5 @@
 /**
- * rosefn Go single-binary server test.
+ * rosespan Go single-binary server test.
  *
  * Builds the Go binary (which embeds dist/), runs it, and verifies:
  *   1. prerendered static routes serve the self-contained one-request document
@@ -53,7 +53,7 @@ const assert = (cond, msg) => {
   console.log(`ok - ${msg}`);
 };
 
-const binName = process.platform === 'win32' ? 'rosefn-server-go.exe' : 'rosefn-server-go';
+const binName = process.platform === 'win32' ? 'rosespan-server-go.exe' : 'rosespan-server-go';
 execSync(`go build -o ${binName} .`, { stdio: 'inherit' });
 assert(true, 'go build produced a single binary');
 
@@ -85,7 +85,7 @@ try {
   assert(home.headers.get('content-type') === 'text/html; charset=utf-8', 'html content-type set');
   const homeHtml = await home.text();
   const stripMarkers = (h) => h.replace(/<!--\u27e6[^>]*-->/g, '');
-  assert(stripMarkers(homeHtml).includes('Welcome to Rosefn'), 'prerendered home content served');
+  assert(stripMarkers(homeHtml).includes('Welcome to RoseSpan'), 'prerendered home content served');
   const refs = [...homeHtml.matchAll(/<(?:script|link|img)[^>]*(?:src|href)="([^"]+)"/g)]
     .map((m) => m[1])
     .filter((u) => !u.startsWith('#') && !u.startsWith('data:'));
@@ -110,9 +110,9 @@ try {
 
   const about = await fetch(BASE + '/about');
   const aboutHtml = await about.text();
-  assert(aboutHtml.includes('About Rosefn'), 'prerendered /about served');
+  assert(aboutHtml.includes('About RoseSpan'), 'prerendered /about served');
 
-  for (const [id, title] of [['1', 'Hello Rosefn'], ['2', 'Zero-hydration magic']]) {
+  for (const [id, title] of [['1', 'Hello RoseSpan'], ['2', 'Zero-hydration magic']]) {
     const res = await fetch(BASE + `/blog/${id}`);
     const html = await res.text();
     assert(res.status === 200, `GET /blog/${id} -> 200`);
@@ -142,7 +142,7 @@ try {
   const blog3 = await spaRender('/blog/3');
   assert(blog3.body.textContent.includes('Blog Post #3'), 'unlisted /blog/3 client-rendered via SPA fallback');
   assert(blog3.body.textContent.includes('Not found'), '$data falls back to the not-found post on the client');
-  assert(!blog3.body.textContent.includes('Welcome to Rosefn'), 'mismatched SSR DOM replaced, not adopted');
+  assert(!blog3.body.textContent.includes('Welcome to RoseSpan'), 'mismatched SSR DOM replaced, not adopted');
 
   const missingDoc = await spaRender('/nope');
   assert(missingDoc.body.textContent.includes('404'), 'unknown route renders the client-side 404 page');
@@ -170,7 +170,7 @@ try {
   assert(api.status === 200, 'GET /api/hello -> 200 from the binary');
   assert(api.headers.get('content-type') === 'application/json; charset=utf-8', 'the baked api body is served as json');
   const apiJson = await api.json();
-  assert(apiJson.hello === 'Rosefn', 'the baked api body is the build-time GET response');
+  assert(apiJson.hello === 'RoseSpan', 'the baked api body is the build-time GET response');
   const apiMissing = await fetch(BASE + '/api/nope');
   assert(apiMissing.status === 404, 'unbaked api route -> 404 from the binary');
   assert(apiMissing.headers.get('content-type') === 'application/json; charset=utf-8', 'the api 404 is json, not the html shell');
@@ -182,8 +182,8 @@ try {
   assert(gardenRes.status === 200, 'GET /garden -> 200 from the binary');
   const garden = await gardenRes.text();
   assert(garden.includes('The Garden') && garden.includes('in full bloom'), 'the no-JS route serves its content from the binary');
-  assert(!garden.includes('__rosefn_state'), 'the binary-served no-JS document has no state script');
-  assert(!garden.includes('__rosefn_handlers'), 'the binary-served no-JS document has no client bundle');
+  assert(!garden.includes('__rosespan_state'), 'the binary-served no-JS document has no state script');
+  assert(!garden.includes('__rosespan_handlers'), 'the binary-served no-JS document has no client bundle');
   assert((garden.match(/<script/g) || []).length === 0, 'the binary-served no-JS document contains zero script tags');
   assert(garden.length < 6000, `the no-JS baked document is tiny (${garden.length} bytes raw)`);
   const fallbackDoc = await (await fetch(BASE + '/')).text();
@@ -214,7 +214,7 @@ try {
   assert((await arPack.text()).includes('about.plural'), 'the pack file carries the Arabic dictionary');
   for (const p of ['/', '/about']) {
     const doc = await (await fetch(BASE + p)).text();
-    assert(doc.includes('__rosefn_state') && doc.includes('__rosefn_handlers'), `${p} is baked with the state script and the bundle`);
+    assert(doc.includes('__rosespan_state') && doc.includes('__rosespan_handlers'), `${p} is baked with the state script and the bundle`);
   }
   const signOnBinary = await (await fetch(BASE + '/sign')).text();
   const homeOnBinary = await (await fetch(BASE + '/')).text();
@@ -263,29 +263,29 @@ try {
   assert(condStale.status === 200 && condStale.body.length > 0, 'a stale ETag re-transfers the document');
   const brDirect = await rawGet('/index.html.br');
   assert(brDirect.headers['content-encoding'] !== 'br', 'a direct request for a .br sibling is not served as brotli');
-  assert(stripMarkers(brDirect.body.toString()).includes('Welcome to Rosefn'), 'a direct request for a .br sibling answers the real page');
+  assert(stripMarkers(brDirect.body.toString()).includes('Welcome to RoseSpan'), 'a direct request for a .br sibling answers the real page');
 
   const metrics = await fetch(BASE + '/metrics');
   assert(metrics.status === 200, 'GET /metrics -> 200');
   assert(metrics.headers.get('content-type') === 'text/plain; version=0.0.4; charset=utf-8', '/metrics answers the Prometheus text format');
   const metricAt = async () => Object.fromEntries(
-    [...(await (await fetch(BASE + '/metrics')).text()).matchAll(/^(rosefn_\w+)(?:\{code="(\d+)"\})? ([\d.]+)$/gm)]
+    [...(await (await fetch(BASE + '/metrics')).text()).matchAll(/^(rosespan_\w+)(?:\{code="(\d+)"\})? ([\d.]+)$/gm)]
       .map((m) => [m[2] ? `${m[1]}{${m[2]}}` : m[1], Number(m[3])]));
   const m1 = await metricAt();
-  assert('rosefn_uptime_seconds' in m1 && m1.rosefn_uptime_seconds >= 0, 'the scrape carries uptime');
-  assert('rosefn_http_request_duration_seconds_sum' in m1 && 'rosefn_http_request_duration_seconds_count' in m1, 'the scrape carries a duration sum/count pair');
-  assert(m1['rosefn_http_requests_in_flight'] >= 1 && m1['rosefn_http_requests_in_flight'] <= 2, 'the in-flight gauge counts the scrape itself and nothing more');
-  assert((m1['rosefn_http_requests_total{200}'] ?? 0) > 0, 'the counter saw the 200s this suite already made');
+  assert('rosespan_uptime_seconds' in m1 && m1.rosespan_uptime_seconds >= 0, 'the scrape carries uptime');
+  assert('rosespan_http_request_duration_seconds_sum' in m1 && 'rosespan_http_request_duration_seconds_count' in m1, 'the scrape carries a duration sum/count pair');
+  assert(m1['rosespan_http_requests_in_flight'] >= 1 && m1['rosespan_http_requests_in_flight'] <= 2, 'the in-flight gauge counts the scrape itself and nothing more');
+  assert((m1['rosespan_http_requests_total{200}'] ?? 0) > 0, 'the counter saw the 200s this suite already made');
   for (let i = 0; i < 3; i++) await fetch(BASE + '/');
   const m2 = await metricAt();
-  assert(m2['rosefn_http_requests_total{200}'] >= m1['rosefn_http_requests_total{200}'] + 3, 'the 200 counter advances with real traffic');
-  assert(m2['rosefn_http_request_duration_seconds_count'] > m1['rosefn_http_request_duration_seconds_count'], 'the request count advances with real traffic');
+  assert(m2['rosespan_http_requests_total{200}'] >= m1['rosespan_http_requests_total{200}'] + 3, 'the 200 counter advances with real traffic');
+  assert(m2['rosespan_http_request_duration_seconds_count'] > m1['rosespan_http_request_duration_seconds_count'], 'the request count advances with real traffic');
   const condRes = await rawGet('/', { 'accept-encoding': 'br', 'if-none-match': etag });
   assert(condRes.status === 304, 'the conditional request still answers 304');
   const m3 = await metricAt();
-  assert((m3['rosefn_http_requests_total{304}'] ?? 0) >= 1, 'the 304 is counted under its own status code');
+  assert((m3['rosespan_http_requests_total{304}'] ?? 0) >= 1, 'the 304 is counted under its own status code');
   const m4 = await metricAt();
-  assert(m4['rosefn_http_request_duration_seconds_count'] > m3['rosefn_http_request_duration_seconds_count'], '/metrics counts itself like any other request');
+  assert(m4['rosespan_http_request_duration_seconds_count'] > m3['rosespan_http_request_duration_seconds_count'], '/metrics counts itself like any other request');
 
   const deadPort = await freePort(8153, 8162);
   const logPort = await freePort(8133, 8142);
@@ -313,7 +313,7 @@ try {
     const postLine = lines.find((l) => l.includes(' POST /api/like 502 '));
     assert(!!postLine && postLine.endsWith('via=upstream'), `a proxied request is marked in the access log: ${postLine}`);
     const errText = Buffer.concat(errs).toString();
-    assert(errText.includes('Rosefn error: upstream') && errText.includes('POST /api/like'), 'the dead upstream is named in the error log on stderr');
+    assert(errText.includes('RoseSpan error: upstream') && errText.includes('POST /api/like'), 'the dead upstream is named in the error log on stderr');
   } finally {
     logBin.kill();
   }
@@ -346,13 +346,13 @@ try {
     const apiLive = await (await fetch(hybBase + '/api/nope')).json();
     assert(apiLive.upstream === true, 'an unbaked /api route is proxied to the live handler');
     const apiBaked = await (await fetch(hybBase + '/api/hello')).json();
-    assert(apiBaked.hello === 'Rosefn' && apiBaked.upstream === undefined, 'a baked api body still answers locally (the proxy never shadows the build)');
+    assert(apiBaked.hello === 'RoseSpan' && apiBaked.upstream === undefined, 'a baked api body still answers locally (the proxy never shadows the build)');
     const hybHome = await (await fetch(hybBase + '/')).text();
-    assert(stripMarkers(hybHome).includes('Welcome to Rosefn') && !hybHome.includes('"upstream":true'), 'the static document is still served locally in hybrid mode');
+    assert(stripMarkers(hybHome).includes('Welcome to RoseSpan') && !hybHome.includes('"upstream":true'), 'the static document is still served locally in hybrid mode');
     const hybBlog = await (await fetch(hybBase + '/blog/1')).text();
     assert(stripMarkers(hybBlog).includes('Blog Post #1'), 'a prerendered content route is still served locally in hybrid mode');
     const hybSpa = await fetch(hybBase + '/blog/3');
-    assert(hybSpa.status === 200 && stripMarkers(await hybSpa.text()).includes('Welcome to Rosefn'), 'the SPA fallback is still served locally in hybrid mode');
+    assert(hybSpa.status === 200 && stripMarkers(await hybSpa.text()).includes('Welcome to RoseSpan'), 'the SPA fallback is still served locally in hybrid mode');
   } finally {
     hybBin.kill();
     dyn.close();

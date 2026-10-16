@@ -1,5 +1,5 @@
 /**
- * rosefn edge adapter test - the Web-standard fetch handler on Node 22's
+ * rosespan edge adapter test - the Web-standard fetch handler on Node 22's
  * native Request/Response: same one-request guarantee, same zero-hydration
  * document, 404 status codes, and no Node built-ins in the server bundle.
  *
@@ -27,25 +27,25 @@ assert(res.status === 200, 'GET / -> 200');
 assert(res.headers.get('content-type') === 'text/html; charset=utf-8', 'content-type header set');
 const html = await res.text();
 assert(html.includes('<div id="app">'), 'document has app container');
-assert(html.includes('__rosefn_state'), 'state serialized into document');
+assert(html.includes('__rosespan_state'), 'state serialized into document');
 const externalRefs = [...html.matchAll(/<(?:script|link)[^>]*(?:src|href)="([^"]+)"/g)]
   .map((m) => m[1])
   .filter((u) => !u.startsWith('#') && !u.startsWith('data:'));
 assert(externalRefs.length === 0, `zero external asset refs (one request) - got ${externalRefs.length}`);
 
 const styleBlocks = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join('');
-assert(styleBlocks.includes('[data-rosefn-c="index"] .rcard'), 'the edge document inlines the scoped index rules');
-assert(styleBlocks.includes('[data-rosefn-c="about"] .rcard'), 'the edge document inlines the scoped about rules');
+assert(styleBlocks.includes('[data-rosespan-c="index"] .rcard'), 'the edge document inlines the scoped index rules');
+assert(styleBlocks.includes('[data-rosespan-c="about"] .rcard'), 'the edge document inlines the scoped about rules');
 assert(!/<link[^>]+stylesheet/i.test(html), 'the edge document requests zero stylesheets');
-assert(html.includes('data-rosefn-c="index"'), 'the styled component root carries its scope attribute');
+assert(html.includes('data-rosespan-c="index"'), 'the styled component root carries its scope attribute');
 
 const about = await handle(new Request('http://localhost/about'));
 assert(about.status === 200, 'GET /about -> 200');
 const aboutHtml = await about.text();
-const stateJson = aboutHtml.match(/<script type="application\/json" id="__rosefn_state">([\s\S]*?)<\/script>/)?.[1];
+const stateJson = aboutHtml.match(/<script type="application\/json" id="__rosespan_state">([\s\S]*?)<\/script>/)?.[1];
 assert(!!stateJson, 'state script present in document');
 const aboutState = JSON.parse(stateJson!);
-assert(aboutState.title === 'About Rosefn', '$data + $state serialized for /about');
+assert(aboutState.title === 'About RoseSpan', '$data + $state serialized for /about');
 assert(Array.isArray(aboutState.facts) && aboutState.facts.length === 4, 'server $data array serialized');
 
 assert(aboutHtml.includes('data-on-click="reload"'), 'the about page serves the refresh button binding');
@@ -72,7 +72,7 @@ const broken = await handle(new Request('http://localhost/broken'));
 assert(broken.status === 500, 'a throwing route -> 500');
 const brokenHtml = await broken.text();
 assert(brokenHtml.includes('This rose pricked itself'), 'the 500 response is the custom error page');
-const brokenState = brokenHtml.match(/<script type="application\/json" id="__rosefn_state">([\s\S]*?)<\/script>/)?.[1] ?? '';
+const brokenState = brokenHtml.match(/<script type="application\/json" id="__rosespan_state">([\s\S]*?)<\/script>/)?.[1] ?? '';
 assert(!brokenState.includes('data source is down'), 'the serialized state carries no server error text');
 
 const streamed = await handle(new Request('http://localhost/admin', { headers: { cookie: 'session=Ada' } }));
@@ -92,9 +92,9 @@ for (;;) {
 }
 const streamDoc = firstChunk + streamRest;
 assert(streamDoc.includes('Hello, Ada'), 'the stream closes with the rendered route');
-assert(streamDoc.includes('__rosefn_state'), 'the stream carries the state script');
+assert(streamDoc.includes('__rosespan_state'), 'the stream carries the state script');
 assert(streamDoc.trimEnd().endsWith('</html>'), 'the streamed document is complete');
-const streamState = JSON.parse(streamDoc.match(/id="__rosefn_state">([\s\S]*?)<\/script>/)![1]);
+const streamState = JSON.parse(streamDoc.match(/id="__rosespan_state">([\s\S]*?)<\/script>/)![1]);
 assert(streamState.__route === '/admin', 'the streamed state names the requested route');
 const streamRefs = [...streamDoc.matchAll(/<(?:script|link|img)[^>]*(?:src|href)="([^"]+)"/g)]
   .map((m) => m[1])
@@ -103,7 +103,7 @@ assert(streamRefs.length === 0, `the streamed document needs zero extra requests
 const blog42 = await handle(new Request('http://localhost/blog/42'));
 const blog42Html = await blog42.text();
 assert(blog42.status === 200, 'GET /blog/42 -> 200 (buffered zero-JS)');
-assert(blog42Html.includes('<title>Not found - Rosefn blog</title>'), 'the buffered zero-JS document carries its full <head>');
+assert(blog42Html.includes('<title>Not found - RoseSpan blog</title>'), 'the buffered zero-JS document carries its full <head>');
 assert(blog42Html.includes('Blog Post #'), 'the buffered zero-JS document carries the route content');
 assert((blog42Html.match(/<script/g) || []).length === 0, 'the buffered zero-JS document contains zero script tags');
 
@@ -113,13 +113,13 @@ const likePost1 = await handle(new Request('http://localhost/', {
   headers: { 'content-type': 'application/x-www-form-urlencoded' },
 }));
 assert(likePost1.status === 200, 'POST __action=like -> 200');
-const likeState1 = JSON.parse((await likePost1.text()).match(/id="__rosefn_state">([\s\S]*?)<\/script>/)![1]);
+const likeState1 = JSON.parse((await likePost1.text()).match(/id="__rosespan_state">([\s\S]*?)<\/script>/)![1]);
 assert(likeState1.likes === 42, 'the edge POST ran the like action (41 -> 42)');
 const likeForm = new FormData();
 likeForm.append('__action', 'like');
 const likePost2 = await handle(new Request('http://localhost/', { method: 'POST', body: likeForm }));
 assert(likePost2.status === 200, 'multipart POST __action=like -> 200');
-const likeState2 = JSON.parse((await likePost2.text()).match(/id="__rosefn_state">([\s\S]*?)<\/script>/)![1]);
+const likeState2 = JSON.parse((await likePost2.text()).match(/id="__rosespan_state">([\s\S]*?)<\/script>/)![1]);
 assert(likeState2.likes === 43, 'the multipart POST ran the same action (42 -> 43)');
 
 const serverSrc = readFileSync('dist/server.js', 'utf-8');
@@ -128,7 +128,7 @@ assert(!/require\(|from ['"]node:|from ['"]fs['"]/.test(serverSrc), 'server bund
 const apiGet = await handle(new Request('http://localhost/api/hello'));
 assert(apiGet.status === 200, 'GET /api/hello -> 200 at the edge');
 assert(apiGet.headers.get('content-type') === 'application/json', 'the edge api response is application/json');
-assert(JSON.parse(await apiGet.text()).hello === 'Rosefn', 'the edge api GET body is the handler object');
+assert(JSON.parse(await apiGet.text()).hello === 'RoseSpan', 'the edge api GET body is the handler object');
 const apiForm = new FormData();
 apiForm.append('name', 'ada');
 const apiPost = await handle(new Request('http://localhost/api/hello', { method: 'POST', body: apiForm }));
@@ -165,10 +165,10 @@ const garden = await handle(new Request('http://localhost/garden'));
 assert(garden.status === 200, 'GET /garden -> 200 at the edge');
 const gardenDoc = await garden.text();
 assert(gardenDoc.includes('The Garden') && gardenDoc.includes('in full bloom'), 'the no-JS route renders its content at the edge');
-assert(!gardenDoc.includes('__rosefn_state'), 'the edge no-JS document has no state script');
-assert(!gardenDoc.includes('__rosefn_handlers'), 'the edge no-JS document has no client bundle');
+assert(!gardenDoc.includes('__rosespan_state'), 'the edge no-JS document has no state script');
+assert(!gardenDoc.includes('__rosespan_handlers'), 'the edge no-JS document has no client bundle');
 assert((gardenDoc.match(/<script/g) || []).length === 0, 'the edge no-JS document contains zero script tags');
-assert(gardenDoc.includes('<title>The Garden - Rosefn</title>'), 'the edge no-JS document keeps the route <title> (rendered live, buffered, complete head)');
+assert(gardenDoc.includes('<title>The Garden - RoseSpan</title>'), 'the edge no-JS document keeps the route <title> (rendered live, buffered, complete head)');
 assert(Array.isArray((edgeMod as any).noJsRoutes) && (edgeMod as any).noJsRoutes.includes('/garden'), 'the no-JS route list ships in the server bundle');
 assert((edgeMod as any).noJsRoutes.includes('/blog/:id'), 'content routes are auto zero-JS with no export at all');
 assert((edgeMod as any).isNoJs('/garden') === true && (edgeMod as any).isNoJs('/blog/42') === true, 'isNoJs() matches the opted-out and the auto-detected routes');
@@ -192,7 +192,7 @@ const edgeNonceA = /'nonce-([^']+)'/.exec(edgeCspA)?.[1];
 assert(!!edgeNonceA, 'the edge nonce route answers a nonce policy');
 assert(edgeCspA.includes("'strict-dynamic'") && !edgeCspA.includes('sha256'), 'the edge nonce policy is nonce + strict-dynamic, no hash');
 assert(edgeSignAHtml.match(/<script type="module"([^>]*)>/)![1].includes(`nonce="${edgeNonceA}"`), 'the edge document tag carries the header nonce');
-assert(edgeSignAHtml.includes('<script type="application/json" id="__rosefn_state">'), 'the edge state script stays untagged');
+assert(edgeSignAHtml.includes('<script type="application/json" id="__rosespan_state">'), 'the edge state script stays untagged');
 const edgeSignB = await handle(new Request('http://localhost/sign'));
 const edgeNonceB = /'nonce-([^']+)'/.exec(edgeSignB.headers.get('content-security-policy')!)![1];
 assert(edgeNonceB !== edgeNonceA, 'every edge response mints a fresh nonce');
@@ -228,7 +228,7 @@ assert(edgeFr.status === 404, 'an unknown locale answers 404 at the edge');
 const edgeNeg = await handle(new Request('http://localhost/about', { headers: { 'accept-language': 'zh' } }));
 assert(edgeNeg.status === 302 && edgeNeg.headers.get('location') === '/zh/about', 'the edge middleware negotiates Accept-Language');
 
-const likeStateNow = async () => JSON.parse((await (await handle(new Request('http://localhost/'))).text()).match(/id="__rosefn_state">([\s\S]*?)<\/script>/)![1]).likes as number;
+const likeStateNow = async () => JSON.parse((await (await handle(new Request('http://localhost/'))).text()).match(/id="__rosespan_state">([\s\S]*?)<\/script>/)![1]).likes as number;
 const forged = await handle(new Request('http://localhost/sign', {
   method: 'POST',
   body: new URLSearchParams({ name: 'Forced' }),
@@ -261,7 +261,7 @@ const likePass = async (headers: Record<string, string>, msg: string) => {
     body: new URLSearchParams({ __action: 'like' }),
     headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers },
   }));
-  const after = JSON.parse((await r.text()).match(/id="__rosefn_state">([\s\S]*?)<\/script>/)![1]).likes as number;
+  const after = JSON.parse((await r.text()).match(/id="__rosespan_state">([\s\S]*?)<\/script>/)![1]).likes as number;
   assert(r.status === 200 && after === before + 1, msg);
 };
 await likePass({ origin: 'http://localhost' }, "a same-origin POST (the browser's own origin) runs the action");

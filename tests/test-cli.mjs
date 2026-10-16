@@ -1,9 +1,9 @@
 ﻿/**
  * test-cli.mjs - the CLI builds ANY project
  *
- * The gate that makes rosefn a framework instead of a demo: `rosefn
+ * The gate that makes rosespan a framework instead of a demo: `rosespan
  * build [dir]` compiles a project that is not this repository, defaults to
- * the current directory, reads that project's rosefn.config.js, and fails
+ * the current directory, reads that project's rosespan.config.js, and fails
  * loudly instead of silently emitting an empty dist/.
  *
  * Run: node tests/test-cli.mjs   (needs the repo's node_modules; run from the repo root)
@@ -41,13 +41,13 @@ function run(args, cwd) {
   });
 }
 
-const tmp = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'rosefn-cli-'));
+const tmp = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'rosespan-cli-'));
 const app = path.join(tmp, 'myapp');
 fs.cpSync(path.join(REPO, 'example'), app, { recursive: true });
-assert(fs.existsSync(path.join(app, 'rosefn.config.js')), 'the copied project carries its own rosefn.config.js');
+assert(fs.existsSync(path.join(app, 'rosespan.config.js')), 'the copied project carries its own rosespan.config.js');
 
 const built = await run(['build', app], REPO);
-assert(built.code === 0, `rosefn build <dir> exits 0 on a foreign project (stderr: ${built.err.slice(0, 200)})`);
+assert(built.code === 0, `rosespan build <dir> exits 0 on a foreign project (stderr: ${built.err.slice(0, 200)})`);
 const home = path.join(REPO, 'dist', 'index.html');
 assert(fs.existsSync(home), 'the build wrote dist/index.html');
 assert(fs.readFileSync(home, 'utf-8').includes('Guestbook'), 'the foreign project really rendered (its home page is in dist/)');
@@ -55,15 +55,15 @@ assert(fs.readFileSync(home, 'utf-8').includes('Guestbook'), 'the foreign projec
 const garden = path.join(REPO, 'dist', 'garden', 'index.html');
 assert(fs.existsSync(garden), 'the foreign project prerendered its content routes');
 const gardenHtml = fs.readFileSync(garden, 'utf-8');
-assert(gardenHtml.includes('\u{1F339}') && !gardenHtml.includes('@thorn'), 'the project\'s own rosefn.config.js plugin transformed the build');
+assert(gardenHtml.includes('\u{1F339}') && !gardenHtml.includes('@thorn'), 'the project\'s own rosespan.config.js plugin transformed the build');
 assert(fs.readFileSync(path.join(app, 'src', 'pages', 'garden.rose'), 'utf-8').includes('@thorn'), 'the source on disk keeps its token (the transform never mutated it)');
 
 const cwdBuilt = await run(['build'], app);
-assert(cwdBuilt.code === 0, 'rosefn build with no dir exits 0');
+assert(cwdBuilt.code === 0, 'rosespan build with no dir exits 0');
 assert(fs.existsSync(path.join(app, 'dist', 'index.html')), 'the default project dir is the cwd (dist landed inside it)');
 
 const parentBuilt = await run(['build', app], tmp);
-assert(parentBuilt.code === 0, 'rosefn build <dir> works from any cwd');
+assert(parentBuilt.code === 0, 'rosespan build <dir> works from any cwd');
 assert(fs.existsSync(path.join(tmp, 'dist', 'index.html')), 'the output lands in ./dist of the cwd, wherever the project lives');
 
 const bare = path.join(tmp, 'bare');
@@ -72,32 +72,32 @@ const failed = await run(['build', bare], REPO);
 assert(failed.code !== 0, 'a project with no pages fails the build (non-zero exit)');
 assert(failed.err.includes('no .rose pages found'), 'the failure says what is wrong');
 assert(failed.err.includes(path.join(bare, 'src', 'pages')), 'the failure names the directory it looked in');
-assert(failed.err.includes('rosefn build <dir>'), 'the failure names the fix');
+assert(failed.err.includes('rosespan build <dir>'), 'the failure names the fix');
 
 const usage = await run([], REPO);
 assert(usage.out.includes('[dir]') && usage.out.includes('current directory'), 'the usage line documents the dir argument and its default');
 
 const newUsage = await run(['new'], REPO);
-assert(newUsage.out.includes('rosefn new <name>'), 'rosefn new with no name prints its usage');
+assert(newUsage.out.includes('rosespan new <name>'), 'rosespan new with no name prints its usage');
 const scaffoldDir = path.join(tmp, 'my-app');
 const scaffolded = await run(['new', scaffoldDir], REPO);
-assert(scaffolded.code === 0, 'rosefn new <name> exits 0');
+assert(scaffolded.code === 0, 'rosespan new <name> exits 0');
 assert(fs.existsSync(path.join(scaffoldDir, 'src', 'pages', 'index.rose')), 'the scaffold writes src/pages/index.rose');
-assert(JSON.parse(fs.readFileSync(path.join(scaffoldDir, 'package.json'), 'utf8')).dependencies.rosefn.startsWith('^'), 'the scaffold depends on the rosefn package');
+assert(JSON.parse(fs.readFileSync(path.join(scaffoldDir, 'package.json'), 'utf8')).dependencies.rosespan.startsWith('^'), 'the scaffold depends on the rosespan package');
 const again = await run(['new', scaffoldDir], REPO);
-assert(again.code !== 0 && again.err.includes('already exists'), 'rosefn new refuses to overwrite an existing directory');
+assert(again.code !== 0 && again.err.includes('already exists'), 'rosespan new refuses to overwrite an existing directory');
 const scaffoldBuilt = await run(['build'], scaffoldDir);
 assert(scaffoldBuilt.code === 0, 'the scaffolded project builds from its own directory');
 const scaffoldHtml = fs.readFileSync(path.join(scaffoldDir, 'dist', 'index.html'), 'utf-8');
 assert(scaffoldHtml.includes('Increment'), 'the scaffolded document carries its page');
 assert((scaffoldHtml.match(/<script/g) || []).length === 2, 'the scaffolded page ships the state script and the inlined bundle (its click handler needs the client)');
-assert(fs.existsSync(path.join(scaffoldDir, 'rosefn-env.d.ts')), 'the scaffold carries the env reference');
-assert(fs.readFileSync(path.join(scaffoldDir, 'rosefn-env.d.ts'), 'utf8').includes('reference types="rosefn"'), 'the env reference points at the package');
+assert(fs.existsSync(path.join(scaffoldDir, 'rosespan-env.d.ts')), 'the scaffold carries the env reference');
+assert(fs.readFileSync(path.join(scaffoldDir, 'rosespan-env.d.ts'), 'utf8').includes('reference types="rosespan"'), 'the env reference points at the package');
 const tsconfig = JSON.parse(fs.readFileSync(path.join(scaffoldDir, 'tsconfig.json'), 'utf8'));
 assert(tsconfig.compilerOptions?.strict === true, 'the scaffold tsconfig is strict');
-assert((tsconfig.include ?? []).includes('rosefn-env.d.ts'), 'the tsconfig includes the env reference (so tsc sees the globals)');
+assert((tsconfig.include ?? []).includes('rosespan-env.d.ts'), 'the tsconfig includes the env reference (so tsc sees the globals)');
 const scaffoldPkg = JSON.parse(fs.readFileSync(path.join(scaffoldDir, 'package.json'), 'utf8'));
-assert(scaffoldPkg.scripts.check === 'rosefn check', 'the scaffold has a check script');
+assert(scaffoldPkg.scripts.check === 'rosespan check', 'the scaffold has a check script');
 assert(scaffoldPkg.devDependencies?.typescript, 'the scaffold depends on typescript (check needs the project\'s own copy)');
 
 const relBuilt = await run(['build', 'example'], REPO);
@@ -132,13 +132,13 @@ try {
     assert(!tsClient.includes(syntax), `the client bundle carries no \`${syntax}\` - the types were erased`);
   }
   const tsChecked = await run(['check'], tsDir);
-  assert(tsChecked.code === 0, `rosefn check passes on a typed project (stderr: ${tsChecked.err.slice(0, 300)})`);
+  assert(tsChecked.code === 0, `rosespan check passes on a typed project (stderr: ${tsChecked.err.slice(0, 300)})`);
   assert(tsChecked.out.includes('no errors'), 'the check says so out loud');
   writeTyped(true);
   const stillBuilds = await run(['build'], tsDir);
   assert(stillBuilds.code === 0, 'the build still succeeds with a wrong type - esbuild strips types, it does not check them');
   const tsBad = await run(['check'], tsDir);
-  assert(tsBad.code !== 0, 'rosefn check fails on a type error');
+  assert(tsBad.code !== 0, 'rosespan check fails on a type error');
   const badNamesLine = tsBad.err.includes('index.rose(7,');
   if (!badNamesLine) console.error(tsBad.err);
   assert(badNamesLine, 'the error names the file and the exact .rose line');
@@ -163,7 +163,7 @@ try {
 `);
   writeComps(false);
   const compsChecked = await run(['check'], tsDir);
-  assert(compsChecked.code === 0, `rosefn check passes with an imported .rose component (stderr: ${compsChecked.err.slice(0, 300)})`);
+  assert(compsChecked.code === 0, `rosespan check passes with an imported .rose component (stderr: ${compsChecked.err.slice(0, 300)})`);
   writeComps(true);
   const compsBad = await run(['check'], tsDir);
   assert(compsBad.code !== 0, 'a wrong prop type through a component import is a type error');
@@ -198,7 +198,7 @@ const takePort = async (fixed) => {
 
 const hooksDir = path.join(tmp, 'hooked');
 fs.mkdirSync(path.join(hooksDir, 'src', 'pages', 'api'), { recursive: true });
-fs.writeFileSync(path.join(hooksDir, 'rosefn.config.js'), `
+fs.writeFileSync(path.join(hooksDir, 'rosespan.config.js'), `
 export default [
   {
     name: 'guard',
@@ -262,7 +262,7 @@ try {
 const hookServePort = await takePort(0);
 const srv2 = spawn(process.execPath, [...TSX, 'serve'], {
   cwd: hooksDir,
-  env: { ...process.env, PORT: String(hookServePort), ROSEFN_WORKERS: '1' },
+  env: { ...process.env, PORT: String(hookServePort), ROSESPAN_WORKERS: '1' },
 });
 let hookServeOut = '';
 srv2.stdout.on('data', (c) => { hookServeOut += c; });
@@ -279,13 +279,55 @@ try {
 }
 const tOnly = path.join(tmp, 'transform-only');
 fs.mkdirSync(path.join(tOnly, 'src', 'pages'), { recursive: true });
-fs.writeFileSync(path.join(tOnly, 'rosefn.config.js'), `export default [{ name: 'marker-transform-only', transform(code) { return code; } }];\n`);
+fs.writeFileSync(path.join(tOnly, 'rosespan.config.js'), `export default [{ name: 'marker-transform-only', transform(code) { return code; } }];\n`);
 fs.writeFileSync(path.join(tOnly, 'src', 'pages', 'index.rose'), `<script>\n  let n = $state(1);\n</script>\n\n<h1>plain {n()}</h1>\n`);
 const tBuilt = await run(['build'], tOnly);
 assert(tBuilt.code === 0, 'a transform-only project builds');
 const tServer = fs.readFileSync(path.join(tOnly, 'dist', 'server.js'), 'utf8');
 assert(!tServer.includes('marker-transform-only'), 'a transform-only config is NOT bundled into the server (no runtime hook, no config import)');
 assert(tServer.includes('runRequestHooks'), 'the no-op runners are still exported, so the servers call them unconditionally');
+
+const plugCache = path.join(tmp, 'plugcache');
+fs.mkdirSync(path.join(plugCache, 'src', 'pages'), { recursive: true });
+const plugCounter = path.join(plugCache, 'calls.log');
+const plugSrc = (marker) => `import { appendFileSync } from 'node:fs';\nconst counter = ${JSON.stringify(plugCounter)};\nexport default [{ name: 'marker-cache', transform(code) { appendFileSync(counter, 'x'); return code.replaceAll('MARKER', '${marker}'); } }];\n`;
+fs.writeFileSync(path.join(plugCache, 'my-plugin.mjs'), plugSrc('PLUGINIZED'));
+fs.writeFileSync(path.join(plugCache, 'rosespan.config.js'), `export { default } from './my-plugin.mjs';\n`);
+fs.writeFileSync(path.join(plugCache, 'src', 'pages', 'index.rose'), `<p>MARKER page</p>\n`);
+const pc1 = await run(['build'], plugCache);
+assert(pc1.code === 0, `a transform-plugin project builds (stderr: ${pc1.err.slice(0, 200)})`);
+assert(fs.readFileSync(path.join(plugCache, 'dist', 'index.html'), 'utf8').includes('PLUGINIZED'), 'the plugin transform lands in the built page');
+const callsAfterCold = fs.existsSync(plugCounter) ? fs.readFileSync(plugCounter, 'utf8').length : 0;
+assert(callsAfterCold >= 1, 'the transform ran on the cold build');
+const pc2 = await run(['build'], plugCache);
+assert(pc2.code === 0, 'the transform-plugin project rebuilds');
+assert(fs.readFileSync(path.join(plugCache, 'dist', 'index.html'), 'utf8').includes('PLUGINIZED'), 'the cached result still carries the transform (no stale pre-plugin output)');
+const callsAfterWarm = fs.existsSync(plugCounter) ? fs.readFileSync(plugCounter, 'utf8').length : 0;
+assert(callsAfterWarm === callsAfterCold, 'the rebuild hit the compile cache: the transform did not run again (plugin projects are cached too)');
+fs.writeFileSync(path.join(plugCache, 'my-plugin.mjs'), plugSrc('PLUGINIZED2'));
+const pc3 = await run(['build'], plugCache);
+assert(pc3.code === 0, 'the project rebuilds after the plugin changed');
+assert(fs.readFileSync(path.join(plugCache, 'dist', 'index.html'), 'utf8').includes('PLUGINIZED2'), 'editing the plugin transform invalidates the cache (the new transform lands)');
+
+{
+  const dbDir = path.join(tmp, 'doublebuild');
+  fs.mkdirSync(path.join(dbDir, 'src', 'pages'), { recursive: true });
+  fs.writeFileSync(path.join(dbDir, 'src', 'pages', 'index.rose'), `<p>db-marker</p>\n`);
+  fs.writeFileSync(path.join(dbDir, 'src', 'pages', 'two.rose'), `<p>second page</p>\n`);
+  const dbOut = await new Promise((resolve) => {
+    const p = spawn(process.execPath, [path.join(REPO, 'node_modules/tsx/dist/cli.mjs'), path.join(REPO, 'tests', 'double-build.mts'), dbDir], { cwd: REPO });
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (c) => { out += c; });
+    p.stderr.on('data', (c) => { err += c; });
+    p.on('close', (code) => resolve({ code, out, err }));
+  });
+  assert(dbOut.code === 0, `the in-process double build runs (stderr: ${dbOut.err.slice(0, 200)})`);
+  const db = JSON.parse(dbOut.out.trim().split('\n').pop());
+  assert(db.mtimeAfterFirst > 0, 'the first build wrote the intermediates');
+  assert(db.mtimeAfterSecond === db.mtimeAfterFirst, 'the hot rebuild left unchanged intermediates untouched (no rewrite, same mtime)');
+  assert(db.serverUnchanged, 'the hot rebuild still produced the identical server bundle (the skip never serves stale bytes)');
+}
 
 const compsDir = path.join(tmp, 'comps');
 fs.mkdirSync(path.join(compsDir, 'src', 'components', 'ui'), { recursive: true });
@@ -364,12 +406,12 @@ assert(compsHome.includes('the foot sees note: ') && /the foot sees note: <!--[^
 assert(compsHome.includes('nobody yet'), 'a bare state read in the template auto-calls ({liked}, not {liked()})');
 assert(/likes <!--[^>]*-->0/.test(compsHome), 'component state is namespaced per component (two Cards do not share one signal)');
 assert(compsHome.includes('data-on-click="like"'), 'the component\'s own on:click handler is wired like any other');
-assert(compsStyles.includes('[data-rosefn-c="components/ui/Card"] .card'), 'the component\'s styles are scoped by its own file path');
+assert(compsStyles.includes('[data-rosespan-c="components/ui/Card"] .card'), 'the component\'s styles are scoped by its own file path');
 assert(!compsStyles.includes('.unused'), 'an unimported component\'s styles never reach the stylesheet');
 assert(!compsServer.includes('never imported'), 'an unimported component is in neither bundle');
 assert(!fs.existsSync(path.join(compsDir, 'dist', 'components')), 'a component is not a route (no dist/components/)');
 assert(compsBuilt.out.includes('/  client JS') && compsBuilt.out.includes('imported component Card.rose needs the client'), 'needsClient propagates up the import graph and the report names the component');
-assert(compsHome.includes('__rosefn_state'), 'the page that renders an interactive component ships the bundle');
+assert(compsHome.includes('__rosespan_state'), 'the page that renders an interactive component ships the bundle');
 const compsList = fs.readFileSync(path.join(compsDir, 'dist', 'list', 'index.html'), 'utf8')
   .replace(/<script[\s\S]*?<\/script>/g, '');
 assert((compsList.match(/class="card"/g) ?? []).length === 2, 'a component inside {#each} renders once per row');
@@ -474,7 +516,7 @@ fs.writeFileSync(path.join(bugDir, 'src', 'pages', 'index.rose'), `<script>
 </script>
 
 <head>
-  <title>{q() ? \`term: \${q()}\` : 'all terms'} - rosefn</title>
+  <title>{q() ? \`term: \${q()}\` : 'all terms'} - rosespan</title>
   <!-- A head-level <style> and a JSON-LD data block (bug report 2026.9.22
        11:46): a CMS theme system ships its per-request CSS and its structured
        data in <head>. Both used to be dropped by the server's head merge and
@@ -532,7 +574,7 @@ assert(text(q1.html).includes('term: alpha'), '$query() reaches the render');
 assert(q1.html.includes('<strong>bold</strong>'), '{@html} emits trusted markup verbatim');
 assert(!q1.html.includes('&lt;strong&gt;'), '{@html} does not escape');
 assert(text(q1.html).includes('<li>one <strong>bold</strong> word</li>'), '{@html} resolves inside an {#each} against the row');
-assert((q1.head ?? []).join('').includes('<title>term: alpha - rosefn</title>'), 'a template literal inside a template expression compiles (it used to emit `term: $alpha`)');
+assert((q1.head ?? []).join('').includes('<title>term: alpha - rosespan</title>'), 'a template literal inside a template expression compiles (it used to emit `term: $alpha`)');
 assert((q1.head ?? []).join('').includes('<style>.hit { color: #2e7d32; }</style>'), 'a head-level <style> reaches the rendered document (the merge used to drop it)');
 assert((q1.head ?? []).join('').includes('application/ld+json'), 'a JSON-LD data block reaches the rendered document');
 assert(!(q1.head ?? []).join('').includes('<!--'), 'head comments are notes, not content (they are dropped at compile time)');
@@ -634,7 +676,7 @@ assert((okHome.match(/<script/g) ?? []).length === 0, 'an npm import does not by
 const servePort = await takePort(0);
 const srv = spawn(process.execPath, [...TSX, 'serve'], {
   cwd: REPO,
-  env: { ...process.env, PORT: String(servePort), ROSEFN_WORKERS: '2', ROSEFN_MAX_BODY: '200' },
+  env: { ...process.env, PORT: String(servePort), ROSESPAN_WORKERS: '2', ROSESPAN_MAX_BODY: '200' },
 });
 let serveOut = '';
 srv.stdout.on('data', (c) => { serveOut += c; });
@@ -645,7 +687,7 @@ try {
     try { await fetch(serveBase + '/'); break; } catch { await new Promise((r) => setTimeout(r, 150)); }
   }
   const served = await fetch(serveBase + '/');
-  assert(served.status === 200, 'rosefn serve answers the built home page');
+  assert(served.status === 200, 'rosespan serve answers the built home page');
   assert((await served.text()).includes('Guestbook'), 'the served document is the built one (serve never rebuilds on the fly)');
   assert(serveOut.includes('2 workers'), 'the banner names the worker count');
   await new Promise((r) => setTimeout(r, 250));
@@ -742,24 +784,24 @@ assert(bindable, 'no orphan worker holds the port after the primary dies');
 const vercel = JSON.parse(fs.readFileSync(path.join(REPO, 'deploy/vercel.json'), 'utf8'));
 assert(vercel.outputDirectory === 'dist', 'vercel.json builds into dist/');
 assert(vercel.buildCommand === 'npm run build', 'vercel.json builds the app the documented way');
-assert(Array.isArray(vercel.rewrites) && vercel.rewrites.some((r) => r.destination === '/api/rosefn'), 'every unmatched path is rewritten to the function');
-assert(vercel.functions?.['api/rosefn.ts']?.includeFiles === 'dist/**', 'the function bundle carries dist/ (its server.js is imported at runtime)');
-const fn = fs.readFileSync(path.join(REPO, 'deploy/api/rosefn.ts'), 'utf8');
+assert(Array.isArray(vercel.rewrites) && vercel.rewrites.some((r) => r.destination === '/api/rosespan'), 'every unmatched path is rewritten to the function');
+assert(vercel.functions?.['api/rosespan.ts']?.includeFiles === 'dist/**', 'the function bundle carries dist/ (its server.js is imported at runtime)');
+const fn = fs.readFileSync(path.join(REPO, 'deploy/api/rosespan.ts'), 'utf8');
 assert(fn.includes("from '../src/cli/edge.ts'"), 'the function imports the edge adapter that ships in this repo');
 assert(fn.includes('createEdgeHandler') && fn.includes('export default { fetch: handle }'), 'the function reuses createEdgeHandler behind Vercel\'s Web Standard handler');
 assert(fs.existsSync(path.join(REPO, 'src/cli/edge.ts')), 'the imported adapter file exists');
 const nodeDocker = fs.readFileSync(path.join(REPO, 'deploy/Dockerfile.node'), 'utf8');
-assert(nodeDocker.includes('npm run build') && nodeDocker.includes('"serve"'), 'the Node container builds, then runs rosefn serve (the cluster runner)');
+assert(nodeDocker.includes('npm run build') && nodeDocker.includes('"serve"'), 'the Node container builds, then runs rosespan serve (the cluster runner)');
 assert(JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8')).scripts.serve, 'npm run serve exists for the platforms that call it');
 const fly = fs.readFileSync(path.join(REPO, 'deploy/fly.toml'), 'utf8');
-assert(fly.includes('Dockerfile.node') && /internal_port\s*=\s*3000/.test(fly), 'fly.toml runs the Node container on the port rosefn serve listens on');
+assert(fly.includes('Dockerfile.node') && /internal_port\s*=\s*3000/.test(fly), 'fly.toml runs the Node container on the port rosespan serve listens on');
 assert(/^app = "\S+"/m.test(fly), 'fly.toml names an app (fly launch fills the rest)');
-const k8s = fs.readFileSync(path.join(REPO, 'deploy/k8s/rosefn.yaml'), 'utf8');
+const k8s = fs.readFileSync(path.join(REPO, 'deploy/k8s/rosespan.yaml'), 'utf8');
 assert((k8s.match(/kind: Deployment/g) ?? []).length === 2, 'the k8s manifests declare the two tiers (static binary + dynamic node)');
-assert(/name: rosefn-static/.test(k8s) && /name: rosefn-dynamic/.test(k8s), 'both tiers are named, and the UPSTREAM target is one of them');
-assert(/UPSTREAM\s*\n\s*value: http:\/\/rosefn-dynamic:3000/.test(k8s), 'the static tier proxies the dynamic half through the in-cluster Service DNS');
+assert(/name: rosespan-static/.test(k8s) && /name: rosespan-dynamic/.test(k8s), 'both tiers are named, and the UPSTREAM target is one of them');
+assert(/UPSTREAM\s*\n\s*value: http:\/\/rosespan-dynamic:3000/.test(k8s), 'the static tier proxies the dynamic half through the in-cluster Service DNS');
 assert(/value: "8080"/.test(k8s) && /value: "3000"/.test(k8s), 'each tier listens on the port its container documents');
-assert(/command: \["rosefn", "serve"\]/.test(k8s), 'the dynamic tier runs the cluster runner');
+assert(/command: \["rosespan", "serve"\]/.test(k8s), 'the dynamic tier runs the cluster runner');
 assert(/type: ClusterIP/.test(k8s), 'the dynamic Service is cluster-internal (it is reached through the static proxy, never directly)');
 assert(/prometheus\.io\/scrape/.test(k8s) && /prometheus\.io\/port: "8080"/.test(k8s), 'the static tier advertises the /metrics endpoint the binary serves');
 const goSrc = fs.readFileSync(path.join(REPO, 'main.go'), 'utf8');
@@ -768,10 +810,10 @@ const netlifyToml = fs.readFileSync(path.join(REPO, 'deploy/netlify.toml'), 'utf
 assert(/publish\s*=\s*"dist"/.test(netlifyToml), 'netlify.toml publishes the build output as static assets');
 assert(/directory\s*=\s*"netlify\/functions"/.test(netlifyToml), 'netlify.toml names the functions directory');
 assert(/included_files\s*=\s*\["dist\/\*\*"\]/.test(netlifyToml), 'the Netlify function bundle carries dist/ (the Lambda runtime has a filesystem)');
-assert(/to = "\/\.netlify\/functions\/rosefn"/.test(netlifyToml) && /status = 200/.test(netlifyToml), 'every non-asset path is rewritten (not redirected) to the function');
-const netlifyFn = fs.readFileSync(path.join(REPO, 'deploy/netlify/functions/rosefn.ts'), 'utf8');
+assert(/to = "\/\.netlify\/functions\/rosespan"/.test(netlifyToml) && /status = 200/.test(netlifyToml), 'every non-asset path is rewritten (not redirected) to the function');
+const netlifyFn = fs.readFileSync(path.join(REPO, 'deploy/netlify/functions/rosespan.ts'), 'utf8');
 assert(netlifyFn.includes("from '../../src/cli/edge.ts'"), 'the Netlify function imports the edge adapter that ships in this repo');
-assert(netlifyFn.includes('export default async function rosefn'), 'the Netlify function uses the v2 Web-standard signature');
+assert(netlifyFn.includes('export default async function rosespan'), 'the Netlify function uses the v2 Web-standard signature');
 assert(netlifyFn.includes('createEdgeHandler'), 'the Netlify function reuses createEdgeHandler');
 const cfToml = fs.readFileSync(path.join(REPO, 'deploy/cloudflare/wrangler.toml'), 'utf8');
 assert(/pages_build_output_dir\s*=\s*"\.\/dist"/.test(cfToml), 'the Pages wrangler file builds into dist/');
@@ -784,7 +826,7 @@ assert(/fetch\(new URL\('\/client\.js', base\)\)/.test(cfFn), 'the Pages functio
 assert(cfFn.includes('createEdgeHandler'), 'the Pages function reuses createEdgeHandler with the preloaded modules');
 
 const analysis = (await run(['build', 'example'], REPO)).out;
-assert(/Rosefn build analysis \(measured from dist\//.test(analysis), 'the build prints its wire analysis');
+assert(/RoseSpan build analysis \(measured from dist\//.test(analysis), 'the build prints its wire analysis');
 assert(/\/bare\s+[\d.]+ KB raw\s+[\d.]+ KB gzip\s+[\d.]+ KB br\s+bundle inlined/.test(analysis), 'an interactive route reports raw/gzip/br from its own file');
 assert(/\/garden\s+[\d.]+ KB raw\s+[\d.]+ KB gzip\s+[\d.]+ KB br\s+zero-JS/.test(analysis), 'a zero-JS route reports its three sizes too (the moat, measured)');
 assert(/shared bundle\s+[\d.]+ KB raw\s+[\d.]+ KB gzip\s+[\d.]+ KB br/.test(analysis), 'the shared bundle reports its own size');
@@ -795,11 +837,11 @@ assert(analysis.includes(`${(homeGzip / 1024).toFixed(1)} KB gzip`), 'the analys
 const apiDir = path.join(REPO, 'api');
 fs.rmSync(apiDir, { recursive: true, force: true });
 fs.mkdirSync(apiDir, { recursive: true });
-fs.copyFileSync(path.join(REPO, 'deploy/api/rosefn.ts'), path.join(apiDir, 'rosefn.ts'));
-const scratch = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'rosefn-vercel-'));
+fs.copyFileSync(path.join(REPO, 'deploy/api/rosespan.ts'), path.join(apiDir, 'rosespan.ts'));
+const scratch = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'rosespan-vercel-'));
 fs.writeFileSync(path.join(scratch, 'runner.mjs'), `
 import { pathToFileURL } from 'node:url';
-const mod = await import(pathToFileURL(${JSON.stringify(path.join(apiDir, 'rosefn.ts'))}).href);
+const mod = await import(pathToFileURL(${JSON.stringify(path.join(apiDir, 'rosespan.ts'))}).href);
 const out = [];
 const call = async (p, init) => {
   const r = await mod.default.fetch(new Request('http://localhost' + p, init));
@@ -854,13 +896,13 @@ const devBase = await new Promise((resolve) => {
 try {
   assert(devBase !== null, `the dev server starts and prints its port (got: ${devOut.slice(-200)})`);
   const devDoc = await (await fetch(devBase + '/')).text();
-  assert(devDoc.includes("EventSource('/__rosefn_reload')"), 'a dev document carries the reload bridge');
-  assert(devDoc.includes('window.__rosefn='), 'the dev document carries the state seam the bridge reads');
+  assert(devDoc.includes("EventSource('/__rosespan_reload')"), 'a dev document carries the reload bridge');
+  assert(devDoc.includes('window.__rosespan='), 'the dev document carries the state seam the bridge reads');
   const devHeaders = await fetch(devBase + '/');
   assert(devHeaders.headers.get('content-security-policy') === null, 'dev drops the hash CSP (the injected bridge is not hashed)');
   assert(devHeaders.headers.get('content-encoding') === null, 'dev answers uncompressed (a compressed body has no <head> to inject into)');
   assert(devDoc.includes('data-on-click="__h0"'), 'an inline on: handler gets a synthetic name in the markup');
-  const sse = await fetch(devBase + '/__rosefn_reload');
+  const sse = await fetch(devBase + '/__rosespan_reload');
   assert(sse.headers.get('content-type')?.includes('text/event-stream'), 'the reload channel is an SSE stream');
   const reader = sse.body.getReader();
   await reader.read();
@@ -880,20 +922,20 @@ try {
   const edited = await (await fetch(devBase + '/')).text();
   assert(text(edited).includes('count 0 (edited)'), 'the tab that reloads gets the new code');
   const snap = JSON.stringify({ n: 7, name: 'ada', __route: '/' });
-  const posted = await fetch(devBase + '/__rosefn_state', { method: 'POST', body: snap, headers: { 'content-type': 'application/json' } });
+  const posted = await fetch(devBase + '/__rosespan_state', { method: 'POST', body: snap, headers: { 'content-type': 'application/json' } });
   assert(posted.status === 204, 'the bridge can post its snapshot back');
   const resumed = await (await fetch(devBase + '/')).text();
-  assert(resumed.includes(`<script>window.__rosefn_resume=${snap}</script>`), 'the next document carries the snapshot back (the edit lands on the live state)');
+  assert(resumed.includes(`<script>window.__rosespan_resume=${snap}</script>`), 'the next document carries the snapshot back (the edit lands on the live state)');
   const after = await (await fetch(devBase + '/')).text();
-  assert(!after.includes(`window.__rosefn_resume=${snap}`), 'the snapshot is one-shot (it is not served twice)');
+  assert(!after.includes(`window.__rosespan_resume=${snap}`), 'the snapshot is one-shot (it is not served twice)');
   fs.writeFileSync(path.join(devDir, 'src', 'pages', 'fresh.rose'), '<h1>fresh route</h1>\n');
   await new Promise((r) => setTimeout(r, 150));
   const fresh = await fetch(devBase + '/fresh');
   const freshHtml = await fresh.text();
   assert(fresh.status === 200 && freshHtml.includes('fresh route'), `a route added mid-session answers 200 on the first try (got ${fresh.status}: ${freshHtml.slice(0, 80)})`);
   const prodDoc = fs.readFileSync(path.join(REPO, 'dist', 'index.html'), 'utf8');
-  assert(!prodDoc.includes('__rosefn_reload'), 'a built document carries no reload bridge');
-  assert(!prodDoc.includes('<script>window.__rosefn_resume='), 'a built document carries no resume seed');
+  assert(!prodDoc.includes('__rosespan_reload'), 'a built document carries no reload bridge');
+  assert(!prodDoc.includes('<script>window.__rosespan_resume='), 'a built document carries no resume seed');
 } finally {
   devSrv.kill('SIGKILL');
 }
@@ -905,14 +947,14 @@ fs.writeFileSync(path.join(vitalsDir, 'src', 'pages', 'index.rose'), vitalsPage)
 const vitalsBuilt = await run(['build'], vitalsDir);
 assert(vitalsBuilt.code === 0, `a project exporting vitals = true builds (stderr: ${vitalsBuilt.err.slice(0, 200)})`);
 const vitalsBundle = fs.readFileSync(path.join(vitalsDir, 'dist', 'client.js'), 'utf8');
-assert(vitalsBundle.includes('rosefn:vitals'), 'the opted-in bundle carries the vitals hook');
-assert(/__rosefn_vitals/.test(vitalsBundle), 'the live values are exposed for a devtools read');
+assert(vitalsBundle.includes('rosespan:vitals'), 'the opted-in bundle carries the vitals hook');
+assert(/__rosespan_vitals/.test(vitalsBundle), 'the live values are exposed for a devtools read');
 const plainDir = path.join(tmp, 'plainvitals');
 fs.mkdirSync(path.join(plainDir, 'src', 'pages'), { recursive: true });
 fs.writeFileSync(path.join(plainDir, 'src', 'pages', 'index.rose'), `<script>\n  let n = $state(0);\n</script>\n<h1>{n}</h1>\n<button on:click={() => $setState('n', n() + 1)}>+1</button>\n`);
 await run(['build'], plainDir);
 const plainBundle = fs.readFileSync(path.join(plainDir, 'dist', 'client.js'), 'utf8');
-assert(!plainBundle.includes('rosefn:vitals'), 'a bundle without the export carries no vitals hook (esbuild drops it)');
+assert(!plainBundle.includes('rosespan:vitals'), 'a bundle without the export carries no vitals hook (esbuild drops it)');
 const badVitals = path.join(tmp, 'badvitals');
 fs.mkdirSync(path.join(badVitals, 'src', 'pages'), { recursive: true });
 fs.writeFileSync(path.join(badVitals, 'src', 'pages', 'index.rose'), `<script>\n  export const vitals = 'yes';\n</script>\n<p>x</p>\n`);
@@ -939,7 +981,7 @@ const dom = new JSDOM(classic, {
       observe() { this.cb = cb; }
     };
     w.__fire = (entries) => cb({ getEntries: () => entries });
-    w.addEventListener('rosefn:vitals', (e) => seen.push(e.detail));
+    w.addEventListener('rosespan:vitals', (e) => seen.push(e.detail));
   },
 });
 const w = dom.window;
@@ -956,7 +998,7 @@ Object.defineProperty(w.document, 'visibilityState', { value: 'hidden', configur
 w.document.dispatchEvent(new w.Event('visibilitychange'));
 assert(val('cls') === 0.05, 'cls accumulates and is flushed when the page is hidden');
 assert(val('inp') === 180, 'inp reports the worst interaction duration');
-assert(w.__rosefn_vitals.lcp === 640, 'the live values stay readable for a devtools extension');
+assert(w.__rosespan_vitals.lcp === 640, 'the live values stay readable for a devtools extension');
 
 const tdzDir = path.join(tmp, 'tdz');
 fs.mkdirSync(path.join(tdzDir, 'src', 'pages'), { recursive: true });
@@ -1033,7 +1075,7 @@ const bareJson = await run(['build', bare2, '--json'], REPO);
 const bareErr = JSON.parse(bareJson.out.trim()).errors[0];
 assert(bareErr.code === 'E-ROUTE' && bareErr.file.endsWith('pages'), 'a project with no pages reports E-ROUTE naming the directory');
 const prompt = await run(['prompt'], REPO);
-assert(prompt.code === 0 && prompt.out.includes('# Rosefn authoring contract'), 'rosefn prompt prints the contract');
+assert(prompt.code === 0 && prompt.out.includes('# RoseSpan authoring contract'), 'rosespan prompt prints the contract');
 for (const rule of ['There is NO {:else}', 'export const csr', '$data() is banned in components', 'E-NODE-ONLY', 'ONE request with ZERO hydration']) {
   assert(prompt.out.includes(rule), `the contract states the rule: ${rule}`);
 }
@@ -1058,7 +1100,7 @@ assert(fs.existsSync(path.join(pubDir, 'dist', 'public', 'icons', 'rose.svg.br')
 const pubPort = await takePort(0);
 const pubProc = spawn(process.execPath, [...TSX, 'serve'], {
   cwd: pubDir,
-  env: { ...process.env, PORT: String(pubPort), ROSEFN_WORKERS: '1' },
+  env: { ...process.env, PORT: String(pubPort), ROSESPAN_WORKERS: '1' },
 });
 try {
   for (let i = 0; i < 100; i++) {
@@ -1106,11 +1148,11 @@ fs.writeFileSync(path.join(mntDir, 'src', 'pages', 'plain.rose'), `<h1>Plain mou
 const mntBuilt = await run(['build'], mntDir);
 assert(mntBuilt.code === 0, `the mount fixture project builds (stderr: ${mntBuilt.err.slice(0, 200)})`);
 const mountSrc = fs.readFileSync(path.join(mntDir, 'dist', 'mount.js'), 'utf8');
-assert(mountSrc.includes('[data-rosefn]') && /from '\/client\.js(\?v=[0-9a-z]+)?'/.test(mountSrc), 'the build emits dist/mount.js (the embeddable entry)');
+assert(mountSrc.includes('[data-rosespan]') && /from '\/client\.js(\?v=[0-9a-z]+)?'/.test(mountSrc), 'the build emits dist/mount.js (the embeddable entry)');
 const mntPort = await takePort(0);
 const mntProc = spawn(process.execPath, [...TSX, 'serve'], {
   cwd: mntDir,
-  env: { ...process.env, PORT: String(mntPort), ROSEFN_WORKERS: '1' },
+  env: { ...process.env, PORT: String(mntPort), ROSESPAN_WORKERS: '1' },
 });
 const mntBase = `http://localhost:${mntPort}`;
 try {
@@ -1118,7 +1160,7 @@ try {
     try { await fetch(mntBase + '/'); break; } catch { await new Promise((r) => setTimeout(r, 150)); }
   }
   const homeDoc = await (await fetch(mntBase + '/')).text();
-  const hostHtml = `<html><head><title>Legacy host page</title></head><body><h1>Legacy shell</h1><a id="hostlink" href="/legacy-route">host link</a><div data-rosefn="/" id="m1"></div><div data-rosefn="/plain" id="m2"></div></body></html>`;
+  const hostHtml = `<html><head><title>Legacy host page</title></head><body><h1>Legacy shell</h1><a id="hostlink" href="/legacy-route">host link</a><div data-rosespan="/" id="m1"></div><div data-rosespan="/plain" id="m2"></div></body></html>`;
   let client = fs.readFileSync(path.join(mntDir, 'dist', 'client.js'), 'utf8');
   const exp = client.match(/\bexport\{([^}]*)\};?/);
   if (exp) {
@@ -1151,15 +1193,15 @@ try {
   const m1 = w.document.getElementById('m1');
   const m2 = w.document.getElementById('m2');
   w.eval(classic);
-  for (let i = 0; i < 80 && !(m1.__rosefn_bound && m2.__rosefn_bound); i++) {
+  for (let i = 0; i < 80 && !(m1.__rosespan_bound && m2.__rosespan_bound); i++) {
     await new Promise((r) => setTimeout(r, 100));
   }
-  assert(!!m1.__rosefn_bound && !!m2.__rosefn_bound, 'both mounts finished wiring (events bound, state resumed)');
+  assert(!!m1.__rosespan_bound && !!m2.__rosespan_bound, 'both mounts finished wiring (events bound, state resumed)');
   const appInner = /<div id="app">([\s\S]*?)<\/div>\s*<script/.exec(homeDoc);
   assert(!!appInner && m1.innerHTML === appInner[1], 'the mount adopts the server document byte for byte (zero hydration, no re-render)');
-  assert(m1.querySelector('#__rosefn_state') === null, 'the state script is dropped once the resume read it');
+  assert(m1.querySelector('#__rosespan_state') === null, 'the state script is dropped once the resume read it');
   assert(w.document.title === 'Legacy host page', 'the host page title survives a mounted route that declares its own');
-  assert(w.document.querySelector('head').innerHTML.includes('Legacy host page'), 'the host head carries no rosefn-managed elements');
+  assert(w.document.querySelector('head').innerHTML.includes('Legacy host page'), 'the host head carries no rosespan-managed elements');
   assert(m2.textContent.includes('Plain mount'), 'a zero-JS route mounts through the body-children path (no #app wrapper)');
   assert(m2.querySelectorAll('script').length === 0, 'the mounted zero-JS route carries no script');
   (m1.querySelector('[data-on-click]')).click();
@@ -1192,7 +1234,7 @@ try {
 }
 
 {
-  const isoScratch = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'rosefn-isolate-'));
+  const isoScratch = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'rosespan-isolate-'));
   fs.writeFileSync(path.join(isoScratch, 'runner.mjs'), `
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { pathToFileURL } from 'node:url';
@@ -1298,13 +1340,13 @@ console.log(JSON.stringify({ a, b, leak: RT.hasState('route') }));
   fs.mkdirSync(cfDir, { recursive: true });
   fs.mkdirSync(nlDir, { recursive: true });
   fs.copyFileSync(path.join(REPO, 'deploy/cloudflare/functions/[[path]].ts'), path.join(cfDir, '[[path]].ts'));
-  fs.copyFileSync(path.join(REPO, 'deploy/netlify/functions/rosefn.ts'), path.join(nlDir, 'rosefn.ts'));
+  fs.copyFileSync(path.join(REPO, 'deploy/netlify/functions/rosespan.ts'), path.join(nlDir, 'rosespan.ts'));
 
   const dualRunner = path.join(tmp, 'dual-runner.mjs');
   fs.writeFileSync(dualRunner, `
 import { pathToFileURL } from 'node:url';
 const base = process.argv[2];
-const nl = await import(pathToFileURL(${JSON.stringify(path.join(nlDir, 'rosefn.ts'))}).href);
+const nl = await import(pathToFileURL(${JSON.stringify(path.join(nlDir, 'rosespan.ts'))}).href);
 const cf = await import(pathToFileURL(${JSON.stringify(path.join(cfDir, '[[path]].ts'))}).href);
 const call = async (fn, p, init) => {
   const r = await fn(new Request(base + p, init));
@@ -1369,7 +1411,7 @@ console.log(JSON.stringify(out));
 <form method="POST"><button type="submit">bump</button></form>
 `);
   const busLog = path.join(bridgeDir, 'bus.log');
-  fs.writeFileSync(path.join(bridgeDir, 'rosefn.config.js'), `
+  fs.writeFileSync(path.join(bridgeDir, 'rosespan.config.js'), `
 import { appendFileSync } from 'node:fs';
 export default [{
   name: 'bus',
@@ -1390,7 +1432,7 @@ export default [{
   const bridgePort = await takePort(0);
   const bridgeProc = spawn(process.execPath, [...TSX, 'serve'], {
     cwd: bridgeDir,
-    env: { ...process.env, PORT: String(bridgePort), ROSEFN_WORKERS: '1' },
+    env: { ...process.env, PORT: String(bridgePort), ROSESPAN_WORKERS: '1' },
   });
   const bridgeBase = `http://localhost:${bridgePort}`;
   const textOf = (html) => html.replace(/<!--[\s\S]*?-->/g, '').replace(/<[^>]*>/g, '');
@@ -1434,7 +1476,7 @@ export default [{
   const pgPort = await takePort(0);
   const pgProc = spawn(process.execPath, [...TSX, 'serve', 'examples/blog-pg'], {
     cwd: REPO,
-    env: { ...process.env, PORT: String(pgPort), ROSEFN_WORKERS: '1' },
+    env: { ...process.env, PORT: String(pgPort), ROSESPAN_WORKERS: '1' },
   });
   let pgErr = '';
   pgProc.stderr.on('data', (c) => { pgErr += c; });
@@ -1523,7 +1565,7 @@ export default [{
     env: {
       ...process.env,
       PORT: String(oauthPort),
-      ROSEFN_WORKERS: '1',
+      ROSESPAN_WORKERS: '1',
       OAUTH_AUTHORIZE_URL: `http://localhost:${fakePort}/authorize`,
       OAUTH_TOKEN_URL: `http://localhost:${fakePort}/token`,
       OAUTH_USER_URL: `http://localhost:${fakePort}/profile`,
@@ -1599,7 +1641,7 @@ export default [{
   }
 
   const barePort = await takePort(0);
-  const bareEnv = { ...process.env, PORT: String(barePort), ROSEFN_WORKERS: '1' };
+  const bareEnv = { ...process.env, PORT: String(barePort), ROSESPAN_WORKERS: '1' };
   for (const k of Object.keys(bareEnv)) if (k.startsWith('OAUTH_')) delete bareEnv[k];
   const bareProc = spawn(process.execPath, [...TSX, 'serve', 'examples/oauth'], { cwd: REPO, env: bareEnv });
   try {
@@ -1643,7 +1685,7 @@ export default [{
   const surfacePort = await takePort(0);
   const surfaceProc = spawn(process.execPath, [...TSX, 'serve'], {
     cwd: apiDir,
-    env: { ...process.env, PORT: String(surfacePort), ROSEFN_WORKERS: '1' },
+    env: { ...process.env, PORT: String(surfacePort), ROSESPAN_WORKERS: '1' },
   });
   let surfaceErr = '';
   surfaceProc.stderr.on('data', (c) => { surfaceErr += c; });
@@ -1673,18 +1715,18 @@ export default [{
   const scaffoldTpl = async (tpl, dirName) => {
     const dir = path.join(tplRoot, dirName);
     const r = await run(['new', dir, '--template', tpl], REPO);
-    assert(r.code === 0, `rosefn new --template ${tpl} exits 0 (stderr: ${r.err.slice(0, 200)})`);
+    assert(r.code === 0, `rosespan new --template ${tpl} exits 0 (stderr: ${r.err.slice(0, 200)})`);
     return dir;
   };
 
   const siteDir = await scaffoldTpl('site', 'my-site');
   const sitePkg = JSON.parse(fs.readFileSync(path.join(siteDir, 'package.json'), 'utf8'));
   const repoVersion = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8')).version;
-  assert(sitePkg.dependencies.rosefn === `^${repoVersion}`, 'the scaffolded project depends on the PUBLISHED package, not this checkout');
+  assert(sitePkg.dependencies.rosespan === `^${repoVersion}`, 'the scaffolded project depends on the PUBLISHED package, not this checkout');
   const stamp = fs.readFileSync(path.join(REPO, 'src', 'FRAMEWORK_VERSION'), 'utf8').trim();
   assert(stamp === repoVersion, `src/FRAMEWORK_VERSION matches package.json (${stamp} vs ${repoVersion})`);
   assert(sitePkg.devDependencies?.typescript === '^5.6.0', 'the scaffolded project is TypeScript-ready (npm run check works)');
-  assert(fs.existsSync(path.join(siteDir, 'rosefn-env.d.ts')) && fs.existsSync(path.join(siteDir, 'tsconfig.json')), 'the scaffolded project carries the env reference and the strict tsconfig');
+  assert(fs.existsSync(path.join(siteDir, 'rosespan-env.d.ts')) && fs.existsSync(path.join(siteDir, 'tsconfig.json')), 'the scaffolded project carries the env reference and the strict tsconfig');
   const siteBuilt = await run(['build', '--static'], siteDir);
   assert(siteBuilt.code === 0, `the site template builds and PASSES --static (stderr: ${siteBuilt.err.slice(0, 300)})`);
   assert(siteBuilt.out.includes('static export verified'), 'the site is deployable to any static host with no server');
@@ -1695,7 +1737,7 @@ export default [{
   const apiBuilt = await run(['build'], apiDir);
   assert(apiBuilt.code === 0 && !/render failed/.test(apiBuilt.err), `the api template builds cleanly (stderr: ${apiBuilt.err.slice(0, 200)})`);
   const apiPort = await takePort(0);
-  const apiProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: apiDir, env: { ...process.env, PORT: String(apiPort), ROSEFN_WORKERS: '1' } });
+  const apiProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: apiDir, env: { ...process.env, PORT: String(apiPort), ROSESPAN_WORKERS: '1' } });
   try {
     for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${apiPort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
     const health = await fetch(`http://localhost:${apiPort}/api/health`);
@@ -1724,7 +1766,7 @@ export default [{
   assert(adminBuilt.code === 0 && !/render failed/.test(adminBuilt.err), `the admin template builds cleanly (stderr: ${adminBuilt.err.slice(0, 200)})`);
   const bodyOf = (html) => html.replace(/<script[\s\S]*?<\/script>/g, '');
   const adminPort = await takePort(0);
-  const adminProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: adminDir, env: { ...process.env, PORT: String(adminPort), ROSEFN_WORKERS: '1' } });
+  const adminProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: adminDir, env: { ...process.env, PORT: String(adminPort), ROSESPAN_WORKERS: '1' } });
   try {
     for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${adminPort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
     const anon = bodyOf(await (await fetch(`http://localhost:${adminPort}/`)).text());
@@ -1743,7 +1785,7 @@ export default [{
   assert(blogBuilt.code === 0, `the blog template builds (stderr: ${blogBuilt.err.slice(0, 200)})`);
   assert(/\/\s+zero-JS/.test(blogBuilt.out), 'the blog template keeps its zero-JS list page');
   const blogPort = await takePort(0);
-  const blogProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: blogDir, env: { ...process.env, PORT: String(blogPort), ROSEFN_WORKERS: '1' } });
+  const blogProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: blogDir, env: { ...process.env, PORT: String(blogPort), ROSESPAN_WORKERS: '1' } });
   try {
     for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${blogPort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
     const home = await (await fetch(`http://localhost:${blogPort}/`)).text();
@@ -1760,9 +1802,9 @@ export default [{
   const flipped = await run(['new', '--template', 'api', path.join(tplRoot, 'flipped')], REPO);
   assert(flipped.code === 0 && fs.existsSync(path.join(tplRoot, 'flipped', 'src', 'pages', 'api', 'items.rose')), 'the flag may come before the name');
   const plain = await run(['new', path.join(tplRoot, 'plain')], REPO);
-  assert(plain.code === 0 && fs.existsSync(path.join(tplRoot, 'plain', 'src', 'pages', 'index.rose')), 'rosefn new without --template still writes the one-page starter');
+  assert(plain.code === 0 && fs.existsSync(path.join(tplRoot, 'plain', 'src', 'pages', 'index.rose')), 'rosespan new without --template still writes the one-page starter');
   const tplUsage = await run(['new'], REPO);
-  assert(tplUsage.out.includes('rosefn new <name> [--template <name>]'), 'the usage line documents the template flag');
+  assert(tplUsage.out.includes('rosespan new <name> [--template <name>]'), 'the usage line documents the template flag');
 }
 
 {
@@ -1771,10 +1813,10 @@ export default [{
   const manifest = JSON.parse(fs.readFileSync(path.join(dt, 'manifest.json'), 'utf8'));
   assert(manifest.manifest_version === 3 && manifest.devtools_page === 'devtools.html', 'the manifest is a valid MV3 devtools entry');
   const devtoolsJs = fs.readFileSync(path.join(dt, 'devtools.js'), 'utf8');
-  assert(devtoolsJs.includes("chrome.devtools.panels.create('Rosefn'") && devtoolsJs.includes('panel.html'), 'the devtools page registers the Rosefn panel');
+  assert(devtoolsJs.includes("chrome.devtools.panels.create('RoseSpan'") && devtoolsJs.includes('panel.html'), 'the devtools page registers the RoseSpan panel');
   const panel = fs.readFileSync(path.join(dt, 'panel.js'), 'utf8');
-  assert(panel.includes('window.__rosefn') && panel.includes('r.state()') && panel.includes('r.prefetch()'), 'the panel reads the two seams the bootstrap installs');
-  assert(panel.includes('rosefn: false'), 'the panel answers honestly when the page carries no runtime (a zero-JS document)');
+  assert(panel.includes('window.__rosespan') && panel.includes('r.state()') && panel.includes('r.prefetch()'), 'the panel reads the two seams the bootstrap installs');
+  assert(panel.includes('rosespan: false'), 'the panel answers honestly when the page carries no runtime (a zero-JS document)');
   assert(panel.includes('setInterval(read, 1000)'), 'the panel refreshes once a second');
   const panelHtml = fs.readFileSync(path.join(dt, 'panel.html'), 'utf8');
   assert(panelHtml.includes('panel.js') && /Signal graph/.test(panelHtml) && /Prefetch/.test(panelHtml), 'the panel page mounts the script and names both sections');
@@ -1810,7 +1852,7 @@ export default [{
   const home = fs.readFileSync(path.join(mentionDir, 'dist', 'index.html'), 'utf8');
   assert(home.includes('<title>The real head</title>'), 'the real head block lands in the document');
   assert(!home.includes('mentions the'), 'the script text did NOT leak into the head');
-  assert(home.includes('teal') && home.includes('data-rosefn-c'), 'the scoped style still lands in the document (rewritten with its scope attribute)');
+  assert(home.includes('teal') && home.includes('data-rosespan-c'), 'the scoped style still lands in the document (rewritten with its scope attribute)');
   assert(home.includes('<p>the page</p>'), 'the page body still renders through the layout');
 }
 
@@ -1832,7 +1874,7 @@ export default [{
   const jwtPort = await takePort(0);
   const jwtProc = spawn(process.execPath, [...TSX, 'serve', 'examples/jwt'], {
     cwd: REPO,
-    env: { ...process.env, PORT: String(jwtPort), ROSEFN_WORKERS: '1', JWT_SECRET: 'test-secret' },
+    env: { ...process.env, PORT: String(jwtPort), ROSESPAN_WORKERS: '1', JWT_SECRET: 'test-secret' },
   });
   const jwtBase = `http://localhost:${jwtPort}`;
   try {
@@ -1872,7 +1914,7 @@ export default [{
   }
 
   const barePort = await takePort(0);
-  const bareEnv = { ...process.env, PORT: String(barePort), ROSEFN_WORKERS: '1' };
+  const bareEnv = { ...process.env, PORT: String(barePort), ROSESPAN_WORKERS: '1' };
   delete bareEnv.JWT_SECRET;
   const bareProc = spawn(process.execPath, [...TSX, 'serve', 'examples/jwt'], { cwd: REPO, env: bareEnv });
   try {
@@ -1892,7 +1934,7 @@ export default [{
   const tpPort = await takePort(0);
   const tpProc = spawn(process.execPath, [...TSX, 'serve', 'examples/third-party'], {
     cwd: REPO,
-    env: { ...process.env, PORT: String(tpPort), ROSEFN_WORKERS: '1' },
+    env: { ...process.env, PORT: String(tpPort), ROSESPAN_WORKERS: '1' },
   });
   try {
     for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${tpPort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
@@ -1906,7 +1948,7 @@ export default [{
     const bundleTag = /<script type="module"([^>]*)>/.exec(html)?.[1] ?? '';
     assert(bundleTag.includes(`nonce="${headerNonce}"`), 'the bundle tag carries the header nonce');
     assert(html.includes('window.partytown') && html.includes('text/partytown'), 'the route\'s head markup rides the document (the bootstrap applies it at boot)');
-    assert(html.includes('Third-party scripts, the rosefn shape') && html.includes('data-on-click'), 'the page renders with its own interaction wired');
+    assert(html.includes('Third-party scripts, the rosespan shape') && html.includes('data-on-click'), 'the page renders with its own interaction wired');
     const nonces = [...html.matchAll(/nonce="([^"]+)"/g)].map((m) => m[1]);
     assert(nonces.length >= 1 && nonces.every((n) => n === headerNonce), `every stamped tag carries the one nonce (got ${nonces.length} tags)`);
     const res2 = await fetch(`http://localhost:${tpPort}/`);
@@ -1946,7 +1988,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
   const tpBufBuilt = await run(['build'], tpBuf);
   assert(tpBufBuilt.code === 0 && !/render failed/.test(tpBufBuilt.err), `the buffered nonce fixture builds cleanly (stderr: ${tpBufBuilt.err.slice(0, 200)})`);
   const bufPort = await takePort(0);
-  const bufProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: tpBuf, env: { ...process.env, PORT: String(bufPort), ROSEFN_WORKERS: '1' } });
+  const bufProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: tpBuf, env: { ...process.env, PORT: String(bufPort), ROSESPAN_WORKERS: '1' } });
   try {
     for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${bufPort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
     const bres = await fetch(`http://localhost:${bufPort}/`);
@@ -1996,7 +2038,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
 `);
   const waBuilt = await run(['build'], waDir);
   assert(waBuilt.code === 0 && !/render failed/.test(waBuilt.err), `the aggregation fixture builds cleanly (stderr: ${waBuilt.err.slice(0, 200)})`);
-  const warnLines = waBuilt.err.split('\n').filter((l) => l.includes('Rosefn warning:'));
+  const warnLines = waBuilt.err.split('\n').filter((l) => l.includes('RoseSpan warning:'));
   assert(warnLines.length === 1, `one line per reason, not one per route per file (got ${warnLines.length}: ${warnLines.join(' | ').slice(0, 300)})`);
   assert(/5 routes ship zero JavaScript while their chain contains browser-only code/.test(waBuilt.err), 'the line names how many routes the cause reaches');
   assert(waBuilt.err.includes('src/pages/_layout.rose (5 routes)'), 'the widest-reaching file is named with its route count');
@@ -2013,7 +2055,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
     fs.writeFileSync(path.join(udDir, 'src', 'pages', 'index.rose'), body);
     const r = await run(['build'], udDir);
     assert(r.code !== 0, `${name}: the build fails instead of shipping broken code`);
-    assert(r.err.includes(expect), `${name}: the failure names the construct (got: ${r.err.split('\n').find((l) => l.includes(name === 'a closer that closes nothing' ? 'does not close' : 'rosefn'))?.slice(0, 160) ?? r.err.slice(0, 160)})`);
+    assert(r.err.includes(expect), `${name}: the failure names the construct (got: ${r.err.split('\n').find((l) => l.includes(name === 'a closer that closes nothing' ? 'does not close' : 'rosespan'))?.slice(0, 160) ?? r.err.slice(0, 160)})`);
     assert(/\.rose:\d+/.test(r.err), `${name}: the failure carries the file and the line`);
   };
   {
@@ -2021,7 +2063,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
     const elseBuilt = await run(['build'], udDir);
     assert(elseBuilt.code === 0 && !/render failed/.test(elseBuilt.err), `an {:else} chain builds as F2 complementary ifs (stderr: ${elseBuilt.err.slice(0, 200)})`);
     const elsePort = await takePort(0);
-    const elseProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: udDir, env: { ...process.env, PORT: String(elsePort), ROSEFN_WORKERS: '1' } });
+    const elseProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: udDir, env: { ...process.env, PORT: String(elsePort), ROSESPAN_WORKERS: '1' } });
     try {
       for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${elsePort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
       const elseHtml = await (await fetch(`http://localhost:${elsePort}/`)).text();
@@ -2035,7 +2077,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
     const eeBuilt = await run(['build'], udDir);
     assert(eeBuilt.code === 0 && !/render failed/.test(eeBuilt.err), `an each-else builds cleanly (stderr: ${eeBuilt.err.slice(0, 200)})`);
     const eePort = await takePort(0);
-    const eeProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: udDir, env: { ...process.env, PORT: String(eePort), ROSEFN_WORKERS: '1' } });
+    const eeProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: udDir, env: { ...process.env, PORT: String(eePort), ROSESPAN_WORKERS: '1' } });
     try {
       for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${eePort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
       const eeHtml = await (await fetch(`http://localhost:${eePort}/`)).text();
@@ -2054,7 +2096,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
     const noteBuilt = await run(['build'], udDir);
     assert(noteBuilt.code === 0 && !/render failed/.test(noteBuilt.err), `a comment mentioning a block builds cleanly (stderr: ${noteBuilt.err.slice(0, 200)})`);
     const notePort = await takePort(0);
-    const noteProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: udDir, env: { ...process.env, PORT: String(notePort), ROSEFN_WORKERS: '1' } });
+    const noteProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: udDir, env: { ...process.env, PORT: String(notePort), ROSESPAN_WORKERS: '1' } });
     try {
       for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${notePort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
       const noteRes = await fetch(`http://localhost:${notePort}/`);
@@ -2079,7 +2121,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
   const okBuilt = await run(['build'], udDir);
   assert(okBuilt.code === 0 && !/render failed/.test(okBuilt.err), `the legal shapes still build (stderr: ${okBuilt.err.slice(0, 200)})`);
   const okPort = await takePort(0);
-  const okProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: udDir, env: { ...process.env, PORT: String(okPort), ROSEFN_WORKERS: '1' } });
+  const okProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: udDir, env: { ...process.env, PORT: String(okPort), ROSESPAN_WORKERS: '1' } });
   try {
     for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${okPort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
     const okHtml = await (await fetch(`http://localhost:${okPort}/`)).text();
@@ -2102,7 +2144,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
   const caBuilt = await run(['build'], caDir);
   assert(caBuilt.code === 0 && !/render failed/.test(caBuilt.err), `the catch-all fixture builds cleanly (stderr: ${caBuilt.err.slice(0, 200)})`);
   const caPort = await takePort(0);
-  const caProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: caDir, env: { ...process.env, PORT: String(caPort), ROSEFN_WORKERS: '1' } });
+  const caProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: caDir, env: { ...process.env, PORT: String(caPort), ROSESPAN_WORKERS: '1' } });
   try {
     for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${caPort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
     const text = async (u) => (await (await fetch(`http://localhost:${caPort}${u}`)).text()).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -2138,7 +2180,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
   assert(sigBuilt.code === 0 && !/render failed/.test(sigBuilt.err), `the signal fixture builds cleanly (stderr: ${sigBuilt.err.slice(0, 200)})`);
   assert(/dynamic route \/gone/.test(sigBuilt.out) && /dynamic route \/moved/.test(sigBuilt.out) && /dynamic route \/login/.test(sigBuilt.out), 'a route calling redirect()/notFound() is dynamic by construction (never baked)');
   const sigPort = await takePort(0);
-  const sigProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: sigDir, env: { ...process.env, PORT: String(sigPort), ROSEFN_WORKERS: '1' } });
+  const sigProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: sigDir, env: { ...process.env, PORT: String(sigPort), ROSESPAN_WORKERS: '1' } });
   try {
     for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${sigPort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
     const gone = await fetch(`http://localhost:${sigPort}/gone`);
@@ -2172,7 +2214,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
   const tsClient = fs.readFileSync(path.join(tsDir, 'dist', 'client.js'), 'utf8');
   assert(/\.replace\(\/\\\/\+\$/.test(tsClient), 'the client bundle normalizes the trailing slash too');
   const tsPort = await takePort(0);
-  const tsProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: tsDir, env: { ...process.env, PORT: String(tsPort), ROSEFN_WORKERS: '1' } });
+  const tsProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: tsDir, env: { ...process.env, PORT: String(tsPort), ROSESPAN_WORKERS: '1' } });
   try {
     for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${tsPort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
     const bare = await fetch(`http://localhost:${tsPort}/admin`);
@@ -2245,7 +2287,7 @@ ${bufHead.replace('buffered nonce', 'plain head')}
   const nfClient = fs.readFileSync(path.join(nfDir, 'dist', 'client.js'), 'utf8');
   assert(nfClient.includes('/admin/posts') && nfClient.includes('ROOT-404'), 'the client bundle carries the segment table');
   const nfPort = await takePort(0);
-  const nfProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: nfDir, env: { ...process.env, PORT: String(nfPort), ROSEFN_WORKERS: '1' } });
+  const nfProc = spawn(process.execPath, [...TSX, 'serve'], { cwd: nfDir, env: { ...process.env, PORT: String(nfPort), ROSESPAN_WORKERS: '1' } });
   try {
     for (let i = 0; i < 100; i++) { try { await fetch(`http://localhost:${nfPort}/`); break; } catch { await new Promise((r) => setTimeout(r, 150)); } }
     const thrown = await fetch(`http://localhost:${nfPort}/admin/posts/9`);

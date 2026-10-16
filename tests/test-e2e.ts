@@ -1,5 +1,5 @@
 /**
- * rosefn end-to-end test - the strongest proof of the whole pipeline:
+ * rosespan end-to-end test - the strongest proof of the whole pipeline:
  * fetch the real page from the dev server (single request), execute the
  * inlined client bundle in a real DOM (jsdom), and drive real interactions:
  * zero-hydration adoption, fine-grained patching, {#if}/{#each}, and
@@ -8,7 +8,7 @@
  * Prereq: a server running (npm run dev, or npm run build && npm run preview).
  * Run: npx tsx tests/test-e2e.ts
  *
- * ROSEFN_E2E_BASE overrides the target, so the suite can run beside another
+ * ROSESPAN_E2E_BASE overrides the target, so the suite can run beside another
  * project's server that already owns port 3000 (the default stays 3000).
  */
 
@@ -17,7 +17,7 @@ import { request } from 'node:http';
 import { createHash } from 'node:crypto';
 import { gunzipSync, brotliDecompressSync } from 'zlib';
 
-const BASE = process.env.ROSEFN_E2E_BASE || 'http://localhost:3000';
+const BASE = process.env.ROSESPAN_E2E_BASE || 'http://localhost:3000';
 
 const res = await fetch(BASE + '/');
 const html = await res.text();
@@ -100,9 +100,9 @@ const assert = (cond: boolean, msg: string) => {
 
 const app = document.getElementById('app')!;
 assert(!!app, 'app container present');
-assert(app.textContent!.includes('Welcome to Rosefn'), 'SSR content rendered by the real server');
+assert(app.textContent!.includes('Welcome to RoseSpan'), 'SSR content rendered by the real server');
 assert(!app.textContent!.includes('\u27e6'), 'markers resolved after in-page boot');
-assert(document.querySelector('header')!.textContent!.includes('Rosefn'), 'layout header rendered');
+assert(document.querySelector('header')!.textContent!.includes('RoseSpan'), 'layout header rendered');
 
 const h1Before = document.querySelector('h1')!;
 (document.querySelector('[data-on-click="increment"]') as any).click();
@@ -125,45 +125,45 @@ assert(featuresList.children.length === 4, 'addItem appended a 4th list item');
 const aboutLink = [...document.querySelectorAll('nav a')].find((a) => a.getAttribute('href') === '/about')!;
 aboutLink.dispatchEvent(new dom.window.MouseEvent('mouseover', { bubbles: true }));
 await tick();
-assert(document.body.textContent!.includes('Welcome to Rosefn'), 'hover prefetch left the current page untouched');
+assert(document.body.textContent!.includes('Welcome to RoseSpan'), 'hover prefetch left the current page untouched');
 assert(document.querySelector('p strong')!.textContent === '1', 'hover prefetch did not disturb live state');
 
 const cached = dom.window.eval('prefetchStats().cached') as number;
 assert(cached >= 3, `idle prefetch rendered the visible links (${cached} routes cached)`);
 
 const seamJson = dom.window.eval(
-  'JSON.stringify({ has: !!window.__rosefn, state: window.__rosefn.state(), prefetch: window.__rosefn.prefetch() })'
+  'JSON.stringify({ has: !!window.__rosespan, state: window.__rosespan.state(), prefetch: window.__rosespan.prefetch() })'
 ) as string;
 const seam = JSON.parse(seamJson);
-assert(seam.has === true, 'the booted document exposes the devtools seam (window.__rosefn)');
+assert(seam.has === true, 'the booted document exposes the devtools seam (window.__rosespan)');
 const seamState = JSON.parse(seam.state);
 assert(seamState && seamState.count === 1, `the seam answers the live signal graph (count=${seamState.count})`);
 assert(seamState.__route === '/', 'the signal graph names the route it rendered');
 assert(seam.prefetch && typeof seam.prefetch.cached === 'number' && seam.prefetch.cached === cached, 'the seam answers the same prefetch counters the bundle exports');
 
-assert(document.title === 'Rosefn', 'layout <title> served in <head>');
-assert(document.querySelector('meta[name="generator"]')?.getAttribute('content') === 'Rosefn', 'layout meta served in <head>');
+assert(document.title === 'RoseSpan', 'layout <title> served in <head>');
+assert(document.querySelector('meta[name="generator"]')?.getAttribute('content') === 'RoseSpan', 'layout meta served in <head>');
 const noScripts = html.replace(/<script[\s\S]*?<\/script>/g, '');
 assert(!/<title|<meta/i.test(noScripts.slice(noScripts.indexOf('<body>'))), 'no head content leaks into the served body');
 assert(/rel="icon" href="data:image\/svg\+xml,/.test(html), 'inline favicon served in <head>');
 
 aboutLink.click();
 await tick();
-assert(document.body.textContent!.includes('About Rosefn'), 'client-side nav rendered /about');
+assert(document.body.textContent!.includes('About RoseSpan'), 'client-side nav rendered /about');
 assert(document.body.textContent!.includes('File-system routing with nested layouts'), '$data resolved on the client');
 assert(dom.window.location.pathname === '/about', 'URL updated via pushState');
 assert((dom.window as any).__vtCalls() >= 1, 'client-side navigation ran inside a native view transition');
-assert(document.title === 'About Rosefn - Rosefn', 'page <title> overrides the layout on navigation');
-assert(document.querySelector('meta[name="description"]')?.getAttribute('content') === 'What Rosefn is and the ideas it is built on.', 'page meta description applied');
+assert(document.title === 'About RoseSpan - RoseSpan', 'page <title> overrides the layout on navigation');
+assert(document.querySelector('meta[name="description"]')?.getAttribute('content') === 'What RoseSpan is and the ideas it is built on.', 'page meta description applied');
 assert(document.querySelector('meta[name="generator"]') !== null, 'layout meta survives a page with its own head');
 assert(document.body.querySelector('title, meta') === null, 'no head content leaks into the live body after nav');
-assert(document.querySelector('img[alt="Rosefn"]')?.getAttribute('src')?.startsWith('data:image/svg+xml,') === true, 'logo inlined as a data URI after navigation');
+assert(document.querySelector('img[alt="RoseSpan"]')?.getAttribute('src')?.startsWith('data:image/svg+xml,') === true, 'logo inlined as a data URI after navigation');
 
 const homeLink = [...document.querySelectorAll('nav a')].find((a) => a.getAttribute('href') === '/')!;
 homeLink.click();
 await tick();
 assert(document.querySelector('p strong')!.textContent === '0', 'per-route state reset on navigation home');
-assert(document.title === 'Rosefn', 'layout <title> restored on navigation home');
+assert(document.title === 'RoseSpan', 'layout <title> restored on navigation home');
 assert(document.querySelector('meta[name="description"]') === null, 'page meta removed when leaving /about');
 
 const form = document.querySelector('form')!;
@@ -180,14 +180,14 @@ dom.window.history.pushState(null, '', '/nope');
 dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate'));
 await tick();
 assert(document.body.textContent!.includes('This rose has no petals here'), 'client-side nav to an unknown route renders pages/404.rose');
-assert(document.title === '404 - Rosefn', 'the 404 page applies its own <title>');
+assert(document.title === '404 - RoseSpan', 'the 404 page applies its own <title>');
 assert(document.querySelector('meta[name="robots"]')?.getAttribute('content') === 'noindex', 'the 404 page applies its own meta');
 
 const nfRes = await fetch(BASE + '/nope');
 assert(nfRes.status === 404, `server returns 404 for unmatched routes (got ${nfRes.status})`);
 const nfHtml = await nfRes.text();
 assert(nfHtml.includes('This rose has no petals here'), 'the served 404 document is the custom page');
-assert(/<title>404 - Rosefn<\/title>/.test(nfHtml), 'the served 404 document carries its <title>');
+assert(/<title>404 - RoseSpan<\/title>/.test(nfHtml), 'the served 404 document carries its <title>');
 
 const signRes = await fetch(BASE + '/sign');
 assert(signRes.status === 200, 'the sign page serves with 200');
@@ -232,14 +232,14 @@ assert((dom.window as any).__postCount() === postsBefore + 1, 'the action cost e
 assert(likesAfter > likesBefore, `the click ran the server action and adopted its value (${likesBefore} -> ${likesAfter})`);
 assert(!/\u27e6m:/.test(document.body.textContent!), 'the adopted likes text is marker-free');
 assert(dom.window.location.pathname === '/', 'the action did not navigate');
-assert(document.body.textContent!.includes('Welcome to Rosefn'), 'the page is still home after the action');
+assert(document.body.textContent!.includes('Welcome to RoseSpan'), 'the page is still home after the action');
 const likeRes = await fetch(BASE + '/', {
   method: 'POST',
   body: new URLSearchParams({ __action: 'like' }),
   headers: { 'content-type': 'application/x-www-form-urlencoded' },
 });
 assert(likeRes.status === 200, 'POST __action=like -> 200');
-const likeState = JSON.parse((await likeRes.text()).match(/<script type="application\/json" id="__rosefn_state">([\s\S]*?)<\/script>/)[1]);
+const likeState = JSON.parse((await likeRes.text()).match(/<script type="application\/json" id="__rosespan_state">([\s\S]*?)<\/script>/)[1]);
 assert(likeState.likes === likesAfter + 1, 'the raw POST ran the action and patched the state');
 
 const evilPost = await fetch(BASE + '/', {
@@ -283,7 +283,7 @@ assert(login.status === 200, `the seeded user signs in (got ${login.status})`);
 assert(login.setCookie?.includes('session=1') && login.setCookie.includes('HttpOnly'), 'login sets the HttpOnly session cookie');
 const session = (login.setCookie ?? '').split(';')[0];
 const posts = await (await fetch(BASE + '/api/posts')).json();
-assert(Array.isArray(posts.posts) && posts.posts.some((p: any) => p.title === 'Hello Rosefn'), 'the public GET lists the seeded articles');
+assert(Array.isArray(posts.posts) && posts.posts.some((p: any) => p.title === 'Hello RoseSpan'), 'the public GET lists the seeded articles');
 const title = 'e2e post ' + Date.now();
 const created = await apiWrite('/api/posts', { title, body: 'written by the suite' }, session);
 assert(created.status === 201, `an authenticated write creates the post (got ${created.status})`);
@@ -323,26 +323,26 @@ assert(seen.length === 1, 'a null transport disables the broadcast (single-proce
 assert($store('never-seen', { ok: true }).get().ok === true, 'an unknown store seeds from its initial value');
 
 const styleBlock = html.match(/<style>([\s\S]*?)<\/style>/g)!.join('');
-assert(styleBlock.includes('[data-rosefn-c="index"] .rcard'), 'the served document inlines the scoped index rules');
-assert(styleBlock.includes('[data-rosefn-c="about"] .rcard'), 'the served document inlines the scoped about rules');
+assert(styleBlock.includes('[data-rosespan-c="index"] .rcard'), 'the served document inlines the scoped index rules');
+assert(styleBlock.includes('[data-rosespan-c="about"] .rcard'), 'the served document inlines the scoped about rules');
 assert(!/<link[^>]+stylesheet/i.test(html), 'zero stylesheet requests (styles ride in the document)');
 const liveCard = document.querySelector('.rcard')!;
-assert(liveCard.closest('[data-rosefn-c]')!.getAttribute('data-rosefn-c') === 'index', 'the live home card belongs to the index scope');
+assert(liveCard.closest('[data-rosespan-c]')!.getAttribute('data-rosespan-c') === 'index', 'the live home card belongs to the index scope');
 dom.window.history.pushState(null, '', '/about');
 dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate'));
 await tick();
 const aboutCard = document.querySelector('.rcard')!;
-assert(aboutCard.closest('[data-rosefn-c]')!.getAttribute('data-rosefn-c') === 'about', 'after navigation the live card belongs to the about scope');
+assert(aboutCard.closest('[data-rosespan-c]')!.getAttribute('data-rosespan-c') === 'about', 'after navigation the live card belongs to the about scope');
 assert(aboutCard.textContent!.includes('revolutionary web framework'), 'the about card rendered after navigation');
 dom.window.history.pushState(null, '', '/');
 dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate'));
 await tick();
-assert(document.querySelector('.rcard')!.closest('[data-rosefn-c]')!.getAttribute('data-rosefn-c') === 'index', 'navigating home restores the index scope');
+assert(document.querySelector('.rcard')!.closest('[data-rosespan-c]')!.getAttribute('data-rosespan-c') === 'index', 'navigating home restores the index scope');
 const likeBtn2 = [...document.querySelectorAll('button')].find((b) => b.getAttribute('data-on-click') === '$action:like')!;
 likeBtn2.click();
 await tick();
 await tick();
-assert(document.querySelector('.rcard')!.closest('[data-rosefn-c]')!.getAttribute('data-rosefn-c') === 'index', 'the action response keeps the scope attribute');
+assert(document.querySelector('.rcard')!.closest('[data-rosespan-c]')!.getAttribute('data-rosespan-c') === 'index', 'the action response keeps the scope attribute');
 
 dom.window.history.pushState(null, '', '/about');
 dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate'));
@@ -381,7 +381,7 @@ const brokenRes = await fetch(BASE + '/broken');
 assert(brokenRes.status === 500, `a throwing route serves with 500 (got ${brokenRes.status})`);
 const brokenHtml = await brokenRes.text();
 assert(brokenHtml.includes('This rose pricked itself'), 'the served 500 document is the custom error page');
-const brokenState = brokenHtml.match(/<script type="application\/json" id="__rosefn_state">([\s\S]*?)<\/script>/)?.[1] ?? '';
+const brokenState = brokenHtml.match(/<script type="application\/json" id="__rosespan_state">([\s\S]*?)<\/script>/)?.[1] ?? '';
 assert(!brokenState.includes('data source is down'), 'the served 500 state carries no server error text');
 assert((await fetch(BASE + '/')).status === 200, 'other routes still serve 200 next to a broken one');
 dom.window.history.pushState(null, '', '/broken');
@@ -391,7 +391,7 @@ assert(document.body.textContent!.includes('This rose pricked itself'), 'the cli
 dom.window.history.pushState(null, '', '/');
 dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate'));
 await tick();
-assert(document.body.textContent!.includes('Welcome to Rosefn'), 'navigation still works after a broken route');
+assert(document.body.textContent!.includes('Welcome to RoseSpan'), 'navigation still works after a broken route');
 assert(document.body.textContent!.includes('This section failed to render.'), 'the boundary widget degraded in place');
 
 const streamRes = await fetch(BASE + '/admin', { headers: { cookie: 'session=Ada' } });
@@ -402,15 +402,15 @@ assert(streamHtml.startsWith('<!DOCTYPE html>'), 'the streamed document is compl
 assert(streamHtml.includes('<div id="app">'), 'the streamed document opens the app container');
 assert(streamHtml.includes('Hello, Ada'), 'the streamed body carries the rendered route');
 assert(streamHtml.trimEnd().endsWith('</html>'), 'the streamed document closes properly');
-assert(streamHtml.includes('id="__rosefn_state"'), 'the streamed document carries the state script');
-const streamState = JSON.parse(streamHtml.match(/id="__rosefn_state">([\s\S]*?)<\/script>/)![1]);
+assert(streamHtml.includes('id="__rosespan_state"'), 'the streamed document carries the state script');
+const streamState = JSON.parse(streamHtml.match(/id="__rosespan_state">([\s\S]*?)<\/script>/)![1]);
 assert(streamState.__route === '/admin', 'the streamed state names the requested route');
 const streamRefs = [...streamHtml.matchAll(/<(?:script|link|img)[^>]*(?:src|href)="([^"]+)"/g)]
   .map((m) => m[1])
   .filter((u) => !u.startsWith('#') && !u.startsWith('data:'));
 assert(streamRefs.length === 0, `the streamed document needs zero extra requests (${streamRefs.length} refs)`);
 assert(/\u27e6h:/.test(streamHtml), 'the streamed body carries the route head markers');
-assert(streamHtml.includes('<title>Rosefn</title>'), 'the streamed shell serves the default title before the route head exists');
+assert(streamHtml.includes('<title>RoseSpan</title>'), 'the streamed shell serves the default title before the route head exists');
 let streamClassic = streamHtml.replace('<script type="module">', '<script>');
 const streamExp = streamClassic.match(/\bexport\{([^}]*)\};?/);
 if (streamExp) {
@@ -422,12 +422,12 @@ await tick();
 const sapp = sdom.window.document.getElementById('app')!;
 assert(sapp.textContent!.includes('Hello, Ada'), 'the streamed document boots with zero hydration');
 assert(!sapp.textContent!.includes('\u27e6'), 'markers resolved after the streamed boot');
-assert(sdom.window.document.title === 'Admin - Rosefn', 'the client applies the route head markers at boot');
+assert(sdom.window.document.title === 'Admin - RoseSpan', 'the client applies the route head markers at boot');
 const blogRes = await fetch(BASE + '/blog/3');
 assert(blogRes.status === 200, 'the content route serves with 200');
 assert(blogRes.headers.get('transfer-encoding') !== 'chunked', 'a zero-JS route is buffered, never streamed');
 const blogHtml = await blogRes.text();
-assert(blogHtml.includes('<title>Not found - Rosefn blog</title>'), 'the buffered zero-JS document carries its full <head> inline');
+assert(blogHtml.includes('<title>Not found - RoseSpan blog</title>'), 'the buffered zero-JS document carries its full <head> inline');
 assert(blogHtml.includes('Blog Post #<!--\u27e6m:0\u27e7-->3'), 'the zero-JS document carries the rendered route');
 assert(blogHtml.includes('Not found'), 'the zero-JS document carries the resolved $data');
 assert((blogHtml.match(/<script/g) || []).length === 0, 'the zero-JS document contains zero script tags');
@@ -438,7 +438,7 @@ assert(feedRes.status === 200, 'GET /feed -> 200');
 const feedHtml = await feedRes.text();
 assert(feedRes.headers.get('transfer-encoding') !== 'chunked', 'the zero-JS dynamic route is buffered, never streamed (its <head> must be complete)');
 assert(feedHtml.includes('The dynamic half'), 'the DB rows are in the first response (read per request, not baked)');
-assert(feedHtml.includes('Hello Rosefn'), 'every row of the query is in the document');
+assert(feedHtml.includes('Hello RoseSpan'), 'every row of the query is in the document');
 assert(feedHtml.includes('ada'), 'the row author is in the document');
 assert(feedHtml.includes('Reading as a guest'), 'the middleware context reaches the page (no session -> guest)');
 const feedSigned = await fetch(BASE + '/feed', { headers: { cookie: 'session=Ada' } });
@@ -448,7 +448,7 @@ const feedRefs = [...feedHtml.matchAll(/<(?:script|link|img)[^>]*(?:src|href)="(
   .map((m) => m[1])
   .filter((u) => !u.startsWith('#') && !u.startsWith('data:'));
 assert(feedRefs.length === 0, `the dynamic DB route needs zero extra requests (${feedRefs.length} refs)`);
-assert(feedHtml.includes('<title>Feed - Rosefn</title>'), 'the buffered document carries its full <head> inline');
+assert(feedHtml.includes('<title>Feed - RoseSpan</title>'), 'the buffered document carries its full <head> inline');
 assert(feedHtml.trimEnd().endsWith('</html>'), 'the dynamic DB document closes properly');
 const feedApi = await fetch(BASE + '/api/posts');
 const feedPosts = await feedApi.json();
@@ -459,8 +459,8 @@ for (const p of feedPosts.posts.slice(0, 20)) {
 console.log(`dynamic DB route /feed: ${feedHtml.length} bytes raw, 0 script tags, ${feedRefs.length} extra requests, ${feedPosts.posts.length} rows in the first response`);
 const aboutRes = await fetch(BASE + '/about');
 const aboutHtml = await aboutRes.text();
-assert(aboutHtml.includes('<title>About Rosefn - Rosefn</title>'), 'a prerendered route still serves its full <head>');
-assert(aboutHtml.includes('name="description" content="What Rosefn is and the ideas it is built on."'), 'the prerendered head carries the route meta');
+assert(aboutHtml.includes('<title>About RoseSpan - RoseSpan</title>'), 'a prerendered route still serves its full <head>');
+assert(aboutHtml.includes('name="description" content="What RoseSpan is and the ideas it is built on."'), 'the prerendered head carries the route meta');
 
 const rawGet = (pathname: string, headers: Record<string, string> = {}) =>
   new Promise<{ status: number; headers: Record<string, string>; body: Buffer }>((resolve, reject) => {
@@ -477,18 +477,18 @@ const rawGet = (pathname: string, headers: Record<string, string> = {}) =>
 const wireIdentity = await rawGet('/');
 assert(wireIdentity.status === 200, 'identity response: 200');
 assert(!wireIdentity.headers['content-encoding'], 'no accept-encoding -> identity body');
-assert(wireIdentity.body.toString().includes('🌹 Rosefn'), 'identity body is the full document');
+assert(wireIdentity.body.toString().includes('🌹 RoseSpan'), 'identity body is the full document');
 
 const wireGz = await rawGet('/', { 'accept-encoding': 'gzip' });
 assert(wireGz.headers['content-encoding'] === 'gzip', 'gzip negotiated when accepted');
 assert(wireGz.headers['vary'] === 'Accept-Encoding', 'Vary: Accept-Encoding set');
 assert(wireGz.body.length < wireIdentity.body.length, `gzip wire bytes < raw (${wireGz.body.length} < ${wireIdentity.body.length})`);
-assert(gunzipSync(wireGz.body).toString().includes('🌹 Rosefn'), 'gzip body decompresses to the full document');
+assert(gunzipSync(wireGz.body).toString().includes('🌹 RoseSpan'), 'gzip body decompresses to the full document');
 
 const wireBr = await rawGet('/', { 'accept-encoding': 'br, gzip' });
 assert(wireBr.headers['content-encoding'] === 'br', 'brotli preferred over gzip when both accepted');
 assert(wireBr.body.length < wireGz.body.length, `brotli wire bytes < gzip (${wireBr.body.length} < ${wireGz.body.length})`);
-assert(brotliDecompressSync(wireBr.body).toString().includes('🌹 Rosefn'), 'brotli body decompresses to the full document');
+assert(brotliDecompressSync(wireBr.body).toString().includes('🌹 RoseSpan'), 'brotli body decompresses to the full document');
 
 const etag = wireIdentity.headers['etag'];
 assert(!!etag, 'static file carries an ETag');
@@ -500,7 +500,7 @@ assert(wire304.body.length === 0, 'the 304 carries no body');
 const wireStream = await rawGet('/blog/3', { 'accept-encoding': 'gzip' });
 assert(wireStream.headers['content-encoding'] === 'gzip', 'the buffered content route is compressed');
 const wireStreamDoc = gunzipSync(wireStream.body).toString();
-assert(!wireStreamDoc.includes('id="__rosefn_state"'), 'the buffered zero-JS+gzip document carries no state script');
+assert(!wireStreamDoc.includes('id="__rosespan_state"'), 'the buffered zero-JS+gzip document carries no state script');
 assert((wireStreamDoc.match(/<script/g) || []).length === 0, 'the buffered zero-JS+gzip document carries no scripts');
 assert(wireStreamDoc.includes('Blog Post'), 'the buffered zero-JS+gzip document carries the route content');
 assert(wireStreamDoc.trimEnd().endsWith('</html>'), 'the buffered zero-JS+gzip document is complete');
@@ -545,7 +545,7 @@ assert(apiGet.status === 200, 'GET /api/hello -> 200');
 assert((apiGet.headers.get('content-type') || '').includes('application/json'), 'the api response is application/json');
 assert(!apiGet.headers.get('etag'), 'the api path runs the handler, not the baked static file');
 const apiJson = await apiGet.json();
-assert(apiJson.hello === 'Rosefn', 'the api GET body is the handler object');
+assert(apiJson.hello === 'RoseSpan', 'the api GET body is the handler object');
 const apiPost = await fetch(BASE + '/api/hello', {
   method: 'POST',
   headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -623,8 +623,8 @@ await tick();
     assert(fresh === swapped, 'after the swap the request serves the new document');
     assert(stampOf(fresh) !== stampOf(onDisk), `the stamp advanced (${stampOf(onDisk)} -> ${stampOf(fresh)})`);
     assert(!fresh.includes('<script'), 'the swapped ISR document stays zero-JS (no script tags)');
-    assert(!fresh.includes('__rosefn_state'), 'the swapped ISR document carries no state script');
-    assert(!fresh.includes('__rosefn'), 'the swapped ISR document inlines no bundle');
+    assert(!fresh.includes('__rosespan_state'), 'the swapped ISR document carries no state script');
+    assert(!fresh.includes('__rosespan'), 'the swapped ISR document inlines no bundle');
 
     const again = await (await fetch(PREVIEW + '/fresh')).text();
     assert(stampOf(again) === stampOf(fresh), 'the window holds: no render until the next stale request');
@@ -648,10 +648,10 @@ await tick();
 {
   const garden = await (await fetch(BASE + '/garden')).text();
   assert(garden.includes('The Garden') && garden.includes('in full bloom'), 'the no-JS route serves its content over real HTTP');
-  assert(!garden.includes('__rosefn_state'), 'the no-JS document has no state script');
-  assert(!garden.includes('__rosefn_handlers'), 'the no-JS document has no client bundle');
+  assert(!garden.includes('__rosespan_state'), 'the no-JS document has no state script');
+  assert(!garden.includes('__rosespan_handlers'), 'the no-JS document has no client bundle');
   assert((garden.match(/<script/g) || []).length === 0, 'the no-JS document contains zero script tags');
-  assert(garden.includes('<title>The Garden - Rosefn</title>'), 'the no-JS document keeps the route <title> (buffered, complete head)');
+  assert(garden.includes('<title>The Garden - RoseSpan</title>'), 'the no-JS document keeps the route <title> (buffered, complete head)');
   assert(garden.includes('\u{1F339}'), 'the served no-JS document carries the plugin transform output');
   const gardenRefs = [...garden.matchAll(/<(?:script|link|img)[^>]*(?:src|href)="([^"]+)"/g)]
     .map((m) => m[1])
@@ -659,13 +659,13 @@ await tick();
   assert(gardenRefs.length === 0, 'the no-JS document requests nothing: one request total');
   assert(garden.length < 6000, `the no-JS document is tiny (${garden.length} bytes raw)`);
   const home = await (await fetch(BASE + '/')).text();
-  assert(home.includes('__rosefn_state') && home.includes('__rosefn_handlers'), 'a normal route still inlines the state script and the bundle');
+  assert(home.includes('__rosespan_state') && home.includes('__rosespan_handlers'), 'a normal route still inlines the state script and the bundle');
   dom.window.history.pushState(null, '', '/garden');
   dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate'));
   await tick();
   assert(document.body.textContent!.includes('The Garden'), 'client-side navigation paints the no-JS route from the bundle');
   assert(document.body.textContent!.includes('in full bloom'), 'the client render ran the no-JS route $data resolver');
-  assert(dom.window.document.title === 'The Garden - Rosefn', 'the client render applied the no-JS route <head>');
+  assert(dom.window.document.title === 'The Garden - RoseSpan', 'the client render applied the no-JS route <head>');
   dom.window.history.pushState(null, '', '/');
   dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate'));
   await tick();
@@ -702,7 +702,7 @@ await tick();
   assert(cspA.includes("object-src 'none'"), 'the nonce policy keeps every other directive of the default');
   const moduleTag = signAHtml.match(/<script type="module"([^>]*)>/)![1];
   assert(moduleTag.includes(`nonce="${nonceA}"`), 'the document script tag carries the header nonce');
-  assert(signAHtml.includes('<script type="application/json" id="__rosefn_state">'), 'the state script stays untagged');
+  assert(signAHtml.includes('<script type="application/json" id="__rosespan_state">'), 'the state script stays untagged');
   const signB = await fetch(BASE + '/sign');
   const nonceB = /'nonce-([^']+)'/.exec(signB.headers.get('content-security-policy')!)![1];
   assert(nonceB !== nonceA, 'every response mints a fresh nonce');
@@ -724,14 +724,14 @@ await tick();
   assert(enRes.status === 200, 'GET /en/about -> 200');
   const enHtml = await enRes.text();
   assert(enHtml.includes('This page speaks your language'), 'the en document carries the en dictionary');
-  assert(enHtml.includes('Hello, Rosefn - this sentence was translated with a variable.'), 'the served document interpolates the variable');
-  assert(enHtml.includes('<title>About, localized - Rosefn</title>'), 'the en document head is localized');
+  assert(enHtml.includes('Hello, RoseSpan - this sentence was translated with a variable.'), 'the served document interpolates the variable');
+  assert(enHtml.includes('<title>About, localized - RoseSpan</title>'), 'the en document head is localized');
   const zhRes = await fetch(BASE + '/zh/about');
   assert(zhRes.status === 200, 'GET /zh/about -> 200');
   const zhHtml = await zhRes.text();
   assert(zhHtml.includes('这一页说你的语言'), 'the zh document carries the zh dictionary');
-  assert(zhHtml.includes('你好,Rosefn - 这句话带变量翻译。'), 'the zh document interpolates the variable');
-  assert(zhHtml.includes('<title>关于,已本地化 - Rosefn</title>'), 'the zh document head is localized');
+  assert(zhHtml.includes('你好,RoseSpan - 这句话带变量翻译。'), 'the zh document interpolates the variable');
+  assert(zhHtml.includes('<title>关于,已本地化 - RoseSpan</title>'), 'the zh document head is localized');
   const frRes = await fetch(BASE + '/fr/about');
   assert(frRes.status === 404, 'GET /fr/about -> 404');
   assert((await frRes.text()).includes('This rose has no petals here'), 'the unknown locale serves the 404 page');
@@ -749,8 +749,8 @@ await tick();
   const arHtml = await arRes.text();
   assert(arHtml.includes('<html lang="ar" dir="rtl">'), 'the ar document is right-to-left');
   assert(arHtml.includes('هذه الصفحة تتحدث لغتك'), 'the ar document carries the ar dictionary');
-  assert(arHtml.includes('مرحبًا، Rosefn'), 'the ar document interpolates the variable');
-  assert(arHtml.includes('<title>حول، مترجم - Rosefn</title>'), 'the ar document head is localized');
+  assert(arHtml.includes('مرحبًا، RoseSpan'), 'the ar document interpolates the variable');
+  assert(arHtml.includes('<title>حول، مترجم - RoseSpan</title>'), 'the ar document head is localized');
   assert(arHtml.includes('لا توقيعات بعد في سجل الزوار'), 'the ar =0 arm renders');
   assert(arHtml.includes('توقيع واحد في سجل الزوار'), 'the ar one arm renders');
   assert(arHtml.includes('7 توقيعات في سجل الزوار'), 'the ar few arm renders (7 is "few" in Arabic)');
@@ -765,7 +765,7 @@ await tick();
   dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate'));
   await tick();
   assert(app.textContent!.includes('这一页说你的语言'), 'client-side navigation paints the zh locale');
-  assert(dom.window.document.title === '关于,已本地化 - Rosefn', 'the localized head is applied on navigation');
+  assert(dom.window.document.title === '关于,已本地化 - RoseSpan', 'the localized head is applied on navigation');
   dom.window.history.pushState(null, '', '/en/about');
   dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate'));
   await tick();
@@ -822,7 +822,7 @@ await tick();
   const roseHtml = await rose.text();
   const roseText = roseHtml.replace(/<!--\u27e6[^>]*?\u27e7-->/g, '');
   assert(rose.status === 200, 'GET /search?q=rose -> 200 (the query reaches the render)');
-  assert(roseHtml.includes('<title>Search: rose - Rosefn</title>'), '$query() feeds the document head');
+  assert(roseHtml.includes('<title>Search: rose - RoseSpan</title>'), '$query() feeds the document head');
   assert(roseText.includes('2 result(s) for'), 'the query filters the corpus');
   assert(roseHtml.includes('<strong>first post</strong>'), 'P1-2: {@html} emits the trusted markup verbatim');
   assert(!roseHtml.includes('&lt;strong&gt;'), 'P1-2: and it is not escaped');

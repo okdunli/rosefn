@@ -217,9 +217,9 @@ if (failures) {
   const tmpT = pathT.join('.test-compiler-out', 'each-bridge.rose');
   fsT.mkdirSync('.test-compiler-out', { recursive: true });
   fsT.writeFileSync(tmpT, `<div>
-  {#each globalThis.__rosefnContent.list("docs") as d}<li>{d.title}</li>{/each}
+  {#each globalThis.__rosespanContent.list("docs") as d}<li>{d.title}</li>{/each}
 </div>`, 'utf-8');
-  (globalThis as any).__rosefnContent = { get: () => null, list: () => ([{ title: 'A' }, { title: 'B' }]), mk: () => '' };
+  (globalThis as any).__rosespanContent = { get: () => null, list: () => ([{ title: 'A' }, { title: 'B' }]), mk: () => '' };
   const outT: any = await compileComponent(tmpT, pathT.join(process.cwd(), 'public'), 't22', false, [], new Map());
   fsT.mkdirSync('.test-compiler-tmp', { recursive: true });
   fsT.writeFileSync('.test-compiler-tmp/runtime.ts', 'export * from "../src/runtime/index.ts";', 'utf-8');
@@ -229,7 +229,7 @@ if (failures) {
   check('T22: {#each} over globalThis bridge renders items', htmlT.includes('A') && htmlT.includes('B'));
   safeRm(tmpT);
   safeRm('.test-compiler-tmp', { recursive: true });
-  delete (globalThis as any).__rosefnContent;
+  delete (globalThis as any).__rosespanContent;
 }
 
 {
@@ -834,9 +834,9 @@ if (failures) {
 {@debug}`, 'utf-8');
   const outG: any = await compileComponent(tmpG, pathG.join(process.cwd(), 'public'), 'dbgpage', false, [], new Map());
   const srcG = String(outG.ssr);
-  check('F19 @debug: logs the named values at that point', /console\.log\('\[rosefn:debug\]', \{ n\(\) \}\);/.test(srcG));
-  check('F19 @debug: bare form also breaks into the debugger', srcG.includes("console.log('[rosefn:debug]'); debugger;"));
-  check('F19 @debug: emits nothing into the output', !srcG.includes('rosefn:debug]') || !/<p>x<\/p>\\s*rosefn/.test(srcG));
+  check('F19 @debug: logs the named values at that point', /console\.log\('\[rosespan:debug\]', \{ n\(\) \}\);/.test(srcG));
+  check('F19 @debug: bare form also breaks into the debugger', srcG.includes("console.log('[rosespan:debug]'); debugger;"));
+  check('F19 @debug: emits nothing into the output', !srcG.includes('rosespan:debug]') || !/<p>x<\/p>\\s*rosespan/.test(srcG));
   safeRm(tmpG);
 }
 
@@ -845,9 +845,9 @@ if (failures) {
     '.card :global(.md) { color: red }\n:global(body) { margin: 0 }\n.plain { color: blue }',
     'demo',
   );
-  check('F27: mixed :global keeps the owning half scoped, the rest unscoped', out.includes('[data-rosefn-c="demo"] .card .md{color:red}'), out);
+  check('F27: mixed :global keeps the owning half scoped, the rest unscoped', out.includes('[data-rosespan-c="demo"] .card .md{color:red}'), out);
   check('F27: an all-:global selector emits without the scope prefix', /(^|[}])body\{margin:0\}/.test(out), out);
-  check('F27: plain selectors still scope', out.includes('[data-rosefn-c="demo"] .plain{color:blue}'), out);
+  check('F27: plain selectors still scope', out.includes('[data-rosespan-c="demo"] .plain{color:blue}'), out);
 }
 
 if (failures > 0) {

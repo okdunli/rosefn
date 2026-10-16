@@ -1,11 +1,11 @@
 /**
- * rosefn/test - the PUBLIC testing API, proven against the demo app.
+ * rosespan/test - the PUBLIC testing API, proven against the demo app.
  *
  * The framework's own suites (client/edge/e2e/go/cli/pack) drive the bundles
  * directly. This one drives them the way a USER does: through the single
  * `test()` entry point a project's own vitest file would import. If this
  * suite is green, a project can test its components, pages, middleware,
- * api routes and server actions with nothing but `rosefn/test`.
+ * api routes and server actions with nothing but `rosespan/test`.
  *
  * What it proves, in order:
  *   1. a component target builds and renders with the given props
@@ -40,7 +40,7 @@ const stripMarkers = (h: string) => h.replace(/<!--\u27e6[^>]*-->/g, '');
 const card = await test('example/src/components/FactCard.rose', {
   props: { fact: 'components compile into the app' },
 });
-assert(card.route === '/__rosefn_test', 'a component target gets its own synthesized route');
+assert(card.route === '/__rosespan_test', 'a component target gets its own synthesized route');
 const cardPage = await card.get();
 assert(cardPage.status === 200, 'the synthesized route renders (200)');
 assert(stripMarkers(cardPage.html).includes('components compile into the app'), 'the component renders with the given props');
@@ -51,8 +51,8 @@ const home = await test('example/src/pages/index.rose');
 assert(home.route === '/', 'a page target defaults to the page\'s own URL');
 const homePage = await home.get();
 assert(homePage.status === 200, 'the home page renders (200)');
-assert(stripMarkers(homePage.html).includes('Welcome to Rosefn'), 'the page content is there');
-assert(homePage.document.includes('id="__rosefn_state"'), 'the document carries the state script the client resumes');
+assert(stripMarkers(homePage.html).includes('Welcome to RoseSpan'), 'the page content is there');
+assert(homePage.document.includes('id="__rosespan_state"'), 'the document carries the state script the client resumes');
 assert(homePage.state.count === 0, 'the state parses out of the document (count starts at 0)');
 assert(homePage.document.includes('<script'), 'the document ships the bundle (the page is interactive)');
 
@@ -71,7 +71,7 @@ const unmatched = await home.get('/about', { headers: { 'accept-language': 'fr' 
 assert(unmatched.status === 200, 'a preference matching no dictionary serves the page in the default locale');
 
 const hello = await home.api('GET', '/api/hello');
-assert(hello.status === 200 && (hello.body as any)?.hello === 'Rosefn', 'a public api route answers JSON');
+assert(hello.status === 200 && (hello.body as any)?.hello === 'RoseSpan', 'a public api route answers JSON');
 const secret = await home.api('GET', '/api/secret');
 assert(secret.status === 401, 'the guarded api route refuses an anonymous call');
 const mine = await home.api('GET', '/api/secret', { cookies: { session: 'Ada' } });
@@ -122,7 +122,7 @@ await page.action('action', { name: 'Barbara Liskov' });
 assert(page.text('#app').includes('guestbook is full'), 'the guard vetoes the sixth signature with its ActionError message');
 
 await page.navigate('/');
-assert(page.text('h1').includes('Welcome to Rosefn'), 'client-side navigation renders another route of the built app');
+assert(page.text('h1').includes('Welcome to RoseSpan'), 'client-side navigation renders another route of the built app');
 assert(page.requestCount() === 4, 'navigation re-rendered locally: no request for the new route');
 
 const header = page.document.querySelector('header');
@@ -137,4 +137,4 @@ assert(page.document.querySelector('h1') === heading, 'fine-grained: the heading
 assert((globalThis as any).document === undefined, 'restore() ungrafts the DOM globals');
 assert(globalThis.fetch === fetchBefore, 'restore() puts the fetch proxy back to the process\'s own');
 
-console.log(`\nAll rosefn/test checks passed - ${checks} assertions`);
+console.log(`\nAll rosespan/test checks passed - ${checks} assertions`);

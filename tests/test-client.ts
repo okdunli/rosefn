@@ -1,5 +1,5 @@
 /**
- * rosefn client smoke test - one runnable check for the client pipeline:
+ * rosespan client smoke test - one runnable check for the client pipeline:
  * SSR state resume, zero-hydration DOM adoption, fine-grained updates
  * (event -> state -> only the affected node changes), client-side
  * navigation, $data on navigation.
@@ -57,13 +57,13 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 
 const home = await renderPage('/');
 const stripMarkers = (h: string) => h.replace(/<!--\u27e6[^>]*-->/g, '');
-assert(stripMarkers(home.html).includes('Welcome to Rosefn'), 'SSR renders home page content');
-assert(home.html.includes('🌹 Rosefn'), 'layout wraps page (header present)');
+assert(stripMarkers(home.html).includes('Welcome to RoseSpan'), 'SSR renders home page content');
+assert(home.html.includes('🌹 RoseSpan'), 'layout wraps page (header present)');
 assert(home.html.includes('\u27e6m:'), 'SSR html carries reactive markers');
 assert(JSON.parse(home.state).count === 0, 'state serialized into HTML');
 
 const stateEl = document.createElement('script');
-stateEl.id = '__rosefn_state';
+stateEl.id = '__rosespan_state';
 stateEl.textContent = home.state;
 document.body.appendChild(stateEl);
 
@@ -73,7 +73,7 @@ const h1Before = appEl.querySelector('h1')!;
 await start(appEl, '/', true);
 assert(appEl.querySelector('header') === headerBefore, 'zero hydration: layout node identity preserved');
 assert(appEl.querySelector('h1') === h1Before, 'zero hydration: page node identity preserved');
-assert(appEl.textContent!.includes('Welcome to Rosefn'), 'adopted DOM keeps SSR text');
+assert(appEl.textContent!.includes('Welcome to RoseSpan'), 'adopted DOM keeps SSR text');
 assert(!appEl.textContent!.includes('\u27e6'), 'markers resolved to values after adoption');
 
 const incBtn = appEl.querySelector('[data-on-click="increment"]')! as any;
@@ -92,7 +92,7 @@ toggleBtn.click();
 await tick();
 assert(!!appEl.querySelector('h2'), '{#if} block re-inserted on toggle');
 assert(appEl.textContent!.includes('Performance'), '{#each} list rendered inside block');
-const kids = [...appEl.querySelector('[data-rosefn-c="index"]')!.children];
+const kids = [...appEl.querySelector('[data-rosespan-c="index"]')!.children];
 const at = kids.findIndex((n) => n.nodeName === 'H2' && n.textContent === 'Features');
 assert(at > 0 && kids.slice(at, at + 3).map((n) => n.nodeName).join(',') === 'H2,UL,BUTTON', 'the re-rendered {#if} keeps h2 -> ul -> button order');
 
@@ -105,14 +105,14 @@ assert(ulBefore.children.length === 4, 'list grew to 4 items after addItem');
 await start(appEl, '/blog/2', false);
 assert(appEl.textContent!.includes('Blog Post #2'), 'client-side nav renders dynamic route');
 assert(appEl.textContent!.includes('Zero-hydration magic'), 'client-side $data fetches fresh data');
-assert(appEl.textContent!.includes('🌹 Rosefn'), 'layout present after client-side nav');
+assert(appEl.textContent!.includes('🌹 RoseSpan'), 'layout present after client-side nav');
 
 await start(appEl, '/about', false);
-assert(appEl.textContent!.includes('About Rosefn'), 'client-side nav to /about');
+assert(appEl.textContent!.includes('About RoseSpan'), 'client-side nav to /about');
 assert(appEl.textContent!.includes('File-system routing with nested layouts'), '$data content rendered on client');
 
 await start(appEl, '/', false);
-assert(appEl.textContent!.includes('Welcome to Rosefn'), 'client-side nav back home');
+assert(appEl.textContent!.includes('Welcome to RoseSpan'), 'client-side nav back home');
 assert(appEl.querySelector('p strong')!.textContent === '0', 'per-route state resets on navigation');
 
 const links = Array.from(appEl.querySelectorAll('nav a'));
@@ -126,12 +126,12 @@ prefetch('/about');
 await tick();
 stats = prefetchStats();
 assert(stats.cached === 1, 'hover on a link prefetched the target route');
-assert(appEl.textContent!.includes('Welcome to Rosefn'), 'prefetch left the current page DOM untouched');
+assert(appEl.textContent!.includes('Welcome to RoseSpan'), 'prefetch left the current page DOM untouched');
 assert(appEl.querySelector('p strong')!.textContent === '0', 'prefetch did not leak state into the live page');
 
 await start(appEl, '/about', false);
 assert(prefetchStats().cached === 0, 'navigation consumed the prefetched render (single-use)');
-assert(appEl.textContent!.includes('About Rosefn'), 'prefetched route painted from cache');
+assert(appEl.textContent!.includes('About RoseSpan'), 'prefetched route painted from cache');
 assert(appEl.textContent!.includes('File-system routing with nested layouts'), 'prefetched $data content present');
 
 (globalThis as any).location.pathname = '/about';
@@ -203,19 +203,19 @@ assert(appEl.textContent!.includes('Guestbook'), appEl.textContent!.includes('Gu
 setConn(undefined);
 assert(pfStats().network === true, 'the override is removable (no connection again)');
 
-const metaDesc = () => document.head.querySelector('meta[data-rosefn-head="meta:description"]');
-const metaGen = () => document.head.querySelector('meta[data-rosefn-head="meta:generator"]');
+const metaDesc = () => document.head.querySelector('meta[data-rosespan-head="meta:description"]');
+const metaGen = () => document.head.querySelector('meta[data-rosespan-head="meta:generator"]');
 await start(appEl, '/', false);
-assert(document.title === 'Rosefn', 'home shows the layout <title>');
-assert(metaGen()?.getAttribute('content') === 'Rosefn', 'layout generator meta present');
+assert(document.title === 'RoseSpan', 'home shows the layout <title>');
+assert(metaGen()?.getAttribute('content') === 'RoseSpan', 'layout generator meta present');
 
 await start(appEl, '/about', false);
-assert(document.title === 'About Rosefn - Rosefn', 'navigation applied the page <title> (page overrides layout)');
-assert(metaDesc()?.getAttribute('content') === 'What Rosefn is and the ideas it is built on.', 'page meta description applied');
+assert(document.title === 'About RoseSpan - RoseSpan', 'navigation applied the page <title> (page overrides layout)');
+assert(metaDesc()?.getAttribute('content') === 'What RoseSpan is and the ideas it is built on.', 'page meta description applied');
 assert(metaGen() !== null, 'layout-only meta survives a page with its own head');
 
 await start(appEl, '/', false);
-assert(document.title === 'Rosefn', 'navigating back restores the layout title');
+assert(document.title === 'RoseSpan', 'navigating back restores the layout title');
 assert(metaDesc() === null, 'stale page meta removed on navigation');
 assert(metaGen() !== null, 'layout meta still present after navigating away');
 
@@ -225,20 +225,20 @@ const headPassthrough = buildShell('<p>hi</p>', '{}', null, [
   '<noscript>turn on js</noscript>',
   '<meta name="x" content="1">',
 ]);
-assert(headPassthrough.includes('<style data-rosefn-head="style:#0">:root{--accent:#e91e63}</style>'), 'a head <style> reaches the document (it used to be dropped in silence)');
-assert(headPassthrough.includes('<script data-rosefn-head="script:#0" type="application/ld+json">{"@type":"Article"}</script>'), 'a JSON-LD data block reaches the document');
-assert(headPassthrough.includes('<noscript data-rosefn-head="noscript:#0">turn on js</noscript>'), 'a <noscript> reaches the document');
-assert(headPassthrough.includes('<meta data-rosefn-head="meta:x" name="x" content="1">'), 'T15: keyed meta keeps its identity key and its HEAD_ATTR marker');
+assert(headPassthrough.includes('<style data-rosespan-head="style:#0">:root{--accent:#e91e63}</style>'), 'a head <style> reaches the document (it used to be dropped in silence)');
+assert(headPassthrough.includes('<script data-rosespan-head="script:#0" type="application/ld+json">{"@type":"Article"}</script>'), 'a JSON-LD data block reaches the document');
+assert(headPassthrough.includes('<noscript data-rosespan-head="noscript:#0">turn on js</noscript>'), 'a <noscript> reaches the document');
+assert(headPassthrough.includes('<meta data-rosespan-head="meta:x" name="x" content="1">'), 'T15: keyed meta keeps its identity key and its HEAD_ATTR marker');
 const dupStyle = buildShell('<p>hi</p>', '{}', null, ['<style id="t">a</style>', '<style id="t">b</style>']);
-assert(dupStyle.includes('<style data-rosefn-head="style:t" id="t">a</style>'), 'the first style carrying an id wins');
+assert(dupStyle.includes('<style data-rosespan-head="style:t" id="t">a</style>'), 'the first style carrying an id wins');
 assert(!dupStyle.includes('>b</style>'), 'a later style with the same id is dropped (page overrides layout)');
 const twoStyles = buildShell('<p>hi</p>', '{}', null, ['<style>a</style>', '<style>b</style>']);
-assert(twoStyles.includes('<style data-rosefn-head="style:#0">a</style>') && twoStyles.includes('<style data-rosefn-head="style:#1">b</style>'), 'two unkeyed style blocks coexist (positional keys)');
+assert(twoStyles.includes('<style data-rosespan-head="style:#0">a</style>') && twoStyles.includes('<style data-rosespan-head="style:#1">b</style>'), 'two unkeyed style blocks coexist (positional keys)');
 const singleQuoted = buildShell('<p>hi</p>', '{}', null, ["<meta name='y' content='2'>", "<style id='s'>c</style>"]);
-assert(singleQuoted.includes("data-rosefn-head=\"meta:y\""), 'a single-quoted meta keeps its key');
-assert(singleQuoted.includes('data-rosefn-head="style:s"'), 'a single-quoted style id is read');
+assert(singleQuoted.includes("data-rosespan-head=\"meta:y\""), 'a single-quoted meta keeps its key');
+assert(singleQuoted.includes('data-rosespan-head="style:s"'), 'a single-quoted style id is read');
 
-const aboutStyle = () => document.head.querySelector('style[data-rosefn-head="style:#0"]');
+const aboutStyle = () => document.head.querySelector('style[data-rosespan-head="style:#0"]');
 await start(appEl, '/about', false);
 assert(aboutStyle()?.textContent?.includes('.rfetch') === true, 'the route head <style> is adopted on navigation');
 assert(document.querySelector('.rfetch') !== null, 'the styled element is in the page');
@@ -246,31 +246,31 @@ await start(appEl, '/', false);
 assert(aboutStyle() === null, 'navigating away drops the previous route head <style> (no CSS leak into later routes)');
 await start(appEl, '/about', false);
 assert(aboutStyle()?.textContent?.includes('.rfetch') === true, 'navigating back restores the route head <style>');
-assert(document.head.querySelectorAll('style[data-rosefn-head]').length === 1, 'exactly one managed head style after a round trip');
+assert(document.head.querySelectorAll('style[data-rosespan-head]').length === 1, 'exactly one managed head style after a round trip');
 
 (globalThis as any).location = { pathname: '/guarded' };
 await start(appEl, '/guarded', false);
 assert(appEl.textContent!.includes('The slot opens'), 'the guarded layout renders its page');
 assert(appEl.querySelector('h1')?.textContent === 'Guarded' && appEl.querySelector('p')?.textContent?.includes('The slot opens'), 'the block body nodes keep their render order (h1 then p)');
 assert([...appEl.querySelectorAll('main > *')].map((n) => n.nodeName).join(',') === 'H1,P', 'the block content order survives the adoption round trip');
-assert(document.title === 'Guarded Page - Rosefn', 'a page head inside a guarded slot beats the layout head on the client');
+assert(document.title === 'Guarded Page - RoseSpan', 'a page head inside a guarded slot beats the layout head on the client');
 assert(document.head.querySelector('meta[name="description"]')?.getAttribute('content') === 'A page head inside a guarded slot.', 'the page meta also survives the guarded slot');
-assert(!document.body.textContent!.includes('Guarded Layout - Rosefn'), 'no head content leaks into the body');
+assert(!document.body.textContent!.includes('Guarded Layout - RoseSpan'), 'no head content leaks into the body');
 await start(appEl, '/about', false);
-assert(document.title === 'About Rosefn - Rosefn', 'leaving the guarded route applies the next route head');
+assert(document.title === 'About RoseSpan - RoseSpan', 'leaving the guarded route applies the next route head');
 await start(appEl, '/guarded', false);
-assert(document.title === 'Guarded Page - Rosefn', 'returning to the guarded route re-applies the page head');
+assert(document.title === 'Guarded Page - RoseSpan', 'returning to the guarded route re-applies the page head');
 
 const aboutDoc = readFileSync('dist/about/index.html', 'utf-8');
-assert(/<title>About Rosefn - Rosefn<\/title>/.test(aboutDoc), 'prerendered about page has its <title> in <head>');
-assert(/<meta [^>]*name="description"[^>]*content="What Rosefn is/.test(aboutDoc), 'prerendered about page has its description meta');
-if (false) assert(/<meta [^>]*name="generator" content="Rosefn">/.test(aboutDoc), 'prerendered about page T15: layout meta');
-assert(/<style data-rosefn-head="style:#0">\.rfetch/.test(aboutDoc), 'the prerendered document carries the route head <style> (bug report 11:46)');
+assert(/<title>About RoseSpan - RoseSpan<\/title>/.test(aboutDoc), 'prerendered about page has its <title> in <head>');
+assert(/<meta [^>]*name="description"[^>]*content="What RoseSpan is/.test(aboutDoc), 'prerendered about page has its description meta');
+if (false) assert(/<meta [^>]*name="generator" content="RoseSpan">/.test(aboutDoc), 'prerendered about page T15: layout meta');
+assert(/<style data-rosespan-head="style:#0">\.rfetch/.test(aboutDoc), 'the prerendered document carries the route head <style> (bug report 11:46)');
 assert(aboutDoc.includes('<p class="rfetch">data fetches:'), 'the styled element is served with its class');
 const bodyOf = (doc: string) => doc.replace(/<script[\s\S]*?<\/script>/g, '').slice(doc.indexOf('<body>'));
 assert(!/<title|<meta/i.test(bodyOf(aboutDoc)), 'no head content leaks into the prerendered body');
 const blogDoc = readFileSync('dist/blog/1/index.html', 'utf-8');
-assert(/<title>Hello Rosefn - Rosefn blog<\/title>/.test(blogDoc), 'prerendered blog page resolved $data into its <title>');
+assert(/<title>Hello RoseSpan - RoseSpan blog<\/title>/.test(blogDoc), 'prerendered blog page resolved $data into its <title>');
 assert(!/<title|<meta/i.test(bodyOf(blogDoc)), 'blog body carries no head content');
 
 const withDefaultIcon = buildShell('<p>hi</p>', '{}', null, []);
@@ -279,7 +279,7 @@ const withCustomIcon = buildShell('<p>hi</p>', '{}', null, ['<link rel="icon" hr
 assert(withCustomIcon.includes('/custom.ico'), 'a route <link rel="icon"> is kept');
 assert(!/svg\+xml,<svg/.test(withCustomIcon), 'a route icon replaces the default favicon');
 const htmlState = buildShell('<p>x</p>', JSON.stringify({ chrome: '<script src="/t.js"></script>' }), 'BUNDLE', []);
-const stateBlock = htmlState.match(/id="__rosefn_state">([\s\S]*?)<\/script>/)!;
+const stateBlock = htmlState.match(/id="__rosespan_state">([\s\S]*?)<\/script>/)!;
 assert(!!stateBlock, 'the state data block still terminates at the real closing tag');
 assert(JSON.parse(stateBlock[1]).chrome === '<script src="/t.js"></script>', 'the escaped state JSON round-trips through JSON.parse');
 assert(!htmlState.includes('</script><script src="/t.js"'), 'no raw script tag from the state survives in the markup');
@@ -290,18 +290,18 @@ assert(!aboutDoc.includes('src="/logo.svg"'), 'no external image request left fo
   const nf = await renderPage('/nope');
 assert(nf.status === 404, 'renderPage returns 404 for unmatched routes');
 assert(nf.html.includes('This rose has no petals here'), 'pages/404.rose renders for unmatched routes');
-assert(nf.head.join('').includes('<title>404 - Rosefn</title>'), 'the 404 page carries its own <title>');
+assert(nf.head.join('').includes('<title>404 - RoseSpan</title>'), 'the 404 page carries its own <title>');
   assert((await renderPage('/')).status === 200, 'matched routes still return 200');
 (globalThis as any).location = { pathname: '/nope' };
 if (false) await start(appEl, '/nope', false);
 if (false) assert(document.body.textContent!.includes('This rose has no petals here'), 'client router renders pages/404.rose');
-if (false) assert(document.title === '404 - Rosefn', 'the 404 page applies its <title> on the client');
+if (false) assert(document.title === '404 - RoseSpan', 'the 404 page applies its <title> on the client');
 assert(document.body.querySelector('nav a') !== null, 'the 404 page keeps the layout nav');
 assert(JSON.parse(nf.state).__notFound === true, 'the 404 document state carries the __notFound stamp');
 (globalThis as any).location = { pathname: '/nope' };
 if (false) await startNotFound(appEl, '/nope');
 if (false) assert(appEl.textContent!.includes('This rose has no petals here'), 'startNotFound paints the themed 404 from the resumed state');
-if (false) assert(document.title === '404 - Rosefn', 'startNotFound applies the 404 <title>');
+if (false) assert(document.title === '404 - RoseSpan', 'startNotFound applies the 404 <title>');
 assert(!appEl.textContent!.includes('500'), 'startNotFound never lands on the built-in 500 (the null-data catch-all trap)');
 
 (globalThis as any).location = { pathname: '/mirror404' };
@@ -339,7 +339,7 @@ assert(!clientSrc.includes('unshift'), 'the client bundle excludes the server-on
 await adopt(appEl, posted.html, posted.state);
 assert(appEl.textContent!.includes('Rose Tester'), 'adopt painted the server response in place');
 assert(appEl.textContent!.includes('Signatures'), 'adopt rendered the sign page');
-assert(document.getElementById('__rosefn_state')!.textContent!.includes('Rose Tester'), 'adopt updated the embedded state');
+assert(document.getElementById('__rosespan_state')!.textContent!.includes('Rose Tester'), 'adopt updated the embedded state');
 const fd2 = new FormData();
 fd2.append('name', 'Second Signer');
 const posted2 = await renderPage('/sign', fd2);
@@ -361,7 +361,7 @@ assert(!broken.html.includes('data source is down'), 'the route error does not l
 if (false) await start(appEl, '/broken', false);
 if (false) assert(appEl.textContent!.includes('This rose pricked itself'), 'the client router degrades a broken route to the 500 page');
 await start(appEl, '/', false);
-if (false) assert(appEl.textContent!.includes('Welcome to Rosefn'), 'navigation still works after a broken route');
+if (false) assert(appEl.textContent!.includes('Welcome to RoseSpan'), 'navigation still works after a broken route');
 
 assert(canStream('/'), 'canStream: static routes stream');
 assert(canStream('/blog/3'), 'canStream: dynamic routes stream (the pattern matches; isNoJs picks the buffered path for content routes)');
@@ -371,14 +371,14 @@ const status = await renderPageStream('/', (c) => chunks.push(c), shellOpen(), '
 assert(status === 200, 'streaming a matched route returns 200');
 assert(chunks.length >= 2, 'the shell flushes as its own chunk before the route');
 assert(chunks[0] === shellOpen(), 'the first chunk is byte-identical to the static shell open');
-assert(!chunks[0].includes('Welcome to Rosefn'), 'the shell chunk carries no route content (it flushed first)');
+assert(!chunks[0].includes('Welcome to RoseSpan'), 'the shell chunk carries no route content (it flushed first)');
 const doc = chunks.join('');
 assert(doc.includes('<div id="app">'), 'the streamed document opens the app container');
 assert(doc.includes('</div>'), 'the streamed document closes the app container');
-assert(doc.includes('id="__rosefn_state"'), 'the streamed document carries the state script');
+assert(doc.includes('id="__rosespan_state"'), 'the streamed document carries the state script');
 assert(doc.includes('<script>bundle</script>'), 'the streamed document carries the client script');
 assert(doc.trimEnd().endsWith('</html>'), 'the streamed document is complete');
-assert(JSON.parse(doc.match(/id="__rosefn_state">([\s\S]*?)<\/script>/)![1]).__route === '/', 'the streamed state names the requested route');
+assert(JSON.parse(doc.match(/id="__rosespan_state">([\s\S]*?)<\/script>/)![1]).__route === '/', 'the streamed state names the requested route');
 const homeBuffered = await renderPage('/');
 assert(doc.includes(homeBuffered.html), 'the streamed body matches the buffered render byte for byte');
 const noJsChunks: string[] = [];
@@ -386,7 +386,7 @@ const noJsStatus = await renderPageStream('/blog/3', (c) => noJsChunks.push(c), 
 const noJsDoc = noJsChunks.join('');
 assert(noJsStatus === 200, 'streaming a no-JS route still returns 200');
 assert(noJsDoc.includes('Blog Post'), 'the streamed no-JS document carries the route content');
-assert(!noJsDoc.includes('id="__rosefn_state"'), 'the streamed no-JS document carries no state script');
+assert(!noJsDoc.includes('id="__rosespan_state"'), 'the streamed no-JS document carries no state script');
 assert(!noJsDoc.includes('<script>bundle</script>'), 'the streamed no-JS document carries no client script');
 assert(noJsDoc.trimEnd().endsWith('</html>'), 'the streamed no-JS document is complete');
 const buffered = await renderPage('/blog/3');
@@ -413,7 +413,7 @@ assert(bareDoc.includes('The Bare Route'), 'the bare document carries the route 
 assert(!bareDoc.includes('<div id="app">'), 'the bare document has no #app wrapper');
 assert(!bareDoc.includes('padding:2rem'), 'the bare document carries no demo body padding');
 assert(!bareDoc.includes('a{color:#e91e63;text-decoration:none;font-weight:bold}'), 'the bare document carries no demo pink links');
-assert(bareDoc.includes('id="__rosefn_state"'), 'the bare document still carries the state script');
+assert(bareDoc.includes('id="__rosespan_state"'), 'the bare document still carries the state script');
 assert(bareDoc.includes('<script type="module">'), 'the bare document still inlines the bundle');
 const bareChunks: string[] = [];
 const bareStatus = await renderPageStream('/bare', (c) => bareChunks.push(c), shellOpen('', 'en', '', false), '<script>bundle</script>');
@@ -424,7 +424,7 @@ assert(nf.shell === false, 'the not-found page reports its shell = false');
 const nfDoc = getHtmlShell(nf.html, nf.state, nf.head, nf.csr !== false, nf.lang, nf.dir, '', nf.shell !== false);
 assert(!nfDoc.includes('<div id="app">'), 'the 404 document has no #app wrapper');
 assert(!nfDoc.includes('padding:2rem'), 'the 404 document carries no demo body padding');
-assert(nfDoc.includes('id="__rosefn_state"'), 'the 404 document still carries the state script');
+assert(nfDoc.includes('id="__rosespan_state"'), 'the 404 document still carries the state script');
 assert(nfDoc.includes('<script type="module">'), 'the 404 document still inlines the bundle');
 const homeDoc = getHtmlShell(home.html, home.state, home.head, home.csr !== false, home.lang, home.dir, '', home.shell !== false);
 assert(homeDoc.includes('<div id="app">'), 'a dressed document still opens the app container');
@@ -452,7 +452,7 @@ assert(likesBefore === 41, 'the page renders the client-side store value');
 await tick();
 assert(likesOf() === lastPostState.likes, 'the click adopted exactly the value the server rendered');
 assert(likesOf() > likesBefore, 'the click ran the server action (the value moved)');
-assert(appEl.textContent!.includes('Welcome to Rosefn'), 'the adopted page is still the home page (no navigation)');
+assert(appEl.textContent!.includes('Welcome to RoseSpan'), 'the adopted page is still the home page (no navigation)');
 assert(!appEl.textContent!.includes('\u27e6'), 'markers resolved after the adopt');
 const afterClick = likesOf();
 await $action('like');
@@ -461,23 +461,23 @@ assert(likesOf() === lastPostState.likes, '$action adopts the server response fr
 assert(likesOf() === afterClick + 1, 'the server store advanced exactly once per action call');
 
 const styles = readFileSync('dist/styles.css', 'utf-8');
-assert(styles.includes('[data-rosefn-c="index"] .rcard'), "index's card rule is scoped to its component");
-assert(styles.includes('[data-rosefn-c="about"] .rcard'), "about's card rule is scoped to its component");
-const bare = styles.replace(/\[data-rosefn-c="[^"]+"\]\s*\.rcard/g, '');
+assert(styles.includes('[data-rosespan-c="index"] .rcard'), "index's card rule is scoped to its component");
+assert(styles.includes('[data-rosespan-c="about"] .rcard'), "about's card rule is scoped to its component");
+const bare = styles.replace(/\[data-rosespan-c="[^"]+"\]\s*\.rcard/g, '');
 assert(!/\.rcard\s*\{/.test(bare), 'no unscoped .rcard rule survives scoping');
-assert(home.html.includes('data-rosefn-c="index"'), 'the styled component root carries its scope attribute');
-assert(clientSrc.includes('data-rosefn-c="index"'), 'client-side renders keep the scope attribute');
+assert(home.html.includes('data-rosespan-c="index"'), 'the styled component root carries its scope attribute');
+assert(clientSrc.includes('data-rosespan-c="index"'), 'client-side renders keep the scope attribute');
 appEl.innerHTML = home.html;
 const homeCard = appEl.querySelector('.rcard')!;
-assert(homeCard.closest('[data-rosefn-c]')!.getAttribute('data-rosefn-c') === 'index', 'the home card belongs to the index scope');
+assert(homeCard.closest('[data-rosespan-c]')!.getAttribute('data-rosespan-c') === 'index', 'the home card belongs to the index scope');
 const about = await renderPage('/about');
 const scopeAboutDoc = new (globalThis as any).DOMParser().parseFromString(about.html, 'text/html');
 const aboutCard = scopeAboutDoc.querySelector('.rcard')!;
-assert(aboutCard.closest('[data-rosefn-c]')!.getAttribute('data-rosefn-c') === 'about', 'the about card belongs to the about scope');
+assert(aboutCard.closest('[data-rosespan-c]')!.getAttribute('data-rosespan-c') === 'about', 'the about card belongs to the about scope');
 const signPage = await renderPage('/sign');
-assert(!signPage.html.includes('data-rosefn-c='), 'unstyled components carry no scope attribute');
-assert(shellOpen().includes('[data-rosefn-c="index"] .rcard'), 'the streamed shell inlines the scoped styles');
-assert(buildShell(home.html, home.state, null, []).includes('<style>[data-rosefn-c='), 'the buffered shell inlines the scoped styles');
+assert(!signPage.html.includes('data-rosespan-c='), 'unstyled components carry no scope attribute');
+assert(shellOpen().includes('[data-rosespan-c="index"] .rcard'), 'the streamed shell inlines the scoped styles');
+assert(buildShell(home.html, home.state, null, []).includes('<style>[data-rosespan-c='), 'the buffered shell inlines the scoped styles');
 
 (globalThis as any).location = { pathname: '/about' };
 await start(appEl, '/about', false);
@@ -509,7 +509,7 @@ const apiGet = await handleApi('GET', '/api/hello', new Request('http://localhos
 assert(apiGet.status === 200, 'GET /api/hello -> 200');
 assert(apiGet.headers.get('content-type') === 'application/json', 'the handler object serializes as application/json');
 const apiBody = JSON.parse(await apiGet.text());
-assert(apiBody.hello === 'Rosefn', 'the GET handler object is the response body');
+assert(apiBody.hello === 'RoseSpan', 'the GET handler object is the response body');
 const apiQ = await handleApi('GET', '/api/hello', new Request('http://localhost/api/hello?x=1'));
 assert(apiQ.status === 200, 'a query string does not break api matching');
 const apiForm = new NativeFormData();
@@ -526,7 +526,7 @@ assert(apiMissing.headers.get('content-type') === 'application/json', 'the api 4
 assert(JSON.parse(await apiMissing.text()).error === 'not found', 'the api 404 body names the error');
 assert(apiPrerender['/api/hello'] === true, 'export const prerender = true is visible to the build');
 const baked = JSON.parse(readFileSync('dist/api/hello.json', 'utf-8'));
-assert(baked.hello === 'Rosefn', 'the prerendered api body landed in dist/api/hello.json');
+assert(baked.hello === 'RoseSpan', 'the prerendered api body landed in dist/api/hello.json');
 assert(!clientSrc.includes('one request, zero hydration'), 'the api handler body never reaches the client bundle');
 assert(!clientSrc.includes('api/hello'), 'the api route never enters the client route table');
 
@@ -647,29 +647,29 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   assert((await renderPage('/')).csr === true, 'every interactive route keeps the bundle');
   assert((await renderPage('/sign')).csr === true, 'a form route keeps the bundle');
   const baked = readFileSync('dist/blog/1/index.html', 'utf-8');
-  assert(!baked.includes('__rosefn_state'), 'the baked auto zero-JS document has no state script');
-  assert(!baked.includes('__rosefn_handlers'), 'the baked auto zero-JS document has no client bundle');
+  assert(!baked.includes('__rosespan_state'), 'the baked auto zero-JS document has no state script');
+  assert(!baked.includes('__rosespan_handlers'), 'the baked auto zero-JS document has no client bundle');
   assert((baked.match(/<script/g) || []).length === 0, 'the baked auto zero-JS document contains zero script tags');
-  assert(baked.includes('Hello Rosefn'), 'the zero-JS document still carries the rendered content');
+  assert(baked.includes('Hello RoseSpan'), 'the zero-JS document still carries the rendered content');
   assert(getHtmlShell(blog.html, blog.state, blog.head, blog.csr !== false) === baked, 'the shell built with js = false matches the baked document byte for byte');
   const gardenBaked = readFileSync('dist/garden/index.html', 'utf-8');
-  assert(!gardenBaked.includes('__rosefn_state'), 'the baked no-JS document has no state script');
-  assert(!gardenBaked.includes('__rosefn_handlers'), 'the baked no-JS document has no client bundle');
+  assert(!gardenBaked.includes('__rosespan_state'), 'the baked no-JS document has no state script');
+  assert(!gardenBaked.includes('__rosespan_handlers'), 'the baked no-JS document has no client bundle');
   assert((gardenBaked.match(/<script/g) || []).length === 0, 'the baked no-JS document contains zero script tags');
   assert(gardenBaked.includes('The Garden') && gardenBaked.includes('in full bloom'), 'the no-JS document still carries the rendered content');
-  assert(gardenBaked.includes('<title>The Garden - Rosefn</title>'), 'the no-JS document keeps the route <title> (buffered, complete head)');
+  assert(gardenBaked.includes('<title>The Garden - RoseSpan</title>'), 'the no-JS document keeps the route <title> (buffered, complete head)');
   assert(getHtmlShell(garden.html, garden.state, garden.head, garden.csr !== false) === gardenBaked, 'the shell built with js = false matches the baked document byte for byte');
   assert(gardenBaked.includes('\u{1F339}'), 'the demo plugin transform reached the baked document');
   assert(readFileSync('example/src/pages/garden.rose', 'utf-8').includes('@thorn'), 'the source on disk keeps the token (a transform never mutates sources)');
   const homeDoc = await renderPage('/');
   const jsDoc = getHtmlShell(homeDoc.html, homeDoc.state, homeDoc.head, homeDoc.csr !== false);
-  if (false) assert(jsDoc.includes('__rosefn_state') && jsDoc.includes('__rosefn_handlers'), 'a normal route still inlines the state script and the bundle');
+  if (false) assert(jsDoc.includes('__rosespan_state') && jsDoc.includes('__rosespan_handlers'), 'a normal route still inlines the state script and the bundle');
   assert(clientSrc.includes('The Garden'), 'the no-JS route render function still rides in the client bundle');
   const { compileComponent } = await import('./src/compiler/index.js');
   const { writeFileSync, unlinkSync } = await import('fs');
   const { tmpdir } = await import('os');
   const { join } = await import('path');
-  const thornFile = join(tmpdir(), 'rosefn-thorn.rose');
+  const thornFile = join(tmpdir(), 'rosespan-thorn.rose');
   const thorn = async (src: string) => {
     writeFileSync(thornFile, src);
     try { await compileComponent(thornFile, '', 'test'); return false; } catch { return true; } finally { unlinkSync(thornFile); }
@@ -762,14 +762,14 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   assert(report[0].includes('/plain') && report[0].includes('client JS') && report[0].includes('refresh() in _layout.rose'), `a route under a needy layout blames the layout (got: ${report[0]})`);
   assert(report[1].includes('/loud') && report[1].includes('event wiring (on:) in loud.rose'), `a needy route blames its own component (got: ${report[1]})`);
   const { loadPlugins } = await import('./src/compiler/index.js');
-  assert((await loadPlugins(tmpdir())).length === 0, 'a project with no rosefn.config.js loads no plugins');
-  const pluginFile = join(tmpdir(), 'rosefn-plugin.rose');
+  assert((await loadPlugins(tmpdir())).length === 0, 'a project with no rosespan.config.js loads no plugins');
+  const pluginFile = join(tmpdir(), 'rosespan-plugin.rose');
   writeFileSync(pluginFile, '<script>\nlet p = $data(async () => "x");\n</script>\n<p>{p()}</p>');
   let boomMsg = '';
   try {
     await compileComponent(pluginFile, '', 'test', false, [{ name: 'boom', transform: () => { throw new Error('nope'); } }]);
   } catch (err) { boomMsg = (err as Error).message; }
-  assert(boomMsg.includes('plugin boom failed on rosefn-plugin.rose'), `a throwing plugin fails the build naming itself and the file (got: ${boomMsg})`);
+  assert(boomMsg.includes('plugin boom failed on rosespan-plugin.rose'), `a throwing plugin fails the build naming itself and the file (got: ${boomMsg})`);
   const withPlugin = await compileComponent(pluginFile, '', 'test', false, [{ name: 'upper', transform: (code: string) => code.replaceAll('"x"', '"X"') }]);
   assert(withPlugin.ssr.includes('"X"'), 'a plugin transform rewrites the source the compiler parses');
   unlinkSync(pluginFile);
@@ -794,7 +794,7 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   const { writeFileSync, unlinkSync } = await import('fs');
   const { tmpdir } = await import('os');
   const { join } = await import('path');
-  const ruleFile = join(tmpdir(), 'rosefn-rule.rose');
+  const ruleFile = join(tmpdir(), 'rosespan-rule.rose');
   const rule = async (src: string) => {
     writeFileSync(ruleFile, src);
     try { await compileComponent(ruleFile, '', 'test'); return false; } catch { return true; } finally { unlinkSync(ruleFile); }
@@ -811,11 +811,11 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   const ar = await renderPage('/ar/about');
   assert(ar.status === 200, 'the packed locale still renders on the server');
   assert(stripMarkers(en.html).includes('This page speaks your language'), 'the en route renders the en dictionary');
-  assert(stripMarkers(en.html).includes('Hello, Rosefn - this sentence was translated with a variable.'), '$t interpolates {name} variables');
+  assert(stripMarkers(en.html).includes('Hello, RoseSpan - this sentence was translated with a variable.'), '$t interpolates {name} variables');
   assert(stripMarkers(zh.html).includes('这一页说你的语言'), 'the zh route renders the zh dictionary');
-  assert(stripMarkers(zh.html).includes('你好,Rosefn - 这句话带变量翻译。'), '$t interpolates into the zh dictionary');
-  assert(en.head.join('').includes('<title>About, localized - Rosefn</title>'), '$t works in the route <head> (en)');
-  assert(zh.head.join('').includes('<title>关于,已本地化 - Rosefn</title>'), '$t works in the route <head> (zh)');
+  assert(stripMarkers(zh.html).includes('你好,RoseSpan - 这句话带变量翻译。'), '$t interpolates into the zh dictionary');
+  assert(en.head.join('').includes('<title>About, localized - RoseSpan</title>'), '$t works in the route <head> (en)');
+  assert(zh.head.join('').includes('<title>关于,已本地化 - RoseSpan</title>'), '$t works in the route <head> (zh)');
   assert(stripMarkers(en.html).includes('Current language: en'), 'the [lang] param arrives as state (en)');
   assert(stripMarkers(zh.html).includes('当前语言: zh'), 'the [lang] param arrives as state (zh)');
   assert(JSON.parse(en.state).lang === 'en' && JSON.parse(zh.state).lang === 'zh', 'the locale rides in the serialized state');
@@ -904,7 +904,7 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   };
 
   const probe = async (src: string) => {
-    const f = join(tmpdir(), 'rosefn-bundle.rose');
+    const f = join(tmpdir(), 'rosespan-bundle.rose');
     writeFileSync(f, src);
     try { return await compileComponent(f, '', 'test'); } finally { rmSync(f, { force: true }); }
   };
@@ -925,8 +925,8 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   } catch (err) { badCsp = (err as Error).message; }
   assert(badCsp.includes('csp.nonce must be a boolean'), `an invalid csp.nonce fails the build (got: ${badCsp})`);
 
-  const splitRoot = writeFixture('rosefn-splitfix', 'split');
-  const splitOut = join(tmpdir(), 'rosefn-splitfix-dist');
+  const splitRoot = writeFixture('rosespan-splitfix', 'split');
+  const splitOut = join(tmpdir(), 'rosespan-splitfix-dist');
   const splitBuild = await buildProject(splitRoot, splitOut);
   assert(splitBuild.bundle === 'split', 'the build reports split mode from the root layout export');
   assert(existsSync(join(splitOut, 'chunks')), 'split mode emits a chunks/ directory');
@@ -957,11 +957,11 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   assert(securityHeaders(null)['Content-Security-Policy'].includes("'sha256-"), 'the hashed split policy is unchanged when no nonce is asked for');
 
   location.pathname = '/';
-  document.getElementById('__rosefn_state')?.remove();
+  document.getElementById('__rosespan_state')?.remove();
   const fixServer = await import(pathToFileURL(join(splitOut, 'server.js')).href);
   const fixHome = await fixServer.renderPage('/');
   const fixState = document.createElement('script');
-  fixState.id = '__rosefn_state';
+  fixState.id = '__rosespan_state';
   fixState.textContent = fixHome.state;
   document.body.appendChild(fixState);
   appEl.innerHTML = fixHome.html;
@@ -981,8 +981,8 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   assert(appEl.textContent!.includes('About the split'), 'the prefetched paint lands from the cache');
 
   setBundleMode('inline');
-  const inlineRoot = writeFixture('rosefn-inlinefix', 'inline');
-  const inlineOut = join(tmpdir(), 'rosefn-inlinefix-dist');
+  const inlineRoot = writeFixture('rosespan-inlinefix', 'inline');
+  const inlineOut = join(tmpdir(), 'rosespan-inlinefix-dist');
   const inlineBuild = await buildProject(inlineRoot, inlineOut);
   assert(inlineBuild.bundle === 'inline', 'an app without the export builds in the default inline mode');
   assert(!existsSync(join(inlineOut, 'chunks')), 'inline mode emits no chunks (one self-contained bundle, as before)');
@@ -1012,7 +1012,7 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   const { pathToFileURL } = await import('url');
   const { buildProject } = await import('./src/compiler/index.js');
 
-  const root = join(tmpdir(), 'rosefn-compfix');
+  const root = join(tmpdir(), 'rosespan-compfix');
   rmSync(root, { recursive: true, force: true });
   mkdirSync(join(root, 'src', 'components', 'ui'), { recursive: true });
   mkdirSync(join(root, 'src', 'pages'), { recursive: true });
@@ -1077,16 +1077,16 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   </Card>
 {/each}
 `);
-  const out = join(tmpdir(), 'rosefn-compfix-dist');
+  const out = join(tmpdir(), 'rosespan-compfix-dist');
   rmSync(out, { recursive: true, force: true });
   await buildProject(root, out);
 
   location.pathname = '/';
-  document.getElementById('__rosefn_state')?.remove();
+  document.getElementById('__rosespan_state')?.remove();
   const compServer = await import(pathToFileURL(join(out, 'server.js')).href);
   const compHome = await compServer.renderPage('/');
   const compState = document.createElement('script');
-  compState.id = '__rosefn_state';
+  compState.id = '__rosespan_state';
   compState.textContent = compHome.state;
   document.body.appendChild(compState);
   appEl.innerHTML = compHome.html;
@@ -1122,7 +1122,7 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   const { pathToFileURL } = await import('url');
   const { buildProject } = await import('./src/compiler/index.js');
 
-  const root = join(tmpdir(), 'rosefn-nestfix');
+  const root = join(tmpdir(), 'rosespan-nestfix');
   rmSync(root, { recursive: true, force: true });
   mkdirSync(join(root, 'src', 'pages'), { recursive: true });
   writeFileSync(join(root, 'src', 'pages', '_layout.rose'), `<header><a href="/">Nest</a></header>\n<slot />`);
@@ -1180,12 +1180,12 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   {/if}
 {/boundary}
 `);
-  const out = join(tmpdir(), 'rosefn-nestfix-dist');
+  const out = join(tmpdir(), 'rosespan-nestfix-dist');
   rmSync(out, { recursive: true, force: true });
   await buildProject(root, out);
 
   location.pathname = '/';
-  document.getElementById('__rosefn_state')?.remove();
+  document.getElementById('__rosespan_state')?.remove();
   const nestServer = await import(pathToFileURL(join(out, 'server.js')).href);
   const nestHome = await nestServer.renderPage('/');
   const nestVisible = stripMarkers(nestHome.html).replace(/<script[\s\S]*?<\/script>/g, '');
@@ -1194,7 +1194,7 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   assert(nestVisible.includes('boundary always renders') && !nestVisible.includes('boundary sees the inner flag'), 'the {#boundary} renders around its nested {#if}');
 
   const nestState = document.createElement('script');
-  nestState.id = '__rosefn_state';
+  nestState.id = '__rosespan_state';
   nestState.textContent = nestHome.state;
   document.body.appendChild(nestState);
   appEl.innerHTML = nestHome.html;
@@ -1232,10 +1232,10 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
 }
 
 {
-  document.getElementById('__rosefn_state')?.remove();
+  document.getElementById('__rosespan_state')?.remove();
   const islandPage = await renderPage('/island-demo');
   const islandState = document.createElement('script');
-  islandState.id = '__rosefn_state';
+  islandState.id = '__rosespan_state';
   islandState.textContent = islandPage.state;
   document.body.appendChild(islandState);
   appEl.innerHTML = islandPage.html;
@@ -1250,7 +1250,7 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   await tick();
   const after = islandWrap!.textContent ?? '';
   assert(after !== before, 'islands: scoped wire() hydrates the island (click updates counter)');
-  document.getElementById('__rosefn_state')?.remove();
+  document.getElementById('__rosespan_state')?.remove();
 }
 
 {
@@ -1263,10 +1263,10 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
 }
 
 {
-  document.getElementById('__rosefn_state')?.remove();
+  document.getElementById('__rosespan_state')?.remove();
   const bindPage = await renderPage('/bind-demo');
   const s = document.createElement('script');
-  s.id = '__rosefn_state';
+  s.id = '__rosespan_state';
   s.textContent = bindPage.state;
   document.body.appendChild(s);
   appEl.innerHTML = bindPage.html;
@@ -1340,10 +1340,10 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
 }
 
 {
-  document.getElementById('__rosefn_state')?.remove();
+  document.getElementById('__rosespan_state')?.remove();
   const elsePage = await renderPage('/else-demo');
   const s = document.createElement('script');
-  s.id = '__rosefn_state';
+  s.id = '__rosespan_state';
   s.textContent = elsePage.state;
   document.body.appendChild(s);
   appEl.innerHTML = elsePage.html;
@@ -1365,10 +1365,10 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
     removeItem: (k: string) => { mem.delete(k); },
     clear: () => mem.clear(),
   };
-  document.getElementById('__rosefn_state')?.remove();
+  document.getElementById('__rosespan_state')?.remove();
   const persistPage = await renderPage('/persist-demo');
   const s = document.createElement('script');
-  s.id = '__rosefn_state';
+  s.id = '__rosespan_state';
   s.textContent = persistPage.state;
   document.body.appendChild(s);
   appEl.innerHTML = persistPage.html;
@@ -1377,9 +1377,9 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   (appEl.querySelector('.persist-demo button')! as any).click();
   await tick();
   assert(appEl.textContent!.includes('Theme: dark'), 'F9: toggle updates the state');
-  assert(mem.get('rosefn:theme') === '"dark"', 'F9: the write reached localStorage');
+  assert(mem.get('rosespan:theme') === '"dark"', 'F9: the write reached localStorage');
   const s2 = document.createElement('script');
-  s2.id = '__rosefn_state';
+  s2.id = '__rosespan_state';
   s2.textContent = persistPage.state;
   document.body.appendChild(s2);
   appEl.innerHTML = persistPage.html;
@@ -1389,10 +1389,10 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
 }
 
 {
-  document.getElementById('__rosefn_state')?.remove();
+  document.getElementById('__rosespan_state')?.remove();
   const staggerPage = await renderPage('/deftest');
   const s = document.createElement('script');
-  s.id = '__rosefn_state';
+  s.id = '__rosespan_state';
   s.textContent = staggerPage.state;
   document.body.appendChild(s);
   appEl.innerHTML = staggerPage.html;

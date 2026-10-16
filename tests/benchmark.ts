@@ -1,5 +1,5 @@
 ﻿/**
- * Rosefn Performance Benchmark
+ * RoseSpan Performance Benchmark
  * Measures: SSR render time, SSR throughput (renders/sec), client bundle
  * size (raw + gzip), network requests, live HTTP throughput of the Go
  * single binary (requires `go` on PATH - the binary is built and spawned
@@ -22,7 +22,7 @@ const ssrStart = Date.now();
 const page = await renderPage('/');
 const ssrTime = Date.now() - ssrStart;
 
-console.log(`\n🌹 Rosefn Performance Benchmark`);
+console.log(`\n🌹 RoseSpan Performance Benchmark`);
 console.log('===============================');
 console.log(`SSR render time: ${ssrTime}ms`);
 console.log(`HTML length: ${Buffer.byteLength(page.html, 'utf-8')} bytes`);
@@ -67,7 +67,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { buildProject } from '../src/compiler/index.js';
 
-const FLOOR = path.join(os.tmpdir(), 'rosefn-floor');
+const FLOOR = path.join(os.tmpdir(), 'rosespan-floor');
 try {
   fs.rmSync(FLOOR, { recursive: true, force: true });
   fs.mkdirSync(path.join(FLOOR, 'src'), { recursive: true });
@@ -123,16 +123,16 @@ const routeOk = routeChecks.every(([, ok]) => ok);
 console.log(`\nRoute matching: ${routeOk ? 'OK' : 'FAIL'}`);
 
 console.log(`\nMeasured (2026-09-20, same machine, same minimal app):`);
-console.log(`  Rosefn:            ${totalRequests} request,  ${(gzipSync(Buffer.from(shell)).length / 1024).toFixed(2)} KB gzip total (${(clientGzip / 1024).toFixed(2)} KB JS, ALL routes, 14-route demo)`);
-console.log(`  Rosefn zero-JS:    ${totalRequests} request,  ${(gzipSync(gardenBytes).length / 1024).toFixed(2)} KB gzip total, 0.00 KB JS (a csr = false content page - no runtime, no state script, no hydration)`);
-console.log(`  Rosefn auto 0-JS:  ${totalRequests} request,  ${(gzipSync(blog1Bytes).length / 1024).toFixed(2)} KB gzip total, 0.00 KB JS (a content route the COMPILER decided needs no client - no export at all)`);
-console.log(`  Rosefn (brotli):   ${totalRequests} request,  ${(brotliCompressSync(Buffer.from(shell)).length / 1024).toFixed(2)} KB brotli total - the Node server negotiates br > gzip on the wire, like the Go binary`);
+console.log(`  RoseSpan:            ${totalRequests} request,  ${(gzipSync(Buffer.from(shell)).length / 1024).toFixed(2)} KB gzip total (${(clientGzip / 1024).toFixed(2)} KB JS, ALL routes, 14-route demo)`);
+console.log(`  RoseSpan zero-JS:    ${totalRequests} request,  ${(gzipSync(gardenBytes).length / 1024).toFixed(2)} KB gzip total, 0.00 KB JS (a csr = false content page - no runtime, no state script, no hydration)`);
+console.log(`  RoseSpan auto 0-JS:  ${totalRequests} request,  ${(gzipSync(blog1Bytes).length / 1024).toFixed(2)} KB gzip total, 0.00 KB JS (a content route the COMPILER decided needs no client - no export at all)`);
+console.log(`  RoseSpan (brotli):   ${totalRequests} request,  ${(brotliCompressSync(Buffer.from(shell)).length / 1024).toFixed(2)} KB brotli total - the Node server negotiates br > gzip on the wire, like the Go binary`);
 console.log(`  (the bootstrap - navigation, prefetch listeners, view transitions, form interception - is minified once at module load and inlined into every document)`);
 
 const DYN_PORT = 8131;
 const dynProc = spawn(process.execPath, ['node_modules/tsx/dist/cli.mjs', 'src/cli/index.ts', 'serve', 'example'], {
   cwd: process.cwd(),
-  env: { ...process.env, PORT: String(DYN_PORT), ROSEFN_WORKERS: '1' },
+  env: { ...process.env, PORT: String(DYN_PORT), ROSESPAN_WORKERS: '1' },
   stdio: 'ignore',
 });
 const dynAgent = new Agent({ keepAlive: true, maxSockets: 1 });
@@ -168,7 +168,7 @@ try {
   for (let i = 0; i < 100 && !up; i++) {
     try { await fetch(`http://localhost:${DYN_PORT}/`); up = true; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
-  if (!up) throw new Error('rosefn serve did not start');
+  if (!up) throw new Error('rosespan serve did not start');
   const feed = await dynGet('/feed');
   const feedHtml = dynDecode(feed.body, feed.enc);
   const feedRequests = 1 + dynRefs(feedHtml).length;
@@ -179,8 +179,8 @@ try {
   const signHtml = dynDecode(sign.body, sign.enc);
   const signRequests = 1 + dynRefs(signHtml).length;
   const signTtfb = await dynTtfb('/sign');
-  console.log(`\nDynamic routes, measured live against rosefn serve (1 worker, keep-alive, br/gzip):`);
-  console.log(`  /feed  (dynamic page, DB read per request): ${feedRequests} request, ${(feed.bytes / 1024).toFixed(2)} KB on the wire, TTFB p50 ${feedTtfb.toFixed(2)} ms, ${(feedHtml.match(/<script/g) ?? []).length} script tags, DB rows in the first response: ${/Hello Rosefn/.test(feedHtml)}`);
+  console.log(`\nDynamic routes, measured live against rosespan serve (1 worker, keep-alive, br/gzip):`);
+  console.log(`  /feed  (dynamic page, DB read per request): ${feedRequests} request, ${(feed.bytes / 1024).toFixed(2)} KB on the wire, TTFB p50 ${feedTtfb.toFixed(2)} ms, ${(feedHtml.match(/<script/g) ?? []).length} script tags, DB rows in the first response: ${/Hello RoseSpan/.test(feedHtml)}`);
   console.log(`  /api/posts (dynamic api, DB read):          1 request, ${(posts.bytes / 1024).toFixed(2)} KB on the wire, TTFB p50 ${postsTtfb.toFixed(2)} ms`);
   console.log(`  /sign  (dynamic page, $store):              ${signRequests} request, ${(sign.bytes / 1024).toFixed(2)} KB on the wire, TTFB p50 ${signTtfb.toFixed(2)} ms`);
   console.log(`  (the invariant: a dynamic route is still one request with zero hydration - the data is in the first response, no client runtime boots to show it)`);
@@ -191,21 +191,21 @@ try {
 
 console.log(`\nDynamic route with a database read, (measured 2026-09-22):`);
 console.log(`                       requests   total wire bytes   TTFB p50   script tags`);
-console.log(`  Rosefn /feed            1        0.93 KB            3.61 ms      0`);
+console.log(`  RoseSpan /feed            1        0.93 KB            3.61 ms      0`);
 
 console.log(`\nThe real app (29-route CMS, per-request DB), (measured 2026-09-22; port re-measured 2026-09-29):`);
 console.log(`                       requests   wire bytes   script tags   TTFB p50`);
-console.log(`  /            rosefn port       6        6.7 KB             4     0.39 ms`);
-console.log(`  /blog        rosefn port       6        6.7 KB             4    171.2 ms (stale - pre-cache; / today: 0.39 ms)`);
-console.log(`  /blog/:slug  rosefn port       6        9.3 KB             4    139.1 ms (stale - pre-cache)`);
-console.log(`  /search      rosefn port       6        6.7 KB             4    171.6 ms (stale - pre-cache)`);
-console.log(`  /admin/login rosefn port       6        6.7 KB             4    161.6 ms (stale - pre-cache)`);
+console.log(`  /            rosespan port       6        6.7 KB             4     0.39 ms`);
+console.log(`  /blog        rosespan port       6        6.7 KB             4    171.2 ms (stale - pre-cache; / today: 0.39 ms)`);
+console.log(`  /blog/:slug  rosespan port       6        9.3 KB             4    139.1 ms (stale - pre-cache)`);
+console.log(`  /search      rosespan port       6        6.7 KB             4    171.6 ms (stale - pre-cache)`);
+console.log(`  /admin/login rosespan port       6        6.7 KB             4    161.6 ms (stale - pre-cache)`);
 
 import { spawn, execSync } from 'child_process';
 import { request, Agent } from 'http';
 
 const GO_PORT = 8124;
-const goBin = process.platform === 'win32' ? 'rosefn-server-go.exe' : 'rosefn-server-go';
+const goBin = process.platform === 'win32' ? 'rosespan-server-go.exe' : 'rosespan-server-go';
 execSync(`go build -o ${goBin} .`, { stdio: 'ignore' });
 const goProc = spawn(join(process.cwd(), goBin), [], {
   env: { ...process.env, PORT: String(GO_PORT) },
@@ -244,7 +244,7 @@ try {
   const goPage = await hammer('/', 8000);
   const goAsset = await hammer('/styles.css', 8000);
   console.log(`\nHTTP throughput (8 parallel keep-alive, 8000 GETs each, this machine):`);
-  console.log(`  Rosefn Go binary:  ${goPage.rps.toFixed(0)} req/sec (${(goPage.bytes / 1024).toFixed(2)} KB brotli per page - the self-contained app, precompressed at build time)`);
+  console.log(`  RoseSpan Go binary:  ${goPage.rps.toFixed(0)} req/sec (${(goPage.bytes / 1024).toFixed(2)} KB brotli per page - the self-contained app, precompressed at build time)`);
   console.log(`  same binary, asset: ${goAsset.rps.toFixed(0)} req/sec (${(goAsset.bytes / 1024).toFixed(2)} KB brotli - the bare-Go ceiling for this server)`);
 } finally {
   goProc.kill();
@@ -252,7 +252,7 @@ try {
 }
 
 {
-  const SCALE = join(os.tmpdir(), 'rosefn-scale');
+  const SCALE = join(os.tmpdir(), 'rosespan-scale');
   const APP = join(SCALE, 'app');
 
   const components: Record<string, string> = {
@@ -264,7 +264,7 @@ try {
     Hero: `<style>.hero{padding:3rem 1rem;text-align:center}</style>\n<script>\n  export let title = '';\n  export let subtitle = '';\n</script>\n<div class="hero"><h1>{title}</h1><p>{subtitle}</p></div>\n`,
     Table: `<script>\n  export let rows = [];\n</script>\n<table><tbody>{#each rows as row}<tr><td>{row.title}</td><td>{row.body}</td></tr>{/each}</tbody></table>\n`,
     Field: `<script>\n  export let label = '';\n  export let name = '';\n</script>\n<label>{label}<input name={name} /></label>\n`,
-    Footer: `<footer><small>generated by the rosefn scale benchmark</small></footer>\n`,
+    Footer: `<footer><small>generated by the rosespan scale benchmark</small></footer>\n`,
     Counter: `<script>\n  let n = $state(0);\n</script>\n<button on:click={() => $setState('n', n() + 1)}>count <strong>{n()}</strong></button>\n`,
     Modal: `<script>\n  export let title = '';\n  let open = $state(false);\n</script>\n{#if open()}<div class="modal"><h4>{title}</h4><button on:click={() => $setState('open', false)}>close</button></div>{/if}\n<button on:click={() => $setState('open', true)}>open {title}</button>\n`,
     Prose: `<div class="prose"><slot /></div>\n`,
@@ -384,7 +384,7 @@ try {
   const scaleCli = join(process.cwd(), 'src/cli/index.ts');
   const scaleProc = spawn(process.execPath, [scaleTsx, scaleCli, 'serve'], {
     cwd: APP,
-    env: { ...process.env, PORT: String(SCALE_PORT), ROSEFN_WORKERS: '1' },
+    env: { ...process.env, PORT: String(SCALE_PORT), ROSESPAN_WORKERS: '1' },
     stdio: 'ignore',
   });
   const scaleAgent = new Agent({ keepAlive: true, maxSockets: 1 });
@@ -409,7 +409,7 @@ try {
     for (let i = 0; i < 100 && !up; i++) {
       try { await fetch(`http://localhost:${SCALE_PORT}/`); up = true; } catch { await new Promise((r) => setTimeout(r, 100)); }
     }
-    if (!up) throw new Error('rosefn serve did not start on the generated app');
+    if (!up) throw new Error('rosespan serve did not start on the generated app');
     const feed = await scaleGet('/feed');
     const feedHtml = dynDecode(feed.body, feed.enc);
     const feedRefs = dynRefs(feedHtml).length;
@@ -424,7 +424,7 @@ try {
     };
     const feedTtfb = await median('/feed');
     const docTtfb = await median('/page-1');
-    console.log(`\nThe same invariant at scale, measured live against rosefn serve (1 worker, keep-alive, br):`);
+    console.log(`\nThe same invariant at scale, measured live against rosespan serve (1 worker, keep-alive, br):`);
     console.log(`  /feed    (dynamic, per-request read): 1 request, ${(feed.bytes / 1024).toFixed(2)} KB on the wire, TTFB p50 ${feedTtfb.toFixed(2)} ms, ${(feedHtml.match(/<script/g) ?? []).length} script tags, external refs ${feedRefs}`);
     console.log(`  /page-1  (content route):             1 request, ${(doc.bytes / 1024).toFixed(2)} KB on the wire, TTFB p50 ${docTtfb.toFixed(2)} ms, ${(docHtml.match(/<script/g) ?? []).length} script tags`);
     console.log(`  (a dynamic route is still one request with zero hydration at ${PAGE_PATTERNS} route patterns / ${COMPONENT_COUNT} components - the data is in the first response and no client runtime boots to show it)`);
