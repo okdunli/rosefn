@@ -68,6 +68,8 @@ export interface CompileResult {
   hasPrerender?: boolean;
   /** the component reads the request context (getContext()): it is dynamic */
   usesContext?: boolean;
+  /** the component references a shared $store() - the app opts into the live store channel */
+  usesStore?: boolean;
   revalidate?: number;
   cache?: number;
   csr?: boolean;
@@ -1001,6 +1003,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
       .map((m) => m[1])
       .filter((name) => HTTP_METHODS.has(name));
     const usesContext = /getContext\s*\(/.test(rawScript);
+    const usesStore = /\$store\s*\(/.test(rawScript);
     const hasPrerender = !usesContext && /(?:^|\n)\s*export\s+(?:const|let|var)\s+prerender\s*=\s*true\b/.test(rawScript);
     const hoisted = hoistImports(resolveRoseImports(rawScript, filePath, registry).script);
     const ownRuntimeImports = new Set(
@@ -1021,6 +1024,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
       apiMethods,
       hasPrerender,
       usesContext,
+      usesStore,
     };
   }
 
@@ -1069,6 +1073,7 @@ export async function compileComponent(filePath: string, publicDir: string, scop
   }
   // GetContext() in the script makes the route dynamic: the request bag is per-request.
   const usesContext = /getContext\s*\(/.test(rawScript) || /\$store\s*\(/.test(rawScript) || /\$query\s*\(/.test(rawScript);
+  const usesStore = /\$store\s*\(/.test(rawScript);
   const hasParams = /(?:^|\n)\s*export\s+(?:(?:const|let|var)\s+|(?:async\s+)?function\s+)params\b/.test(rawScript);
   const revalidateMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+revalidate\s*=\s*(\d+)\s*;?/);
   const revalidate = revalidateMatch ? Number(revalidateMatch[1]) : undefined;
@@ -1487,6 +1492,7 @@ if (!__seeded_${d.name}) { const __v_${d.name} = await $data(${fn}); set${capita
     style: scopedStyle,
     hasParams,
     usesContext,
+    usesStore,
     revalidate,
     cache: cacheSeconds,
     csr,
@@ -3553,7 +3559,7 @@ function compileSlot(acc: string): string {
   return `${acc} += String(children);\n`;
 }
 
-const RUNTIME_IMPORTS = `import { state, setState, persistState, $data, hasState, isSeeded, markSeeded, esc, refresh, onMount, onCleanup, $effect, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $store, ActionError, $actionError, $actionErrorOrThrow, $actionPending, $boundaryFallback, $setBoundaryError, $boundaryError, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound, aggregate, loader, encodeSdui, decodeSdui } from './runtime.js';`;
+const RUNTIME_IMPORTS = `import { state, setState, persistState, $data, hasState, isSeeded, markSeeded, esc, refresh, onMount, onCleanup, $effect, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $store, $udp, $tcp, $listen, ActionError, $actionError, $actionErrorOrThrow, $actionPending, $boundaryFallback, $setBoundaryError, $boundaryError, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound, aggregate, loader, encodeSdui, decodeSdui } from './runtime.js';`;
 
 const API_RUNTIME_HELPERS = RUNTIME_IMPORTS
   .replace(/^import\s*\{/, '')
@@ -4149,12 +4155,15 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
     .join(',\n  ');
 
   const appUsesAuth = compiled.some((c) => c.usesRoseSpanAuth);
+  const appUsesNet = compiled.some((c) => /\$(?:udp|tcp|listen)\s*\(/.test((c.ssr || '') + (c.client || '') + (c.api || '')));
 
   const serverEntry = `
 ${serverImports}
 import { renderMarkdown } from './content-md.ts';
 ${appUsesAuth ? "import crypto from 'node:crypto';" : "// no route references __rosespanAuth: the node:crypto auth helpers are omitted, keeping the bundle edge-loadable"}
-import { setState, persistState, clearRequestState, isolateRender, serializeState, resetRequestContext, installContextStore, setRequestQuery, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta, esc } from './runtime.js';
+${appUsesNet ? "import * as __rosespanDgram from 'node:dgram';\nimport * as __rosespanNet from 'node:net';" : "// no route opens a network listener ($udp/$tcp/$listen): the node:dgram/node:net imports are omitted, keeping the bundle edge-loadable"}
+import { setState, persistState, clearRequestState, isolateRender, serializeState, resetRequestContext, installContextStore, setRequestQuery, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta, esc, __startNetwork, __stopNetwork, $udp, $tcp, $listen } from './runtime.js';
+export { __startNetwork, __stopNetwork };
 ${runtimePlugins.length > 0
     ? `import { hooks as __pluginHooks, hasRequestHooks as __hasRequestHooks, hasResponseHooks as __hasResponseHooks } from './plugins.js';`
 : `// no plugin declares a runtime hook, so there is no plugins
@@ -4205,20 +4214,44 @@ export function setQuery(query) {
 setLocales(${localesJson}, '${defaultLocale}');
 
 
+// Live store channel: every $store write fans out to the browsers holding an open
+// SSE connection AND (when forked) to sibling workers. The client set lives on
+// globalThis so a dev hot-re-import (a fresh module instance) keeps serving the
+// same live connections. __addStoreClient/__removeStoreClient are called by the
+// host (cli serve worker / devWrap) as SSE connections open and close.
+const __storeClients: Set<any> = (globalThis as any).__rosespan_storeClients || ((globalThis as any).__rosespan_storeClients = new Set());
+function __broadcastStore(name: string, value: unknown): void {
+  if (__storeClients.size === 0) return;
+  const frame = 'event: store\\ndata: ' + JSON.stringify({ name: name, value: value }) + '\\n\\n';
+  for (const res of __storeClients) {
+    try { res.write(frame); } catch { __storeClients.delete(res); }
+  }
+}
+setStoreTransport((name, value) => {
+  __broadcastStore(name, value);
+  if (typeof process !== 'undefined' && typeof process.send === 'function') process.send({ type: 'rosespan:store', name, value });
+});
 if (typeof process !== 'undefined' && typeof process.send === 'function') {
-  setStoreTransport((name, value) => process.send({ type: 'rosespan:store', name, value }));
   process.on('message', (msg) => {
-    if (msg && msg.type === 'rosespan:store') applyStorePatch(msg.name, msg.value);
+    if (msg && msg.type === 'rosespan:store') {
+      applyStorePatch(msg.name, msg.value);
+      __broadcastStore(msg.name, msg.value);
+    }
   });
 }
+export function __addStoreClient(res: any): void { __storeClients.add(res); }
+export function __removeStoreClient(res: any): void { __storeClients.delete(res); }
 
 
 // (the cross-machine seam): the cluster relay above covers ONE machine.
 export function __installStoreTransport(send: (name: string, value: unknown) => void): void {
-  setStoreTransport(send);
+  // Wrap, not replace: a cross-machine transport (a plugin's LISTEN/NOTIFY bus)
+  // still fans out to this machine's live browsers on every patch.
+  setStoreTransport((name, value) => { __broadcastStore(name, value); send(name, value); });
 }
 export function __deliverStorePatch(name: string, value: unknown): void {
   applyStorePatch(name, value);
+  __broadcastStore(name, value);
 }
 
 export { localeList };
@@ -4374,7 +4407,8 @@ function sse(handler: (send: (event: string, data: unknown) => void) => Promise<
     headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", "connection": "keep-alive" },
   });
 }
-globalThis.__rosespanExtras = { v, jobs, sse };
+${appUsesNet ? `// The isomorphic runtime's $udp/$tcp reach Node's dgram/net only through these globals; injecting them at server boot is what lets __startNetwork() turn a registered spec into a bound socket.\n(globalThis as any).__rosespan_dgram = __rosespanDgram;\n(globalThis as any).__rosespan_net = __rosespanNet;` : ''}
+globalThis.__rosespanExtras = { v, jobs, sse, udp: $udp, tcp: $tcp, listen: $listen };
 ${appUsesAuth ? `
 const auth = {
   hashPassword(password: string): string {
@@ -5040,7 +5074,21 @@ reportVitals();
 
   const clientEntry = `
 ${clientImports}
-import { state, setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setActionDispatcher, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState, setFxOwner, resetContainerFx, esc } from './runtime.js';
+import { state, setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setActionDispatcher, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState, setFxOwner, resetContainerFx, esc, applyStorePatch } from './runtime.js';
+${compiled.some((c) => c.usesStore) ? `
+// Live store channel: an app that reads a shared $store() keeps one EventSource to
+// /__rosespan_store. A server-side write ($store.set/update from a network listener,
+// a job, or an action) is pushed here as an {name,value} patch; applyStorePatch
+// writes it into the reactive store box, re-running the wire() effects that render
+// {store.get()} / {#each store.get()}. No store in the app - no connection.
+if (typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
+  try {
+    var __storeEs = new EventSource('/__rosespan_store');
+    __storeEs.addEventListener('store', function (m) {
+      try { var p = JSON.parse(m.data); applyStorePatch(p.name, p.value); } catch (e) {}
+    });
+  } catch (e) {}
+}` : ''}
 
 // I18n: the dictionaries baked at build time - the client renders any PRELOADED locale from the bundle.
 setLocales(${clientLocalesJson}, '${defaultLocale}');

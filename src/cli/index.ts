@@ -795,12 +795,34 @@ function settleDevBuild(): Promise<void> | null {
 let invalidateHook: (() => void) | null = null;
 
 // set by serve: clears the render memo
+function storeStream(req: any, res: any): void {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.write(': ok\n\n');
+  // A live SSE must outlive the server's request/socket timeouts (serve sets
+  // requestTimeout=30s); the 15s heartbeat keeps the socket from ever looking idle.
+  if (req.socket) req.socket.setTimeout(0);
+  // The client set is shared with the server bundle's __broadcastStore via globalThis,
+  // so a dev hot-re-import keeps pushing to the same live connections.
+  const clients: Set<any> = (globalThis as any).__rosespan_storeClients || ((globalThis as any).__rosespan_storeClients = new Set());
+  clients.add(res);
+  const hb = setInterval(() => { try { res.write(': hb\n\n'); } catch { /* connection gone */ } }, 15000);
+  const done = () => { clearInterval(hb); clients.delete(res); };
+  req.on('close', done);
+  res.on('close', done);
+}
+
 function devWrap(inner: (req: any, res: any) => void): (req: any, res: any) => void {
   devMode = true;
   return (req, res) => {
     const url = req.url || '/';
     if (url.startsWith('/__rosespan_reload')) return devReload(req, res);
     if (url.startsWith('/__rosespan_state') && req.method === 'POST') return devSaveState(req, res);
+    if (url.startsWith('/__rosespan_store')) return storeStream(req, res);
     let injected = false;
     // The resumed snapshot belongs to the NEXT request, whatever it turns out to be: a document that answers 304 (nothing changed) consumes it too.
     const seed = devResume;
@@ -1320,6 +1342,9 @@ async function serve(): Promise<void> {
   try {
     const hooksMod = await loadServer();
     invalidateHook = () => { try { hooksMod.invalidateRenderCache(); } catch {  } };
+    // Serve-worker boot: bind every listener the app registered with $udp/$tcp/$listen.
+    try { (hooksMod as { __startNetwork?: () => void }).__startNetwork?.(); }
+    catch (err) { console.error('RoseSpan: network listener start failed:', err instanceof Error ? err.message : String(err)); }
   } catch (err) {
     console.error('RoseSpan: dist/server.js failed to load for the serve hooks:', err instanceof Error ? err.message : String(err));
   }
@@ -1370,6 +1395,7 @@ async function serve(): Promise<void> {
   const server = http.createServer(async (req: any, res: any) => {
     let bytesWritten = 0;
     const started = process.hrtime.bigint();
+    if ((req.url || '').startsWith('/__rosespan_store')) return storeStream(req, res);
     try {
       if ((req.method === 'GET' || req.method === 'HEAD') && dynRoutesOf().has(pathnameOf(req.url || '/'))) {
         const handle = await edgeReady;
@@ -1431,6 +1457,8 @@ async function serve(): Promise<void> {
     }
   });
   const stop = () => {
+    // Close the app's network listeners ($udp/$tcp/$listen) before draining.
+    try { (serverModule as { __stopNetwork?: () => void } | null)?.__stopNetwork?.(); } catch { /* best-effort */ }
     // onShutdown first: close what onServe opened, then drain. A throwing
     for (const p of servicePlugins) {
       if (!p.onShutdown) continue;
