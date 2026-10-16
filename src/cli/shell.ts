@@ -101,7 +101,7 @@ if (!__app) {
 function __saveScroll() {
   try {
     const s = history.state || {};
-    history.replaceState(Object.assign({}, s, { __rosefnScroll: window.scrollY }), '');
+    history.replaceState(Object.assign({}, s, { __rosespanScroll: window.scrollY }), '');
   } catch (e) { /* history state unavailable (file:// edge): best effort */ }
 }
 function __navigate(pathname, restore) {
@@ -110,7 +110,7 @@ function __navigate(pathname, restore) {
     if (restore) {
       // back/forward: restore the entry's scroll (top when it has none)
       const s = history.state || {};
-      const y = typeof s.__rosefnScroll === 'number' ? s.__rosefnScroll : 0;
+      const y = typeof s.__rosespanScroll === 'number' ? s.__rosespanScroll : 0;
       return Promise.resolve(p).then(() => { window.scrollTo(0, y); }, () => { window.scrollTo(0, y); });
     }
     // a fresh navigation starts at the top, like a full page load
@@ -134,7 +134,7 @@ document.addEventListener('click', (e) => {
 });
 // Prefetch the target route's full render (including $data) on hover, keyboard
 // focus, or touch - the click that follows paints from cache: no await, no
-// request. Other frameworks prefetch data only; Rosefn prefetches the render
+// request. Other frameworks prefetch data only; RoseSpan prefetches the render
 // because the inlined bundle already contains every route.
 function __prefetchHandler(e) {
   const a = e.target.closest && e.target.closest('a[href^="/"]');
@@ -184,20 +184,20 @@ document.addEventListener('submit', (e) => {
 // running page. Both are DIRECT references (no wrapper arrow): the names take
 // no arguments, so the call is identical and every document that carries the
 // bundle pays eleven bytes for the pair instead of forty.
-window.__rosefn = { state: serializeState, prefetch: prefetchStats };
+window.__rosespan = { state: serializeState, prefetch: prefetchStats };
 // initial=true: DOM is SSR output, resume state + wire markers (zero hydration).
 // If the document was rendered for a DIFFERENT route (a static-file server's
 // SPA fallback serves index.html for unknown paths), adopt nothing - let the
 // client router render the requested route from scratch.
-const __st = document.getElementById('__rosefn_state');
+const __st = document.getElementById('__rosespan_state');
 let __state = __st ? JSON.parse(__st.textContent || '{}') : {};
 // The dev server's reload bridge hands the pre-reload signal graph back inside
-// the next document (window.__rosefn_resume). The resumed values win over the
+// the next document (window.__rosespan_resume). The resumed values win over the
 // fresh render's, but the ROUTE stays the one the server just rendered - and
 // the route renders client-side from the bundle rather than adopting the SSR
 // DOM, because a resumed list can be longer than the document's rows and
 // adoption could not add them. Absent in every non-dev document.
-const __resumed = window.__rosefn_resume ? JSON.parse(window.__rosefn_resume) : null;
+const __resumed = window.__rosespan_resume ? JSON.parse(window.__rosespan_resume) : null;
 if (__resumed) {
   const __route = __state.__route;
   __state = Object.assign(__state, __resumed);
@@ -217,7 +217,7 @@ if (__state.__notFound) {
   // layout): defer the initial wire() until the browser is idle so the SSR
   // paint is interactive-to-paint without blocking on the event wiring. Falls
   // back to eager wiring where requestIdleCallback is unavailable.
-  if (window.__rosefnLazy && typeof requestIdleCallback === 'function') {
+  if (window.__rosespanLazy && typeof requestIdleCallback === 'function') {
     requestIdleCallback(() => start(__app, window.location.pathname, true));
   } else {
     start(__app, window.location.pathname, true);
@@ -231,7 +231,7 @@ let BOOTSTRAP_CACHE: string | null = null;
 function bootstrap(): string {
   if (BOOTSTRAP_CACHE === null) {
     // The bundled prod server (dist/prod.mjs) sets the skip flag: esbuild's transformSync spawns a worker thread whose entry is the bundle itself.
-    if ((globalThis as any).__ROSEFN_SKIP_MINIFY) {
+    if ((globalThis as any).__ROSESPAN_SKIP_MINIFY) {
       BOOTSTRAP_CACHE = BOOTSTRAP_SOURCE;
     } else {
       try {
@@ -265,7 +265,14 @@ function externalBootstrap(): string {
   }
   return EXTERNAL_BOOTSTRAP_CACHE.s;
 }
+// The inlined bundle is byte-identical for every document of a build, so the
+// regex scan + slice + concat over the whole client.js is computed once and
+// reused: prerender paid it per route, and a per-request document paid it per
+// request. Keyed by the source string itself (getClientSource() hands back the
+// same instance while dist/client.js is unchanged).
+let inlineScriptCache: { for: string; out: string } | null = null;
 function inlineScript(client: string): string {
+  if (inlineScriptCache !== null && inlineScriptCache.for === client) return inlineScriptCache.out;
   const m = /\bexport\s*\{([^}]*)\}\s*;?\s*$/.exec(client);
   let body = client;
   let aliases = "";
@@ -280,7 +287,9 @@ function inlineScript(client: string): string {
       })
       .join("");
   }
-  return `\n${body}\n${aliases}\n${bootstrap()}`;
+  const out = `\n${body}\n${aliases}\n${bootstrap()}`;
+  inlineScriptCache = { for: client, out };
+  return out;
 }
 /**
  * A fresh CSP nonce: 128 bits from the platform RNG, base64 - the syntax the
@@ -302,8 +311,8 @@ export function mintNonce(): string {
  * The document's CSP. Two shapes, chosen per response:
  *
  * - no nonce (the default): `script-src 'sha256-…'` over the exact bytes the
- *   tag will carry. Nothing else may run - the strongest policy rosefn has,
- *   and the reason a rosefn document needs no 'unsafe-inline'.
+ *   tag will carry. Nothing else may run - the strongest policy rosespan has,
+ *   and the reason a rosespan document needs no 'unsafe-inline'.
  * - a nonce (a route exporting `csp = { nonce: true }`):
  *   `script-src 'nonce-…' 'strict-dynamic'`. A hash dies the moment anything
  *   between the server and the browser touches the document - a CDN, a WAF,
@@ -397,7 +406,7 @@ function mergeHeadBlocks(blocks: string[]): string {
         key = `${tag}:#${positional.get(tag) ?? 0}`;
         positional.set(tag, (positional.get(tag) ?? 0) + 1);
       }
-      const marked = m[0].replace(/^<\w+/, (t) => `${t} data-rosefn-head="${key}"`);
+      const marked = m[0].replace(/^<\w+/, (t) => `${t} data-rosespan-head="${key}"`);
       put(key, marked);
     }
   }
@@ -448,7 +457,7 @@ export function shellOpen(styles: string = getStyles(), lang = 'en', dir = '', s
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Rosefn</title>${demoStyles}${styleTag}
+  <title>RoseSpan</title>${demoStyles}${styleTag}
   ${FAVICON}
 </head>
 <body>${appOpen}`;
@@ -464,20 +473,20 @@ export function buildShell(ssrHtml: string, stateJson: string, client: string | 
   let bodyAttrs = '';
   const headClean = headStamped.replace(/<(html|body)\b([^>]*)>/gi, (_m, tag: string, attrs: string) => {
     // mergeHeadBlocks stamps every passthrough element with its key; the
-    const clean = attrs.replace(/\s*data-rosefn-head="[^"]*"/, '');
+    const clean = attrs.replace(/\s*data-rosespan-head="[^"]*"/, '');
     if (tag === 'html') htmlAttrs = clean;
     else bodyAttrs = clean;
     return '';
   });
   
-  const titleTag = /<title>/i.test(mergedHead) ? '' : '<title>Rosefn</title>';
+  const titleTag = /<title>/i.test(mergedHead) ? '' : '<title>RoseSpan</title>';
   
   const iconTag = /rel=["']?icon/i.test(mergedHead) ? '' : `\n  ${FAVICON}`;
   const headTags = headClean ? `\n  ${headClean}` : '';
   const styleTag = styles ? `\n  <style>${styles}</style>` : '';
   const stateSafe = stateJson.replace(/</g, '\\u003c');
   const jsTail = js
-    ? `\n  <script type="application/json" id="__rosefn_state">${stateSafe}</script>\n  ${clientScriptTag(client, nonce)}`
+    ? `\n  <script type="application/json" id="__rosespan_state">${stateSafe}</script>\n  ${clientScriptTag(client, nonce)}`
     : '';
   const open = js && shell ? '<div id="app">' : '';
   const close = js && shell ? '</div>' : '';
