@@ -269,6 +269,11 @@ async function writeIfChanged(file: string, content: string): Promise<void> {
 async function build(): Promise<void> {
   const minify = !devMode && !argv.includes('--no-minify');
   const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR, { minify, incremental: devMode });
+  // dist/server.js is ESM in a .js file. Node >= 22.7 detects the syntax, but
+  // engines allow 22.0-22.6 (where it parses as CJS and fails on import), and
+  // external tooling loading dist/server.js has no such detection at all. A
+  // marker file makes the module kind explicit for every consumer.
+  await writeIfChanged(path.join(OUT_DIR, 'package.json'), '{"type":"module"}\n');
   setBundleMode(bundle);
   // Dev serves documents on demand (renderPage per request) so a save only has
   // to recompile, never re-render every route - the prerender/writeBrotli/analyze
@@ -483,6 +488,7 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
   // them) only to be rewritten - and recompressed - seconds later.
   keep.add(path.join(OUT_DIR, 'broken.json'));
   keep.add(path.join(OUT_DIR, 'headers.json'));
+  keep.add(path.join(OUT_DIR, 'package.json'));
   await prunePrerendered(OUT_DIR, keep);
 
   const write = async (routePath: string, file: string) => {
@@ -1309,13 +1315,23 @@ async function dev(): Promise<void> {
         const st = fs.statSync(path.join(SRC_DIR, filename));
         if (st.mtimeMs > devBuildStartMs) devDirtyMid = true;
       } catch {
-        if (SOURCE_EXT.has(path.extname(filename).toLowerCase())) devDirtyMid = true;
+        // filename can be null (fs.watch omits it when unavailable): path.extname
+        // would throw on null, and an uncaught throw in this callback takes the
+        // whole dev server down.
+        const name = String(filename ?? '');
+        if (SOURCE_EXT.has(path.extname(name).toLowerCase())) devDirtyMid = true;
       }
       return;
     }
     devDirty = true;
     clearTimeout(timeout);
-    timeout = setTimeout(() => { void startDevBuild(); }, 200);
+    // A short window, not the classic 200ms: raw fs.watch delivers a save in
+    // ~5-10ms (measured), so an editor save's 1-3 events all land inside it,
+    // while the wait itself was pure added latency in the save->visible loop.
+    // A stream that outlasts it (format-on-save chains, a git checkout) just
+    // costs one extra rebuild per pause - the epoch logic in startDevBuild
+    // keeps that bounded.
+    timeout = setTimeout(() => { void startDevBuild(); }, 50);
   });
 
   const http = await import('http');
