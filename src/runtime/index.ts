@@ -2022,6 +2022,12 @@ function __netBind(spec: { kind: string; port: number; host?: string; opts: NetO
     srv.listen(spec.port, spec.host || '0.0.0.0');
     __netHandles.push(handle);
     __netBound.set(key, handle);
+  } else if (spec.kind === 'mqtt') {
+    const nt = (globalThis as any).__rosespan_net;
+    if (!nt) return;
+    const client = __mqttConnect(nt, spec.port, spec.host || 'localhost', o);
+    __netHandles.push(client);
+    __netBound.set(key, client);
   }
 }
 function __netReg(kind: string, port: number, host: string | undefined, opts: NetOpts): void {
@@ -2244,6 +2250,224 @@ export function $websocket(port: number, opts: NetOpts = {}): any {
     },
     address: () => ({ port, host: host || '0.0.0.0' }),
   };
+}
+
+/**
+ * $mqtt - MQTT 3.1.1 client (zero-dependency, like $websocket).
+ * Registers a spec; __startNetwork() opens the TCP connection to the broker, so
+ * a build/prerender never dials out. The facade delegates to the live client:
+ * subscribe/publish work before CONNACK (packets queue and flush on connect).
+ */
+export function $mqtt(broker: string, opts: NetOpts = {}): any {
+  const host = (opts.host as string) || __mqttHostOf(broker);
+  const port = (opts.port as number) ?? __mqttPortOf(broker);
+  if (typeof document !== 'undefined') return __NOOP_MQTT;
+  __netReg('mqtt', port, host, opts);
+  const key = 'mqtt:' + port + ':' + host;
+  const bound = () => __netBound.get(key);
+  return {
+    connect: () => {
+      const h = bound();
+      if (h) return (h.connect as () => Promise<void>)();
+      __netBind({ kind: 'mqtt', port, host, opts });
+      const h2 = bound();
+      return h2 ? (h2.connect as () => Promise<void>)() : Promise.reject(new Error('[rosespan] MQTT client unavailable (node:net not injected)'));
+    },
+    disconnect: () => { (bound() as { disconnect?: () => void } | undefined)?.disconnect?.(); },
+    subscribe: (topic: string, sopts: NetOpts = {}) => { (bound() as { subscribe?: (t: string, s: NetOpts) => void } | undefined)?.subscribe?.(topic, sopts); },
+    unsubscribe: (topic: string) => { (bound() as { unsubscribe?: (t: string) => void } | undefined)?.unsubscribe?.(topic); },
+    publish: (topic: string, message: unknown, popts: NetOpts = {}) => { (bound() as { publish?: (t: string, m: unknown, p: NetOpts) => void } | undefined)?.publish?.(topic, message, popts); },
+    get connected() { return (bound() as { connected?: boolean } | undefined)?.connected === true; },
+  };
+}
+
+const __NOOP_MQTT = {
+  connect: (): Promise<void> => Promise.resolve(),
+  disconnect: (): void => {},
+  subscribe: (): void => {},
+  unsubscribe: (): void => {},
+  publish: (): void => {},
+  connected: false,
+};
+
+function __mqttHostOf(broker: string): string {
+  return String(broker).replace(/^\w+:\/\//, '').split(':')[0] || 'localhost';
+}
+function __mqttPortOf(broker: string): number {
+  const m = String(broker).match(/:(\d+)/);
+  return m ? Number(m[1]) : 1883;
+}
+
+// === MQTT 3.1.1 codec (client side) ===
+function __mqttStr(s: string): Buffer {
+  const b = Buffer.from(s, 'utf8');
+  const out = Buffer.allocUnsafe(2 + b.length);
+  out.writeUInt16BE(b.length, 0);
+  b.copy(out, 2);
+  return out;
+}
+function __mqttRemainingLen(len: number): Buffer {
+  const out: number[] = [];
+  do {
+    let b = len % 128;
+    len = Math.floor(len / 128);
+    if (len > 0) b |= 0x80;
+    out.push(b);
+  } while (len > 0);
+  return Buffer.from(out);
+}
+function __mqttPacket(type: number, flags: number, body: Buffer): Buffer {
+  return Buffer.concat([Buffer.from([(type << 4) | flags]), __mqttRemainingLen(body.length), body]);
+}
+/** Incremental packet splitter: complete packets out, partial tail back (same discipline as the WS frame parser). */
+function __mqttParsePackets(buf: Buffer): { packets: { type: number; flags: number; body: Buffer }[]; rest: Buffer } {
+  const packets: { type: number; flags: number; body: Buffer }[] = [];
+  let off = 0;
+  for (;;) {
+    if (off >= buf.length) break;
+    const type = (buf[off] >> 4) & 0x0f;
+    const flags = buf[off] & 0x0f;
+    let mult = 1;
+    let len = 0;
+    let p = off + 1;
+    for (;;) {
+      if (p >= buf.length) return { packets, rest: buf.slice(off) };
+      const b = buf[p++];
+      len += (b & 0x7f) * mult;
+      if ((b & 0x80) === 0) break;
+      mult *= 128;
+    }
+    if (p + len > buf.length) return { packets, rest: buf.slice(off) };
+    packets.push({ type, flags, body: buf.slice(p, p + len) });
+    off = p + len;
+  }
+  return { packets, rest: Buffer.alloc(0) };
+}
+/** Topic filter match: exact segments, '+' one level, '#' the rest (must be last). */
+function __mqttTopicMatch(filter: string, topic: string): boolean {
+  const f = filter.split('/');
+  const t = topic.split('/');
+  for (let i = 0; i < f.length; i++) {
+    if (f[i] === '#') return true;
+    if (i >= t.length) return false;
+    if (f[i] === '+') continue;
+    if (f[i] !== t[i]) return false;
+  }
+  return f.length === t.length;
+}
+
+function __mqttU16(id: number): Buffer {
+  const b = Buffer.allocUnsafe(2);
+  b.writeUInt16BE(id & 0xffff, 0);
+  return b;
+}
+
+/**
+ * Create the live MQTT client for a bound spec. Callbacks are read from
+ * client.opts at event time (same swap-on-re-register discipline as the WS
+ * handle). Packets sent before CONNACK queue and flush on connect.
+ */
+function __mqttConnect(nt: any, port: number, host: string, o: NetOpts): any {
+  const sock = nt.createConnection({ host, port });
+  const client: any = {
+    opts: o,
+    connected: false,
+    subs: new Map<string, number>(),
+    outbox: [] as Buffer[],
+    nextId: 1,
+    connAck: null as Promise<void> | null,
+    __resolveConnAck: null as (() => void) | null,
+    __rejectConnAck: null as ((e: Error) => void) | null,
+    __keepalive: null as ReturnType<typeof setInterval> | null,
+    __send: (buf: Buffer) => {
+      if (client.connected) { try { sock.write(buf); } catch { /* already gone */ } }
+      else client.outbox.push(buf);
+    },
+    connect: (): Promise<void> => client.connAck,
+    close: () => client.disconnect(),
+    disconnect: () => {
+      try { sock.write(__mqttPacket(14, 0, Buffer.alloc(0))); } catch { /* already gone */ }
+      sock.end();
+    },
+    subscribe: (topic: string, sopts: NetOpts = {}) => {
+      client.subs.set(topic, (sopts.qos as number) || 0);
+      client.__send(__mqttPacket(8, 2, Buffer.concat([__mqttU16(client.nextId++), __mqttStr(topic), Buffer.from([(sopts.qos as number) || 0])])));
+    },
+    unsubscribe: (topic: string) => {
+      client.subs.delete(topic);
+      client.__send(__mqttPacket(10, 2, Buffer.concat([__mqttU16(client.nextId++), __mqttStr(topic)])));
+    },
+    publish: (topic: string, message: unknown, popts: NetOpts = {}) => {
+      const qos = (popts.qos as number) || 0;
+      let head = __mqttStr(topic);
+      if (qos > 0) head = Buffer.concat([head, __mqttU16(client.nextId++)]);
+      const payload = typeof message === 'string' ? Buffer.from(message, 'utf8')
+        : Buffer.isBuffer(message) ? message
+        : Buffer.from(String(message), 'utf8');
+      client.__send(__mqttPacket(3, (qos << 1) | (popts.retain ? 1 : 0), Buffer.concat([head, payload])));
+    },
+  };
+  client.connAck = new Promise<void>((res, rej) => { client.__resolveConnAck = res; client.__rejectConnAck = rej; });
+
+  sock.on('connect', () => {
+    let flags = o.clean !== false ? 0x02 : 0;
+    const username = o.username as string | undefined;
+    const password = o.password as string | undefined;
+    if (username) flags |= 0x80;
+    if (password) flags |= 0x40;
+    const parts: Buffer[] = [__mqttStr('MQTT'), Buffer.from([4]), Buffer.from([flags]), __mqttU16((o.keepalive as number) ?? 60), __mqttStr((o.clientId as string) || ('rosespan_' + Math.random().toString(16).slice(2, 10)))];
+    if (username) parts.push(__mqttStr(username));
+    if (password) parts.push(__mqttStr(password));
+    sock.write(__mqttPacket(1, 0, Buffer.concat(parts)));
+    const ka = (o.keepalive as number) ?? 60;
+    if (ka > 0) client.__keepalive = setInterval(() => { try { sock.write(__mqttPacket(12, 0, Buffer.alloc(0))); } catch { /* already gone */ } }, Math.max(250, ka * 500));
+  });
+  (sock as any).__mqttBuf = Buffer.alloc(0);
+  sock.on('data', (chunk: Buffer) => {
+    const s = sock as any;
+    s.__mqttBuf = s.__mqttBuf.length ? Buffer.concat([s.__mqttBuf, chunk]) : chunk;
+    const { packets, rest } = __mqttParsePackets(s.__mqttBuf as Buffer);
+    s.__mqttBuf = rest;
+    for (const pkt of packets) {
+      if (pkt.type === 2) {
+        if (pkt.body.length >= 2 && pkt.body[1] === 0) {
+          client.connected = true;
+          for (const q of client.outbox) { try { sock.write(q); } catch { /* already gone */ } }
+          client.outbox.length = 0;
+          client.__resolveConnAck?.();
+          (client.opts.onConnect as (() => void) | undefined)?.();
+        } else {
+          const err = new Error('[rosespan] MQTT broker refused the connection (code ' + (pkt.body[1] ?? '?') + ')');
+          client.__rejectConnAck?.(err);
+          (client.opts.onError as ((e: Error) => void) | undefined)?.(err);
+        }
+      } else if (pkt.type === 3) {
+        if (pkt.body.length < 2) continue;
+        const tlen = pkt.body.readUInt16BE(0);
+        const topic = pkt.body.slice(2, 2 + tlen).toString('utf8');
+        let p = 2 + tlen;
+        const qos = (pkt.flags >> 1) & 0x03;
+        let pid = 0;
+        if (qos > 0 && pkt.body.length >= p + 2) { pid = pkt.body.readUInt16BE(p); p += 2; }
+        const payload = pkt.body.slice(p);
+        for (const filter of client.subs.keys()) {
+          if (__mqttTopicMatch(filter, topic)) { (client.opts.onMessage as ((t: string, m: Buffer) => void) | undefined)?.(topic, payload); break; }
+        }
+        if (qos === 1 && pid) client.__send(__mqttPacket(4, 0, __mqttU16(pid)));
+      }
+      // 9 SUBACK / 11 UNSUBACK / 13 PINGRESP: acknowledgement only, nothing to surface
+    }
+  });
+  sock.on('close', () => {
+    client.connected = false;
+    if (client.__keepalive) { clearInterval(client.__keepalive); client.__keepalive = null; }
+    client.__rejectConnAck?.(new Error('[rosespan] MQTT connection closed before CONNACK'));
+  });
+  sock.on('error', (err: Error) => {
+    (client.opts.onError as ((e: Error) => void) | undefined)?.(err);
+    if (!client.connected) client.__rejectConnAck?.(err);
+  });
+  return client;
 }
 
 export class ActionError extends Error {
