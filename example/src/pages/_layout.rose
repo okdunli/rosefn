@@ -12,13 +12,13 @@
 </script>
 
 <head>
-  <title>Rosefn</title>
-  <meta name="generator" content="Rosefn">
+  <title>RoseSpan</title>
+  <meta name="generator" content="RoseSpan">
 </head>
 
 <div>
   <header class="rh">
-    <strong class="rb">🌹 Rosefn</strong>
+    <strong class="rb">🌹 RoseSpan</strong>
     <nav class="rn">
       {#each links() as link}
         <a href={link.href}>{link.label}</a>
@@ -29,6 +29,6 @@
     <slot />
   </main>
   <footer class="rf">
-    Rosefn — zero-hydration, compile-time reactivity
+    RoseSpan — zero-hydration, compile-time reactivity
   </footer>
 </div>

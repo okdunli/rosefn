@@ -4,7 +4,7 @@
   export const store = { likes: 41 };
 
   let count = $state(0);
-  let name = $state('Rosefn');
+  let name = $state('RoseSpan');
   let items = $state(['Performance', 'Simplicity', 'Zero-hydration']);
   let showFeatures = $state(true);
   let guests = $state(['🌹 the founder']);

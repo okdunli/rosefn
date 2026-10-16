@@ -15,7 +15,7 @@
   //      server bundle, and the edge adapter loads that same bundle, so the
   //      whole app would fail to boot on an edge runtime instead of just
   //      this route (Node caches the module: one microtask per call).
-  //   2. no side effect at build time: `rosefn build` imports the server
+  //   2. no side effect at build time: `rosespan build` imports the server
   //      bundle (route headers, prerender) and must not create a database.
   // Trade-off: one connection per worker process - that IS the pool; a real
   // deploy replaces it with pg.Pool right here. The file is relative to the
@@ -35,7 +35,7 @@
           author TEXT NOT NULL DEFAULT 'anonymous'
         );
         INSERT OR IGNORE INTO posts (id, title, body, author) VALUES
-          (1, 'Hello Rosefn', 'One request, zero hydration - and a database too.', 'ada'),
+          (1, 'Hello RoseSpan', 'One request, zero hydration - and a database too.', 'ada'),
           (2, 'The dynamic half', 'Every route keeps the single-request contract, DB or not.', 'grace');
       `);
     }

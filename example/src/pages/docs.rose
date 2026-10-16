@@ -1,6 +1,6 @@
 <script>
-  const docEntry = globalThis.__rosefnContent.get("docs", "getting-started");
-  const docList = () => globalThis.__rosefnContent.list("docs");
+  const docEntry = globalThis.__rosespanContent.get("docs", "getting-started");
+  const docList = () => globalThis.__rosespanContent.list("docs");
 </script>
 
 <h1>Docs</h1>
@@ -13,4 +13,4 @@
 {#each docEntry.toc as t}
 <a href={"#" + t.id}>{t.text}</a>
 {/each}
-<div>{@html globalThis.__rosefnContent.get("docs", "getting-started", { siteName: "Rosefn", version: "0.4.8" }).html}</div>
+<div>{@html globalThis.__rosespanContent.get("docs", "getting-started", { siteName: "RoseSpan", version: "0.4.8" }).html}</div>

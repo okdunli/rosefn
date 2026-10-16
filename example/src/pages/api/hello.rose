@@ -8,7 +8,7 @@
   // (serialized as JSON), a Response (passed through), or nothing (204).
   // Same code on the Node server, the edge adapter, and the build's bake.
   export function GET() {
-    return { hello: 'Rosefn', framework: 'one request, zero hydration' };
+    return { hello: 'RoseSpan', framework: 'one request, zero hydration' };
   }
 
   export async function POST(req: Request) {

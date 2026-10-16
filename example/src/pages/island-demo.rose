@@ -6,7 +6,7 @@
 </script>
 
 <head>
-  <title>Islands Demo - Rosefn</title>
+  <title>Islands Demo - RoseSpan</title>
   <meta name="description" content="Partial hydration via islands: static HTML ships zero client JS, only the interactive region hydrates.">
 </head>
 

@@ -5,14 +5,14 @@
 
   let id = $state('1');
   let posts = $state<Record<string, Post>>({
-    '1': { title: 'Hello Rosefn', body: 'This is the first post on our revolutionary framework.' },
-    '2': { title: 'Zero-hydration magic', body: 'Rosefn resumes state without replaying events or re-rendering the DOM.' }
+    '1': { title: 'Hello RoseSpan', body: 'This is the first post on our revolutionary framework.' },
+    '2': { title: 'Zero-hydration magic', body: 'RoseSpan resumes state without replaying events or re-rendering the DOM.' }
   });
   let post = $data(async (): Promise<Post> => posts()[id()] || { title: 'Not found', body: 'This post does not exist.' });
 </script>
 
 <head>
-  <title>{post().title} - Rosefn blog</title>
+  <title>{post().title} - RoseSpan blog</title>
   <meta name="description" content={post().body}>
 </head>
 

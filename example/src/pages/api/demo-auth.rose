@@ -1,15 +1,15 @@
 <script>
   const SECRET = "demo-secret-key";
-  export async function POST(request) {
+  export async function POST(request: Request) {
     const { action, password, token } = await request.json();
     try {
-    const auth = globalThis.__rosefnAuth;
+    const auth = globalThis.__rosespanAuth;
     if (action === "hash") {
       return new Response(JSON.stringify({ hash: auth.hashPassword(password) }), { headers: { "content-type": "application/json" } });
     }
     if (action === "verify") {
-      const { hash } = await fetch("http://x").ok ? {} : {};
-      return new Response(JSON.stringify({}), {});
+      const hash = auth.hashPassword(password);
+      return new Response(JSON.stringify({ ok: auth.verifyPassword(password, hash), wrong: auth.verifyPassword("not-it", hash) }), { headers: { "content-type": "application/json" } });
     }
     if (action === "session") {
       const token = auth.signSession({ user: "demo", role: "admin" }, SECRET, 3600);

@@ -26,8 +26,8 @@
   // either be a state key or local to the resolver itself.
   let hits = $data(async (): Promise<Hit[]> => {
     const posts: Hit[] = [
-      { title: 'Hello Rosefn', body: 'This is the <strong>first post</strong> on our revolutionary framework.' },
-      { title: 'Zero-hydration magic', body: 'Rosefn resumes <em>state</em> without replaying events or re-rendering the DOM.' },
+      { title: 'Hello RoseSpan', body: 'This is the <strong>first post</strong> on our revolutionary framework.' },
+      { title: 'Zero-hydration magic', body: 'RoseSpan resumes <em>state</em> without replaying events or re-rendering the DOM.' },
       { title: 'The thorn in every stack', body: 'A page with <a href="/thorn">no script</a> at all, and no apology for it.' },
     ];
     const term = q().trim().toLowerCase();
@@ -37,7 +37,7 @@
 </script>
 
 <head>
-  <title>{q() ? `Search: ${q()}` : 'Search'} - Rosefn</title>
+  <title>{q() ? `Search: ${q()}` : 'Search'} - RoseSpan</title>
   <meta name="description" content="Search the demo blog - a zero-JS native form and $query().">
 </head>
 

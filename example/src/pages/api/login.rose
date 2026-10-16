@@ -12,7 +12,7 @@
   // Same lazy-connection pattern as api/posts.rose: node:sqlite is imported
   // inside the accessor so the server bundle stays edge-loadable (the edge
   // adapter loads that same bundle - a static import would boot-crash the
-  // whole app there instead of failing this one route), and `rosefn build`
+  // whole app there instead of failing this one route), and `rosespan build`
   // creates no database as a side effect. One connection per worker: that
   // IS the pool; a real deploy swaps it for pg.Pool here. The file is
   // relative to the working directory you started the server from, never

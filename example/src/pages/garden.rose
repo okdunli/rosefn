@@ -11,13 +11,13 @@
   // $data is server-side: it resolves during the render, on the baked and
   // the on-demand path alike, with no client code involved.
   let bloomed = $data(async () => 'in full bloom');
-  // The `@thorn` token is rewritten by the demo plugin (example/rosefn.config.js)
+  // The `@thorn` token is rewritten by the demo plugin (example/rosespan.config.js)
   // before compilation - the source on disk keeps the token.
   let mark = $data(async () => '@thorn');
 </script>
 
 <head>
-  <title>The Garden - Rosefn</title>
+  <title>The Garden - RoseSpan</title>
   <meta name="description" content="A pure content page that ships zero JavaScript.">
 </head>
 

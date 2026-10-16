@@ -1,17 +1,18 @@
 <script>
   export const bundle = 'split';
   let n = $state(2);
-  let sq = $derived(n * n);
+  let sq = $derived(n() * n());
   function bump() { $setState('n', n() + 1); }
   let m = $state(10);
   // F36: functional update - the setter receives the current value.
-  function fnBump() { $setState('m', (x) => x + 5); }
+  function fnBump() { $setState('m', (x: number) => x + 5); }
   let numv = $state(5);
   // F43: $effect - mirrors n*7 into state; the returned cleanup counts disposals.
   let mirror = $state(0);
+  let effCleanups = 0;
   $effect(() => {
     $setState('mirror', n() * 7);
-    return () => { globalThis.__effCleanup = (globalThis.__effCleanup || 0) + 1; };
+    return () => { effCleanups++; };
   });
   let keyedItems = $state([{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }, { id: 'c', label: 'C' }]);
   function shuffle() {
@@ -20,8 +21,8 @@
   }
   let selm = $state([]);
   let dopen = $state(true);
-  globalThis.__rosefnTransitions = globalThis.__rosefnTransitions || {};
-  globalThis.__rosefnTransitions.pulse = function (el, d) {
+  globalThis.__rosespanTransitions = globalThis.__rosespanTransitions || {};
+  globalThis.__rosespanTransitions.pulse = function (el: HTMLElement, d: number) {
     el.style.opacity = '0.4';
     const id = setTimeout(function () { el.style.opacity = ''; }, d);
     return function () { clearTimeout(id); };

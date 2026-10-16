@@ -1,8 +1,8 @@
 <script>
   // Content collections consume through the global bridge — zero imports.
-  const posts = globalThis.__rosefnContent.list('posts');
-  const docListE = () => globalThis.__rosefnContent.list("posts");
-  const post = globalThis.__rosefnContent.get('posts', 'hello');
+  const posts = globalThis.__rosespanContent.list('posts');
+  const docListE = () => globalThis.__rosespanContent.list("posts");
+  const post = globalThis.__rosespanContent.get('posts', 'hello');
 </script>
 
 <h1>Content demo</h1>

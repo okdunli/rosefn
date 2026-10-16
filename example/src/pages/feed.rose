@@ -21,7 +21,7 @@
 </script>
 
 <head>
-  <title>Feed - Rosefn</title>
+  <title>Feed - RoseSpan</title>
   <meta name="description" content="A dynamic page that reads the database on every request.">
 </head>
 

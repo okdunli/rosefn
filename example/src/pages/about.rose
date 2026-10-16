@@ -10,7 +10,7 @@
   // runtime, no wrapper node.
   import FactCard from '../components/FactCard.rose';
 
-  let title = $state('About Rosefn');
+  let title = $state('About RoseSpan');
   let facts = $data(async () => {
     stats.fetches += 1;
     return [
@@ -24,7 +24,7 @@
   // refresh() re-runs this route's render in place: $data re-fetches, the
   // fresh render's state re-seeds, and wire() patches only what changed -
   // zero requests, no navigation. (a router refresh round-trips the
-  // server; rosefn renders in the page because the bundle already has the
+  // server; rosespan renders in the page because the bundle already has the
   // route - and a real app's $data can hit its API from either side.)
   async function reload() {
     await refresh();
@@ -46,8 +46,8 @@
 </script>
 
 <head>
-  <title>{title()} - Rosefn</title>
-  <meta name="description" content="What Rosefn is and the ideas it is built on.">
+  <title>{title()} - RoseSpan</title>
+  <meta name="description" content="What RoseSpan is and the ideas it is built on.">
   <!-- A route-level <style> INSIDE <head> (bug report 2026.9.22 11:46). A CMS
        theme system ships its per-request CSS here - a palette the admin just
        changed, a per-tenant accent. It used to be dropped in silence by the
@@ -65,10 +65,10 @@
 </style>
 
 <div>
-  <img src="/logo.svg" alt="Rosefn" width="72" height="72">
+  <img src="/logo.svg" alt="RoseSpan" width="72" height="72">
   <h1>{title()}</h1>
   <div class="rcard">
-    <p>Rosefn is a revolutionary web framework designed to be the fastest, simplest, and most performant framework ever created.</p>
+    <p>RoseSpan is a revolutionary web framework designed to be the fastest, simplest, and most performant framework ever created.</p>
     <p class="rfetch">data fetches: {stats.fetches}</p>
     <button on:click={reload}>Refresh data</button>
   </div>
