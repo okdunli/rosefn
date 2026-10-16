@@ -2376,7 +2376,6 @@ function __mqttU16(id: number): Buffer {
  * handle). Packets sent before CONNACK queue and flush on connect.
  */
 function __mqttConnect(nt: any, port: number, host: string, o: NetOpts): any {
-  const sock = nt.createConnection({ host, port });
   const client: any = {
     opts: o,
     connected: false,
@@ -2384,18 +2383,32 @@ function __mqttConnect(nt: any, port: number, host: string, o: NetOpts): any {
     outbox: [] as Buffer[],
     nextId: 1,
     connAck: null as Promise<void> | null,
-    __resolveConnAck: null as (() => void) | null,
-    __rejectConnAck: null as ((e: Error) => void) | null,
     __keepalive: null as ReturnType<typeof setInterval> | null,
+    __sock: null as any,
+    __closed: false,
+    __retry: null as ReturnType<typeof setTimeout> | null,
+    __attempt: 0,
     __send: (buf: Buffer) => {
-      if (client.connected) { try { sock.write(buf); } catch { /* already gone */ } }
+      const s = client.__sock;
+      if (client.connected && s && !s.destroyed) { try { s.write(buf); } catch { /* already gone */ } }
       else client.outbox.push(buf);
     },
-    connect: (): Promise<void> => client.connAck,
+    connect: (): Promise<void> => {
+      if (client.connected) return Promise.resolve();
+      if (client.__closed) { client.__closed = false; dial(); return client.connAck; }
+      const s = client.__sock;
+      if (!s || s.destroyed) {
+        if (client.__retry) { clearTimeout(client.__retry); client.__retry = null; }
+        dial();
+      }
+      return client.connAck;
+    },
     close: () => client.disconnect(),
     disconnect: () => {
-      try { sock.write(__mqttPacket(14, 0, Buffer.alloc(0))); } catch { /* already gone */ }
-      sock.end();
+      client.__closed = true;
+      if (client.__retry) { clearTimeout(client.__retry); client.__retry = null; }
+      try { client.__sock?.write(__mqttPacket(14, 0, Buffer.alloc(0))); } catch { /* already gone */ }
+      try { client.__sock?.end(); } catch { /* already gone */ }
     },
     subscribe: (topic: string, sopts: NetOpts = {}) => {
       client.subs.set(topic, (sopts.qos as number) || 0);
@@ -2415,70 +2428,102 @@ function __mqttConnect(nt: any, port: number, host: string, o: NetOpts): any {
       client.__send(__mqttPacket(3, (qos << 1) | (popts.retain ? 1 : 0), Buffer.concat([head, payload])));
     },
   };
-  client.connAck = new Promise<void>((res, rej) => { client.__resolveConnAck = res; client.__rejectConnAck = rej; });
-  // The facade's connect() is optional: an app that ignores it must not turn a
-  // refused broker into an unhandled rejection that kills the process. The
-  // no-op catch marks the promise handled while still rejecting for awaiters.
-  client.connAck.catch(() => {});
 
-  sock.on('connect', () => {
-    let flags = o.clean !== false ? 0x02 : 0;
-    const username = o.username as string | undefined;
-    const password = o.password as string | undefined;
-    if (username) flags |= 0x80;
-    if (password) flags |= 0x40;
-    const parts: Buffer[] = [__mqttStr('MQTT'), Buffer.from([4]), Buffer.from([flags]), __mqttU16((o.keepalive as number) ?? 60), __mqttStr((o.clientId as string) || ('rosespan_' + Math.random().toString(16).slice(2, 10)))];
-    if (username) parts.push(__mqttStr(username));
-    if (password) parts.push(__mqttStr(password));
-    sock.write(__mqttPacket(1, 0, Buffer.concat(parts)));
-    const ka = (o.keepalive as number) ?? 60;
-    if (ka > 0) client.__keepalive = setInterval(() => { try { sock.write(__mqttPacket(12, 0, Buffer.alloc(0))); } catch { /* already gone */ } }, Math.max(250, ka * 500));
-  });
-  (sock as any).__mqttBuf = Buffer.alloc(0);
-  sock.on('data', (chunk: Buffer) => {
-    const s = sock as any;
-    s.__mqttBuf = s.__mqttBuf.length ? Buffer.concat([s.__mqttBuf, chunk]) : chunk;
-    const { packets, rest } = __mqttParsePackets(s.__mqttBuf as Buffer);
-    s.__mqttBuf = rest;
-    for (const pkt of packets) {
-      if (pkt.type === 2) {
-        if (pkt.body.length >= 2 && pkt.body[1] === 0) {
-          client.connected = true;
-          for (const q of client.outbox) { try { sock.write(q); } catch { /* already gone */ } }
-          client.outbox.length = 0;
-          client.__resolveConnAck?.();
-          (client.opts.onConnect as (() => void) | undefined)?.();
-        } else {
-          const err = new Error('[rosespan] MQTT broker refused the connection (code ' + (pkt.body[1] ?? '?') + ')');
-          client.__rejectConnAck?.(err);
-          (client.opts.onError as ((e: Error) => void) | undefined)?.(err);
+  const scheduleReconnect = () => {
+    if (client.__closed || client.__retry) return;
+    if (client.opts.reconnect === false) return;
+    const base = (client.opts.reconnectDelay as number) ?? 500;
+    const cap = (client.opts.reconnectMax as number) ?? 30000;
+    const delay = Math.min(base * 2 ** client.__attempt, cap);
+    client.__attempt++;
+    client.__retry = setTimeout(() => { client.__retry = null; dial(); }, delay);
+  };
+
+  const dial = () => {
+    if (client.__closed) return;
+    // One connAck per attempt with isolated resolvers: an awaiter of a dead
+    // attempt sees that attempt's rejection, never a later attempt's.
+    let resolveAck: () => void = () => {};
+    let rejectAck: (e: Error) => void = () => {};
+    client.connAck = new Promise<void>((res, rej) => { resolveAck = res; rejectAck = rej; });
+    // The facade's connect() is optional: an app that ignores it must not turn
+    // a refused broker into an unhandled rejection that kills the process.
+    client.connAck.catch(() => {});
+    const s = nt.createConnection({ host, port });
+    client.__sock = s;
+    (s as any).__mqttBuf = Buffer.alloc(0);
+    s.on('connect', () => {
+      const opts = client.opts; // read dynamically: a per-request render or dev reload swaps opts in place
+      let flags = opts.clean !== false ? 0x02 : 0;
+      const username = opts.username as string | undefined;
+      const password = opts.password as string | undefined;
+      if (username) flags |= 0x80;
+      if (password) flags |= 0x40;
+      const parts: Buffer[] = [__mqttStr('MQTT'), Buffer.from([4]), Buffer.from([flags]), __mqttU16((opts.keepalive as number) ?? 60), __mqttStr((opts.clientId as string) || ('rosespan_' + Math.random().toString(16).slice(2, 10)))];
+      if (username) parts.push(__mqttStr(username));
+      if (password) parts.push(__mqttStr(password));
+      s.write(__mqttPacket(1, 0, Buffer.concat(parts)));
+      if (client.__keepalive) { clearInterval(client.__keepalive); client.__keepalive = null; }
+      const ka = (opts.keepalive as number) ?? 60;
+      if (ka > 0) client.__keepalive = setInterval(() => { try { s.write(__mqttPacket(12, 0, Buffer.alloc(0))); } catch { /* already gone */ } }, Math.max(250, ka * 500));
+    });
+    s.on('data', (chunk: Buffer) => {
+      const buf = (s as any).__mqttBuf as Buffer;
+      (s as any).__mqttBuf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
+      const { packets, rest } = __mqttParsePackets((s as any).__mqttBuf as Buffer);
+      (s as any).__mqttBuf = rest;
+      for (const pkt of packets) {
+        if (pkt.type === 2) {
+          if (pkt.body.length >= 2 && pkt.body[1] === 0) {
+            client.connected = true;
+            client.__attempt = 0; // a healthy connection resets the backoff
+            for (const q of client.outbox) { try { s.write(q); } catch { /* already gone */ } }
+            client.outbox.length = 0;
+            // clean=true wipes the broker-side session, so every active filter
+            // is re-sent on every (re)connect - the broker cannot restore them.
+            for (const [topic, qos] of client.subs) {
+              try { s.write(__mqttPacket(8, 2, Buffer.concat([__mqttU16(client.nextId++), __mqttStr(topic), Buffer.from([qos])]))); } catch { /* already gone */ }
+            }
+            resolveAck();
+            (client.opts.onConnect as (() => void) | undefined)?.();
+          } else {
+            const err = new Error('[rosespan] MQTT broker refused the connection (code ' + (pkt.body[1] ?? '?') + ')');
+            rejectAck(err);
+            (client.opts.onError as ((e: Error) => void) | undefined)?.(err);
+          }
+        } else if (pkt.type === 3) {
+          if (pkt.body.length < 2) continue;
+          const tlen = pkt.body.readUInt16BE(0);
+          const topic = pkt.body.slice(2, 2 + tlen).toString('utf8');
+          let p = 2 + tlen;
+          const qos = (pkt.flags >> 1) & 0x03;
+          let pid = 0;
+          if (qos > 0 && pkt.body.length >= p + 2) { pid = pkt.body.readUInt16BE(p); p += 2; }
+          const payload = pkt.body.slice(p);
+          for (const filter of client.subs.keys()) {
+            if (__mqttTopicMatch(filter, topic)) { (client.opts.onMessage as ((t: string, m: Buffer) => void) | undefined)?.(topic, payload); break; }
+          }
+          if (qos === 1 && pid) client.__send(__mqttPacket(4, 0, __mqttU16(pid)));
         }
-      } else if (pkt.type === 3) {
-        if (pkt.body.length < 2) continue;
-        const tlen = pkt.body.readUInt16BE(0);
-        const topic = pkt.body.slice(2, 2 + tlen).toString('utf8');
-        let p = 2 + tlen;
-        const qos = (pkt.flags >> 1) & 0x03;
-        let pid = 0;
-        if (qos > 0 && pkt.body.length >= p + 2) { pid = pkt.body.readUInt16BE(p); p += 2; }
-        const payload = pkt.body.slice(p);
-        for (const filter of client.subs.keys()) {
-          if (__mqttTopicMatch(filter, topic)) { (client.opts.onMessage as ((t: string, m: Buffer) => void) | undefined)?.(topic, payload); break; }
-        }
-        if (qos === 1 && pid) client.__send(__mqttPacket(4, 0, __mqttU16(pid)));
+        // 9 SUBACK / 11 UNSUBACK / 13 PINGRESP: acknowledgement only, nothing to surface
       }
-      // 9 SUBACK / 11 UNSUBACK / 13 PINGRESP: acknowledgement only, nothing to surface
-    }
-  });
-  sock.on('close', () => {
-    client.connected = false;
-    if (client.__keepalive) { clearInterval(client.__keepalive); client.__keepalive = null; }
-    client.__rejectConnAck?.(new Error('[rosespan] MQTT connection closed before CONNACK'));
-  });
-  sock.on('error', (err: Error) => {
-    (client.opts.onError as ((e: Error) => void) | undefined)?.(err);
-    if (!client.connected) client.__rejectConnAck?.(err);
-  });
+    });
+    s.on('close', () => {
+      if (s !== client.__sock) return; // a stale socket from a previous attempt
+      client.connected = false;
+      if (client.__keepalive) { clearInterval(client.__keepalive); client.__keepalive = null; }
+      if (client.__closed) return; // an app-level disconnect() is final
+      rejectAck(new Error('[rosespan] MQTT connection closed before CONNACK'));
+      scheduleReconnect();
+    });
+    s.on('error', (err: Error) => {
+      if (s !== client.__sock) return;
+      (client.opts.onError as ((e: Error) => void) | undefined)?.(err);
+      if (!client.connected) rejectAck(err);
+    });
+  };
+
+  dial();
   return client;
 }
 
