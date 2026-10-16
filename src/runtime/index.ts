@@ -1939,49 +1939,109 @@ export function $store<T>(name: string, initial: T): { get(): T; set(v: T): void
 }
 
 // === Network listeners (isomorphic) ===
-// $udp / $tcp / $listen let an app open a socket and react to the outside world
-// (LoRa gateways, MQTT-ish feeds, raw TCP devices) from inside a rosespan app. They
-// only REGISTER a spec here; the host binds them via __startNetwork() at
-// serve-worker boot - so a build, a prerender, or a dev hot-re-import never opens a
-// socket. The registries live on globalThis: a dev re-import re-registers specs
-// against the same live handles. On the client every handle is an inert no-op, so a
-// page whose <script> opens a listener hydrates without a ReferenceError.
+// $udp / $tcp / $listen / $websocket let an app open a socket and react to the
+// outside world (LoRa gateways, MQTT-ish feeds, raw TCP devices, live dashboards)
+// from inside a rosespan app. They only REGISTER a spec here; the host binds them
+// via __startNetwork() at serve-worker boot - so a build, a prerender, or a dev
+// hot-re-import never opens a socket. The registries live on globalThis: a dev
+// re-import re-registers specs against the same live handles.
+//
+// A page's <script> runs per render, so the same key re-registers on every
+// request. Re-registration therefore SWAPS the callbacks on the live handle
+// (opts are read dynamically at event time) instead of closing the socket: no
+// per-request churn, and a dev hot-reload's fresh closures take over immediately
+// instead of leaving stale ones bound. On the client every handle is an inert
+// no-op, so a page whose <script> opens a listener hydrates without a
+// ReferenceError.
 type NetOpts = Record<string, unknown>;
 const __netSpecs: { kind: string; port: number; host?: string; opts: NetOpts }[] =
   (globalThis as any).__rosespan_netSpecs || ((globalThis as any).__rosespan_netSpecs = []);
 const __netHandles: any[] = (globalThis as any).__rosespan_netHandles || ((globalThis as any).__rosespan_netHandles = []);
+/** key ('kind:port:host') -> live handle. A Map, not a Set: re-registering a key (per-request render or dev hot re-import) swaps the callbacks in place. */
+const __netBound: Map<string, any> = (globalThis as any).__rosespan_netBound || ((globalThis as any).__rosespan_netBound = new Map());
 
 function __netBind(spec: { kind: string; port: number; host?: string; opts: NetOpts }): void {
-  const bound: Set<string> = (globalThis as any).__rosespan_netBound || ((globalThis as any).__rosespan_netBound = new Set());
   const key = spec.kind + ':' + spec.port + ':' + (spec.host || '');
-  if (bound.has(key)) return;
-  bound.add(key);
+  const prev = __netBound.get(key);
+  if (prev) {
+    // Live handle already bound: adopt the newest callbacks, keep the socket.
+    prev.opts = spec.opts || {};
+    return;
+  }
   const o = spec.opts || {};
   if (spec.kind === 'udp') {
     const dg = (globalThis as any).__rosespan_dgram;
     if (!dg) return;
+    const handle = { opts: o, sock: null as any };
     const sock = dg.createSocket('udp4');
-    sock.on('message', (msg: Buffer, rinfo: unknown) => (o.onMessage as (m: Buffer, r: unknown) => void)?.(msg, rinfo));
-    sock.on('error', (err: Error) => ((o.onError as (e: Error) => void) || ((e: Error) => console.error('[rosespan] UDP error:', e)))(err));
+    handle.sock = sock;
+    sock.on('message', (msg: Buffer, rinfo: unknown) => (handle.opts.onMessage as (m: Buffer, r: unknown) => void)?.(msg, rinfo));
+    sock.on('error', (err: Error) => { if (handle.opts.onError) (handle.opts.onError as (e: Error) => void)(err); else console.error('[rosespan] UDP error:', err); });
     sock.bind(spec.port, spec.host || '0.0.0.0');
     __netHandles.push(sock);
+    __netBound.set(key, handle);
   } else if (spec.kind === 'tcp') {
     const nt = (globalThis as any).__rosespan_net;
     if (!nt) return;
+    const handle = { opts: o, srv: null as any };
     const srv = nt.createServer((socket: any) => {
-      (o.onConnection as (s: unknown) => void)?.(socket);
-      socket.on('data', (data: Buffer) => (o.onData as (s: unknown, d: Buffer) => void)?.(socket, data));
+      (handle.opts.onConnection as (s: unknown) => void)?.(socket);
+      socket.on('data', (data: Buffer) => (handle.opts.onData as (s: unknown, d: Buffer) => void)?.(socket, data));
       socket.on('error', () => {});
     });
+    handle.srv = srv;
     srv.on('error', (err: Error) => console.error('[rosespan] TCP server error:', err));
     srv.listen(spec.port, spec.host || '0.0.0.0');
     __netHandles.push(srv);
+    __netBound.set(key, handle);
+  } else if (spec.kind === 'ws') {
+    const http = (globalThis as any).__rosespan_http;
+    const cryptoMod = (globalThis as any).__rosespan_crypto;
+    if (!http || !cryptoMod) return;
+    const clients = new Set<any>();
+    const handle = {
+      opts: o,
+      clients: () => Array.from(clients),
+      broadcast: (data: unknown) => { for (const c of clients) c.send(data); },
+      close: () => { for (const c of Array.from(clients)) c.close(); try { srv.close(); } catch { /* already gone */ } },
+    };
+    const srv = http.createServer((_req: unknown, res: any) => { res.writeHead(426, { 'content-type': 'text/plain' }); res.end('Upgrade Required'); });
+    srv.on('upgrade', (req: any, socket: any) => {
+      const opts = handle.opts;
+      if (String(req.headers.upgrade || '').toLowerCase() !== 'websocket' || !req.headers['sec-websocket-key']) { socket.destroy(); return; }
+      const path = String(req.url || '/').split('?')[0];
+      if (opts.path && path !== opts.path) { socket.destroy(); return; }
+      const accept = cryptoMod.createHash('sha1').update(String(req.headers['sec-websocket-key']) + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n');
+      socket.setNoDelay(true);
+      const wrapped = __wsWrap(socket, clients, handle);
+      clients.add(wrapped);
+      (opts.onConnection as (ws: unknown) => void)?.(wrapped);
+    });
+    srv.on('error', (err: Error) => { if (handle.opts.onError) (handle.opts.onError as (e: Error) => void)(err); else console.error('[rosespan] WebSocket server error:', err); });
+    srv.listen(spec.port, spec.host || '0.0.0.0');
+    __netHandles.push(handle);
+    __netBound.set(key, handle);
   }
 }
 function __netReg(kind: string, port: number, host: string | undefined, opts: NetOpts): void {
   const spec = { kind, port, host, opts };
   __netSpecs.push(spec);
   if ((globalThis as any).__rosespan_netStarted === true) __netBind(spec);
+}
+/** Drop every pending spec for a key and close its live handle (app-level close()). */
+function __netUnreg(kind: string, port: number, host: string | undefined): void {
+  const key = kind + ':' + port + ':' + (host || '');
+  const h = __netBound.get(key);
+  if (h) {
+    const live = (h as { sock?: { close?: () => void }; srv?: { close?: () => void }; close?: () => void });
+    try { (live.close || live.sock?.close || live.srv?.close)?.call(live); } catch { /* already gone */ }
+    __netBound.delete(key);
+  }
+  for (let i = __netSpecs.length - 1; i >= 0; i--) {
+    const s = __netSpecs[i];
+    if (s.kind === kind && s.port === port && (s.host || '') === (host || '')) __netSpecs.splice(i, 1);
+  }
 }
 /** Bind every registered listener. Called once at serve-worker boot by the host. */
 export function __startNetwork(): void {
@@ -1990,16 +2050,142 @@ export function __startNetwork(): void {
 }
 /** Close every bound listener. Called on worker shutdown. */
 export function __stopNetwork(): void {
-  for (const h of __netHandles) { try { (h as { close?: () => void }).close?.(); } catch { /* already gone */ } }
+  for (const h of __netHandles) {
+    const live = h as { close?: () => void };
+    try { live.close?.(); } catch { /* already gone */ }
+  }
   __netHandles.length = 0;
-  ((globalThis as any).__rosespan_netBound as Set<string> | undefined)?.clear?.();
+  __netBound.clear();
+}
+
+// === WebSocket server (RFC 6455, zero-dependency) ===
+// Minimal but complete enough for dashboards and device feeds: handshake,
+// text/binary frames, continuation reassembly, ping/pong, close handshake.
+// No extensions, no permessage-deflate - deliberately.
+const __WS_MAGIC = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+/** Parse as many complete frames as the buffer holds; return the tail (partial frame) for the next chunk. */
+function __wsParseFrames(buf: Buffer): { frames: { fin: boolean; opcode: number; payload: Buffer }[]; rest: Buffer } {
+  const frames: { fin: boolean; opcode: number; payload: Buffer }[] = [];
+  let off = 0;
+  while (off + 2 <= buf.length) {
+    const b0 = buf[off];
+    const b1 = buf[off + 1];
+    const fin = (b0 & 0x80) !== 0;
+    const opcode = b0 & 0x0f;
+    const masked = (b1 & 0x80) !== 0;
+    let len = b1 & 0x7f;
+    let p = off + 2;
+    if (len === 126) {
+      if (off + 4 > buf.length) break;
+      len = buf.readUInt16BE(p);
+      p += 2;
+    } else if (len === 127) {
+      if (off + 10 > buf.length) break;
+      len = buf.readUInt32BE(p) * 4294967296 + buf.readUInt32BE(p + 4);
+      p += 8;
+    }
+    const maskLen = masked ? 4 : 0;
+    if (p + maskLen + len > buf.length) break;
+    let payload = buf.slice(p + maskLen, p + maskLen + len);
+    if (masked) {
+      const mask = buf.slice(p, p + 4);
+      const out = Buffer.allocUnsafe(len);
+      for (let i = 0; i < len; i++) out[i] = payload[i] ^ mask[i & 3];
+      payload = out;
+    }
+    frames.push({ fin, opcode, payload });
+    off = p + maskLen + len;
+  }
+  return { frames, rest: off > 0 ? buf.slice(off) : buf };
+}
+
+/** Encode one server->client frame (never masked, FIN always set for our single-frame sends). */
+function __wsEncodeFrame(opcode: number, payload: Buffer): Buffer {
+  const len = payload.length;
+  let header: Buffer;
+  if (len < 126) {
+    header = Buffer.from([0x80 | opcode, len]);
+  } else if (len < 65536) {
+    header = Buffer.allocUnsafe(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(len, 2);
+  } else {
+    header = Buffer.allocUnsafe(10);
+    header[0] = 0x80 | opcode;
+    header[1] = 127;
+    header.writeUInt32BE(0, 2);
+    header.writeUInt32BE(len, 6);
+  }
+  return Buffer.concat([header, payload]);
+}
+
+/** Wrap an upgraded raw socket into the plan's WebSocket surface: send/close/on + message reassembly. Callbacks are read from the handle's opts at event time so a re-registration swaps them live. */
+function __wsWrap(socket: any, clients: Set<any>, handle: { opts: NetOpts }): any {
+  const listeners: Record<string, ((arg: unknown) => void)[]> = {};
+  const emit = (ev: string, arg: unknown) => { for (const fn of listeners[ev] || []) fn(arg); };
+  let msgOpcode = 0;
+  let parts: Buffer[] = [];
+  const wrapped = {
+    remoteAddress: socket.remoteAddress,
+    send: (data: unknown) => {
+      if (socket.destroyed) return;
+      let opcode = 1;
+      let payload: Buffer;
+      if (typeof data === 'string') { opcode = 1; payload = Buffer.from(data, 'utf8'); }
+      else if (Buffer.isBuffer(data)) { opcode = 2; payload = data; }
+      else { opcode = 1; payload = Buffer.from(String(data), 'utf8'); }
+      socket.write(__wsEncodeFrame(opcode, payload));
+    },
+    close: () => {
+      if (socket.destroyed) return;
+      try { socket.write(__wsEncodeFrame(8, Buffer.from([0x03, 0xe8]))); } catch { /* already gone */ }
+      socket.end();
+    },
+    on: (ev: string, fn: (arg: unknown) => void) => { (listeners[ev] || (listeners[ev] = [])).push(fn); },
+  };
+  (socket as any).__wsBuf = Buffer.alloc(0);
+  socket.on('data', (chunk: Buffer) => {
+    const sock = socket as any;
+    sock.__wsBuf = sock.__wsBuf.length ? Buffer.concat([sock.__wsBuf, chunk]) : chunk;
+    const { frames, rest } = __wsParseFrames(sock.__wsBuf as Buffer);
+    sock.__wsBuf = rest;
+    for (const f of frames) {
+      if (f.opcode === 8) {
+        wrapped.close();
+      } else if (f.opcode === 9) {
+        try { socket.write(__wsEncodeFrame(10, f.payload)); } catch { /* already gone */ }
+      } else if (f.opcode === 10) {
+        // pong: nothing to do
+      } else if (f.opcode === 1 || f.opcode === 2) {
+        if (msgOpcode !== 0) { socket.destroy(); return; } // protocol error: new data frame mid-message
+        msgOpcode = f.opcode;
+        parts = [f.payload];
+        if (f.fin) { const msg = Buffer.concat(parts); const op = msgOpcode; msgOpcode = 0; parts = []; emit('message', op === 1 ? msg.toString('utf8') : msg); (handle.opts.onMessage as ((...a: unknown[]) => void) | undefined)?.(wrapped, op === 1 ? msg.toString('utf8') : msg); }
+      } else if (f.opcode === 0) {
+        if (msgOpcode === 0) { socket.destroy(); return; } // protocol error: continuation without a start
+        parts.push(f.payload);
+        if (f.fin) { const msg = Buffer.concat(parts); const op = msgOpcode; msgOpcode = 0; parts = []; emit('message', op === 1 ? msg.toString('utf8') : msg); (handle.opts.onMessage as ((...a: unknown[]) => void) | undefined)?.(wrapped, op === 1 ? msg.toString('utf8') : msg); }
+      }
+    }
+  });
+  socket.on('close', () => { clients.delete(wrapped); emit('close', null); (handle.opts.onClose as ((...a: unknown[]) => void) | undefined)?.(wrapped); });
+  socket.on('error', (e: Error) => emit('error', e));
+  return wrapped;
 }
 
 const __NOOP_NET = {
   send: () => {}, close: () => {}, write: () => {}, end: () => {}, destroy: () => {}, on: () => {},
-  joinMulticast: () => {}, leaveMulticast: () => {},
+  joinMulticast: () => {}, leaveMulticast: (): void => {},
   address: () => ({ port: 0, host: 'localhost', family: 'IPv4' }),
 };
+const __NOOP_WS = (port: number, host?: string) => ({
+  close: (): void => {},
+  clients: (): unknown[] => [],
+  broadcast: (): void => {},
+  address: () => ({ port, host: host || '0.0.0.0' }),
+});
 
 export function $udp(port: number, opts: NetOpts = {}): any {
   if (typeof document === 'undefined') __netReg('udp', port, opts.host as string | undefined, opts);
@@ -2032,7 +2218,32 @@ export function $listen(port: number, opts: NetOpts = {}): any {
   const protocol = (opts.protocol as string) || 'http';
   if (protocol === 'udp') $udp(port, { host: opts.host, onMessage: opts.onData, onError: opts.onError });
   else if (protocol === 'tcp') $tcp(port, { host: opts.host, onConnection: opts.onConnection, onData: opts.onData });
+  else if (protocol === 'websocket') $websocket(port, { host: opts.host, path: opts.path, onConnection: opts.onConnection });
   return { close: () => {}, address: () => ({ port, host: (opts.host as string) || '0.0.0.0' }) };
+}
+
+/**
+ * $websocket - WebSocket server (RFC 6455).
+ * Registers a spec like $udp/$tcp; the returned facade delegates to the live
+ * handle once __startNetwork() binds it, so app code can broadcast/close at any
+ * time (on the client the facade is an inert no-op).
+ */
+export function $websocket(port: number, opts: NetOpts = {}): any {
+  const host = opts.host as string | undefined;
+  if (typeof document !== 'undefined') return __NOOP_WS(port, host);
+  __netReg('ws', port, host, opts);
+  return {
+    close: () => __netUnreg('ws', port, host),
+    clients: () => {
+      const h = __netBound.get('ws:' + port + ':' + (host || ''));
+      return h ? (h.clients as () => unknown[])() : [];
+    },
+    broadcast: (data: unknown) => {
+      const h = __netBound.get('ws:' + port + ':' + (host || ''));
+      if (h) (h.broadcast as (d: unknown) => void)(data);
+    },
+    address: () => ({ port, host: host || '0.0.0.0' }),
+  };
 }
 
 export class ActionError extends Error {
