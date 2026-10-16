@@ -7,7 +7,8 @@ import { pathToFileURL, fileURLToPath } from 'url';
 import * as esbuild from 'esbuild';
 // The error contract every compiler failure speaks: a stable code, the file, the line when known.
 import { RoseError, lineOf, lineAt } from './errors.js';
-export { RoseError, lineOf, lineAt, errorInfo } from './errors.js';
+import { fnv1a32 } from '../hash.js';
+export { RoseError, lineOf, lineAt, errorInfo, codeFrame } from './errors.js';
 export type { RoseErrorInfo } from './errors.js';
 import type { PwaOptions } from '../pwa.js';
 
@@ -78,6 +79,8 @@ export interface CompileResult {
    */
   controlSignal?: boolean;
   prefetch?: string;
+  /** app-global hydration strategy: defer the initial wire() to requestIdleCallback (lazy hydration / partial resumability) */
+  lazyHydration?: boolean;
   vitals?: boolean;
   bundle?: string;
  /** The static analysis says this component needs the client bundle */
@@ -1022,6 +1025,15 @@ export async function compileComponent(filePath: string, publicDir: string, scop
       { file: filePath, line: lineAt(rawScript, prefetchMatch), hint: "prefetch is the app-global link strategy, declared once in the root _layout.rose: 'off' | 'hover' (default) | 'viewport' | 'all'" },
     );
   }
+  const lazyMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+lazyHydration\s*=\s*(true|false)\s*;?/);
+  const lazyHydration = lazyMatch ? lazyMatch[1] === 'true' : undefined;
+  if (lazyMatch && !lazyHydration) {
+    throw new RoseError(
+      'E-EXPORT',
+      `${filePath}: export const lazyHydration must be true (or be absent - hydration is eager by default)`,
+      { file: filePath, line: lineAt(rawScript, lazyMatch), hint: 'omit the export entirely, or set it to exactly true - lazy hydration is opt-in per app, declared once in the root _layout.rose' },
+    );
+  }
   const vitalsMatch = rawScript.match(/(?:^|\n)\s*export\s+(?:const|let|var)\s+vitals\s*=\s*([^;\n]+)\s*;?/);
   const vitals = vitalsMatch ? vitalsMatch[1].trim() === 'true' : undefined;
   if (vitalsMatch && !vitals) {
@@ -1411,6 +1423,7 @@ if (!__seeded_${d.name}) { const __v_${d.name} = await $data(${fn}); set${capita
     buffer,
     controlSignal,
     prefetch,
+    lazyHydration,
     vitals,
     bundle,
     needsClient,
@@ -4380,7 +4393,11 @@ function toWebRequest(raw, form) {
   if (raw instanceof Request) return raw;
   const init = { method: raw.method || 'GET', headers: new Headers(raw.headers || {}) };
   if (form) init.body = form;
-  return new Request('http://' + (raw.headers?.host || 'localhost') + (raw.url || '/'), init);
+  let u = raw.url || '/';
+  if (u.startsWith('http://') || u.startsWith('https://')) {
+    try { const p = new URL(u); u = p.pathname + p.search; } catch { u = '/'; }
+  }
+  return new Request('http://' + (raw.headers?.host || 'localhost') + u, init);
 }
 
 
@@ -4640,12 +4657,12 @@ async function renderPageIsolated(pathname, form) {
         return { html: '<h1>500</h1><p>Something went wrong rendering this page.</p>' + devDetail, state: '{}', head: [], status: 500, ...docAttrs(pathname) };
       }
       // __route tells the bootstrap which route this document was rendered for.
-      const noJs = route.csr === false;
-      let state = '{}';
-      if (!noJs || actionStatus !== 0) {
-        const s = serializeState();
-        state = '{"__route":' + JSON.stringify(pathname) + (s.length > 2 ? ',' + s.slice(1) : '}');
-      }
+    const noJs = route.csr === false;
+    let state = '{}';
+    if (!noJs || actionStatus !== 0) {
+      const s = serializeState();
+      state = '{"__route":' + JSON.stringify(pathname) + (s.length > 2 ? ',' + s.slice(1) : '}');
+    }
  // Csr ( auto since #29): false when the compiler found nothing in the route's chain that needs the client (or the route asserted csr = false) .
       return { html: rendered.html, state, head: rendered.head, status: actionStatus || 200, csr: route.csr !== false, shell: route.shell !== false, lang: docLang, dir: localeDir(docLang) };
   }
@@ -4819,34 +4836,35 @@ export { installContextStore };
   } catch { /* types are a convenience: never fail the build over them */ }
 
   await fs.promises.writeFile(path.join(buildDir, 'server-entry.js'), serverEntry);
-  await esbuild.build({
-    entryPoints: [path.join(buildDir, 'server-entry.js')],
-    bundle: true,
-    outfile: path.join(outDir, 'server.js'),
-    format: 'esm',
-    platform: 'node',
-    write: true,
-    ...TS_LOADER,
-  });
-
-  await esbuild.build({
-    entryPoints: [(() => {
-      const here = path.dirname(fileURLToPath(import.meta.url));
-      for (const cand of [path.join(here, '..', 'cli', 'prod-server.ts'), path.join(here, '..', 'src', 'cli', 'prod-server.ts')]) {
-        if (fs.existsSync(cand)) return cand;
-      }
-      return path.join(here, '..', 'cli', 'prod-server.ts');
-    })()],
-    bundle: true,
-    outfile: path.join(outDir, 'prod.mjs'),
-    format: 'esm',
-    platform: 'node',
-    write: true,
-    banner: {
-      js: "import { createRequire } from 'node:module'; import { fileURLToPath as __f2p } from 'node:url'; import { dirname as __dn } from 'node:path'; const require = createRequire(import.meta.url); const __filename = __f2p(import.meta.url); const __dirname = __dn(__filename);"
-    },
-    ...TS_LOADER,
-  });
+  await Promise.all([
+    esbuild.build({
+      entryPoints: [path.join(buildDir, 'server-entry.js')],
+      bundle: true,
+      outfile: path.join(outDir, 'server.js'),
+      format: 'esm',
+      platform: 'node',
+      write: true,
+      ...TS_LOADER,
+    }),
+    esbuild.build({
+      entryPoints: [(() => {
+        const here = path.dirname(fileURLToPath(import.meta.url));
+        for (const cand of [path.join(here, '..', 'cli', 'prod-server.ts'), path.join(here, '..', 'src', 'cli', 'prod-server.ts')]) {
+          if (fs.existsSync(cand)) return cand;
+        }
+        return path.join(here, '..', 'cli', 'prod-server.ts');
+      })()],
+      bundle: true,
+      outfile: path.join(outDir, 'prod.mjs'),
+      format: 'esm',
+      platform: 'node',
+      write: true,
+      banner: {
+        js: "import { createRequire } from 'node:module'; import { fileURLToPath as __f2p } from 'node:url'; import { dirname as __dn } from 'node:path'; const require = createRequire(import.meta.url); const __filename = __f2p(import.meta.url); const __dirname = __dn(__filename);"
+      },
+      ...TS_LOADER,
+    }),
+  ]);
 
   const clientImports = split ? '' : compiled
     .map((_, i) => ({ i }))
@@ -4861,6 +4879,7 @@ export { installContextStore };
     .join(',\n  ');
 
   const prefetchMode = compiled.find((c) => c.prefetch)?.prefetch ?? 'all';
+  const lazyHydrationFlag = compiled.find((c) => c.lazyHydration)?.lazyHydration ?? false;
   const vitalsOn = compiled.some((c) => c.vitals === true);
   const vitalsBlock = vitalsOn
     ? `
@@ -4904,6 +4923,8 @@ ${hasLang ? `// the default locale, kept beside setLocales' own copy so <html la
 // follow a route that carries no [lang] segment (a non-i18n page)
 const __defLocale = '${defaultLocale}';` : ''}
 ${vitalsOn ? `// the app asked for web-vitals. The import is what keeps\n// reportVitals alive through minification and tree-shaking; the call is one\n// statement at boot, before the first render.\nimport { reportVitals } from './runtime.js';`: ''}
+// Lazy hydration: when the app opts in (export const lazyHydration = true in\n// the root _layout.rose), the bootstrap defers the initial wire() to\n// requestIdleCallback. The flag is set here (module eval runs before the\n// bootstrap's start() call) so the bootstrap can read it without a second channel.
+if (typeof window !== 'undefined') window.__rosefnLazy = ${JSON.stringify(lazyHydrationFlag)};
 // The two pack doors, re-exported for an app that wants to warm a language before its visitor asks for it (ensureLocale) or to feed a dictionary.
 export { ensureLocale, loadLocale } from './runtime.js';
 ${vitalsBlock}
@@ -5328,7 +5349,15 @@ setRefreshHook(async () => {
     });
   }
 
-  await fs.promises.writeFile(path.join(outDir, 'mount.js'), MOUNT_ENTRY);
+  // mount.js shares the document's runtime module: its import carries the same
+  // content-hash URL the shell emits, so a host page using both loads the
+  // runtime exactly once. Unversioned fallback when the bundle is absent.
+  let mountEntry = MOUNT_ENTRY;
+  try {
+    const cb = fs.readFileSync(path.join(outDir, 'client.js'));
+    mountEntry = MOUNT_ENTRY.replace("from '/client.js'", `from '/client.js?v=${fnv1a32(cb)}'`);
+  } catch { /* no client bundle: keep the unversioned import */ }
+  await fs.promises.writeFile(path.join(outDir, 'mount.js'), mountEntry);
 
   await fs.promises.rm(buildDir, { recursive: true, force: true });
 
