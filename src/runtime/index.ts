@@ -2017,8 +2017,11 @@ function __netBind(spec: { kind: string; port: number; host?: string; opts: NetO
       const path = String(req.url || '/').split('?')[0];
       if (opts.path && path !== opts.path) { socket.destroy(); return; }
       const accept = cryptoMod.createHash('sha1').update(String(req.headers['sec-websocket-key']) + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
-      socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n');
+      try {
+        socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n');
+      } catch { socket.destroy(); return; }
       socket.setNoDelay(true);
+      socket.setTimeout(0); // an upgraded socket is a long-lived channel: no request timeout
       const wrapped = __wsWrap(socket, clients, handle);
       clients.add(wrapped);
       (opts.onConnection as (ws: unknown) => void)?.(wrapped);
@@ -2413,6 +2416,10 @@ function __mqttConnect(nt: any, port: number, host: string, o: NetOpts): any {
     },
   };
   client.connAck = new Promise<void>((res, rej) => { client.__resolveConnAck = res; client.__rejectConnAck = rej; });
+  // The facade's connect() is optional: an app that ignores it must not turn a
+  // refused broker into an unhandled rejection that kills the process. The
+  // no-op catch marks the promise handled while still rejecting for awaiters.
+  client.connAck.catch(() => {});
 
   sock.on('connect', () => {
     let flags = o.clean !== false ? 0x02 : 0;
