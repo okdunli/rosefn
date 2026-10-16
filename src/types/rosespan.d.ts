@@ -15,6 +15,24 @@ declare function $state<T>(initial: T): Getter<T>;
 /** Write reactive state by key - the same write the generated setter performs. */
 declare function $setState<T>(key: string, value: T): void;
 
+/**
+ * Computed state: compiles to a plain getter over the signals the expression
+ * reads, so every read recomputes - no subscription machinery, never
+ * serialized. Top-level declarations only. The expression is rosespan syntax
+ * (bare state reads are callified at compile time), so it checks as `any`.
+ */
+declare function $derived(expr: any): Getter<any>;
+
+/** Like $state, but every write mirrors to localStorage (JSON, `rosespan:` prefix) and boot re-seeds from it. */
+declare function $persist<T>(initial: T): Getter<T>;
+
+/**
+ * Declaration form: `let x = $kv(() => expensive(), 60)`. The compiler turns
+ * it into seeded $state backed by the server-side memo - the value arrives
+ * with the first render and every request inside the TTL shares one compute.
+ */
+declare function $kv<T>(compute: () => T | Promise<T>, ttlSeconds?: number): Getter<T>;
+
 
 declare function $data<T>(fn: () => T | Promise<T>): Getter<T>;
 
@@ -94,6 +112,62 @@ declare function hasState(key: string): boolean;
 
 /** The best dictionary for an Accept-Language header (null when none matches). */
 declare function bestLocale(header: string | null | undefined): string | null;
+
+// === Globals the compiler injects when a route uses them ===
+// These live on globalThis in the built bundle; declaring them here keeps
+// `rosespan check` honest about code that reaches for them directly.
+
+declare var __rosespanAuth: {
+  hashPassword(pw: string): string;
+  verifyPassword(pw: string, hash: string): boolean;
+  signSession(data: Record<string, unknown>, secret: string, ttlSeconds?: number): string;
+  verifySession<T = Record<string, unknown>>(token: string, secret: string): T | null;
+  csrfToken(secret: string, sessionId: string): string;
+  verifyCsrf(token: string, secret: string, sessionId: string): boolean;
+};
+
+declare var __rosespanKvApi: {
+  kv: {
+    get(key: string): unknown;
+    set(key: string, value: unknown, ttlSeconds?: number): void;
+    del(key: string): void;
+    has(key: string): boolean;
+  };
+  kvMemo: typeof $kv;
+};
+
+interface RoseSpanContentEntry {
+  slug: string;
+  title?: string;
+  date?: string;
+  tags?: string[];
+  excerpt?: string;
+  body: string;
+  html?: string;
+  toc?: unknown[];
+  readingTime?: number;
+  wordCount?: number;
+  [key: string]: unknown;
+}
+
+declare var __rosespanContent: {
+  list(coll: string, filter?: { tag: string }): Array<Record<string, unknown>>;
+  rss(coll: string, opts: { title: string; origin: string; description: string }): string;
+  get(coll: string, slug: string, vars?: Record<string, string>): RoseSpanContentEntry | null;
+};
+
+declare var __rosespanExtras: {
+  v: {
+    validate(body: Record<string, unknown>, rules: Record<string, string[]>): {
+      ok: boolean;
+      errors: Record<string, string>;
+      values: Record<string, unknown>;
+    };
+  };
+};
+
+/** Named view transitions: `globalThis.__rosespanTransitions.pulse = (el, ms) => () => {}` - used by `transition:pulse` in templates. */
+declare var __rosespanTransitions: Record<string, (el: HTMLElement, duration: number) => () => void>;
 
 
 declare function redirect(path: string, status?: 301 | 302 | 303 | 307 | 308): never;
