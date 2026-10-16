@@ -1394,7 +1394,20 @@ if (!__seeded_${d.name}) { const __v_${d.name} = await $data(${fn}); set${capita
         : '{__slot__}'), comps);
   assertKnownDirectives(ssrTemplate, filePath);
   const compiledTemplate = compileTemplate(ssrTemplate, 'h', '__c', null, 0, true, comps);
-  const compiledHead = headContent.trim() ? compileHead(headContent) : '';
+  let compiledHead = headContent.trim() ? compileHead(headContent) : '';
+  // Route-scoped CSS (BUG.md #1): a page or layout's own top-level <style> is
+  // scoped to its own subtree and only its own route renders that subtree, so
+  // inlining it into every document is pure waste that grows with route count.
+  // Emit it as a managed head <style> block (keyed by a stable id derived from
+  // the file's scopeKey) so the document carries only its own route chain's
+  // page/layout CSS, and applyHead() swaps it out when navigating elsewhere.
+  // True components are excluded: their CSS is genuinely global and stays in
+  // styles.css (handled above), not duplicated here.
+  if (!isComponent && scopedStyle) {
+    const styleId = 'rosefn-style-' + scopeKey.replace(/[^a-zA-Z0-9_-]/g, '-');
+    const pageStyleBlock = `<style id="${styleId}">${scopedStyle}</style>`;
+    compiledHead = (compiledHead ? compiledHead + '\n' : '') + `__hd += ${JSON.stringify(pageStyleBlock)};`;
+  }
   const hasNamedSlots = /<slot\s+[^>]*\bname\s*=/.test(template);
 
   const ssrExports = actions.length > 0 ? `${exportStmts}\n${actions.map((a) => a.stmt).join('\n')}` : exportStmts;
@@ -3790,8 +3803,17 @@ export async function buildProject(root: string, outDir: string): Promise<{ rout
     if (!infos[i].isComponent) visit(i);
   });
 
+  // styles.css carries ONLY component CSS. Component styles are global by
+  // nature - the same component renders identically on every route it appears
+  // on, so shipping all reachable component CSS once per document is correct
+  // and bounded by total component CSS, not by route count. Page and layout
+  // top-level <style> are route-scoped instead: they are emitted as managed
+  // head <style> blocks (see compileComponent) so each document carries only
+  // its own route chain's page/layout CSS and the previous route's is dropped
+  // on client navigation. This closes BUG.md #1 (a backend-only page's CSS
+  // used to be inlined into every front document).
   const styles = compiled
-    .map((c, i) => (reachable.has(i) ? c.style : ''))
+    .map((c, i) => (reachable.has(i) && infos[i].isComponent ? c.style : ''))
     .filter(Boolean).join('\n');
   if (styles) await fs.promises.writeFile(path.join(outDir, 'styles.css'), styles);
   else await fs.promises.rm(path.join(outDir, 'styles.css'), { force: true });
