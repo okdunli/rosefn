@@ -209,6 +209,20 @@ function fnv(s: string): string {
   return h.toString(16);
 }
 
+// Normalize a request target: absolute-form request lines (proxy style, which
+// RFC allows) must not be joined onto an origin twice - strip to path+search.
+function relTarget(u: string): string {
+  if (u.startsWith('http://') || u.startsWith('https://')) {
+    try {
+      const p = new URL(u);
+      return p.pathname + p.search;
+    } catch {
+      return '/';
+    }
+  }
+  return u;
+}
+
 async function refetchHot(pathname: string, cookieHeader: string): Promise<void> {
   const headers: Record<string, string> = { 'user-agent': 'rosefn-hot' };
   if (cookieHeader) headers.cookie = cookieHeader;
@@ -246,7 +260,7 @@ function warmHot(pathname: string, cookieHeader: string): void {
 
 async function tryHot(req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
   if (req.method !== 'GET') return false;
-  const q = req.url || '/';
+  const q = relTarget(req.url || '/');
   const cookieHeader = String(req.headers.cookie || '');
   const key = q + '|' + fnv(cookieHeader);
   const entry = hotCache.get(key);
@@ -463,7 +477,7 @@ const server = http.createServer(async (req, res) => {
       for (const r of warmList) warmHot(r, '');
     }
     if (req.method === 'GET' || req.method === 'HEAD') {
-      const rawUrl = req.url || '/';
+      const rawUrl = relTarget(req.url || '/');
       let pathname: string | null = null;
       try {
         pathname = decodeURIComponent(new URL('http://localhost' + rawUrl).pathname);
@@ -481,7 +495,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
     }
-    const url = requestOrigin(req, port) + (req.url || '/');
+    const url = requestOrigin(req, port) + relTarget(req.url || '/');
     const init: RequestInit = { method: req.method, headers: req.headers as any };
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       (init as any).body = Readable.toWeb(req) as any;
@@ -522,11 +536,11 @@ const server = http.createServer(async (req, res) => {
         res.setHeader('Content-Encoding', enc);
         res.setHeader('Content-Length', String(body.length));
       }
-      if (req.method === 'GET') fillHot(req.url || '/', cookieHeader, response, memo, etag);
+      if (req.method === 'GET') fillHot(relTarget(req.url || '/'), cookieHeader, response, memo, etag);
       res.end(body);
       writeAccessLine(req, res, body.length);
     } else if (raw) {
-      if (req.method === 'GET') fillHot(req.url || '/', cookieHeader, response, { raw }, `W/"${raw.length}-${fnv(cookieHeader)}"`);
+      if (req.method === 'GET') fillHot(relTarget(req.url || '/'), cookieHeader, response, { raw }, `W/"${raw.length}-${fnv(cookieHeader)}"`);
       res.end(raw);
       writeAccessLine(req, res, raw.length);
     } else {
