@@ -74,6 +74,26 @@ assert(failed.err.includes('no .rose pages found'), 'the failure says what is wr
 assert(failed.err.includes(path.join(bare, 'src', 'pages')), 'the failure names the directory it looked in');
 assert(failed.err.includes('rosespan build <dir>'), 'the failure names the fix');
 
+// The bundle mode is an app-level switch: a leaf page exporting it used to
+// silently flip every document to the external-runtime mode.
+const bundleLeaf = path.join(tmp, 'bundle-leaf');
+fs.mkdirSync(path.join(bundleLeaf, 'src', 'pages'), { recursive: true });
+fs.writeFileSync(path.join(bundleLeaf, 'src', 'pages', 'index.rose'), '<h1>home</h1>\n');
+fs.writeFileSync(path.join(bundleLeaf, 'src', 'pages', 'leaf.rose'), "<script>\n  export const bundle = 'split';\n</script>\n<h1>leaf</h1>\n");
+const leafFailed = await run(['build', bundleLeaf], REPO);
+assert(leafFailed.code !== 0, 'a leaf page exporting bundle fails the build (the mode is per-app)');
+assert(leafFailed.err.includes('leaf.rose') && leafFailed.err.includes('_layout.rose'), 'the failure names the file and the right place for the export');
+
+const bundleRoot = path.join(tmp, 'bundle-root');
+fs.mkdirSync(path.join(bundleRoot, 'src', 'pages'), { recursive: true });
+fs.writeFileSync(path.join(bundleRoot, 'src', 'pages', 'index.rose'), "<script>\n  let n = $state(0);\n  function bump() { $setState('n', n() + 1); }\n</script>\n<h1>home</h1>\n<button on:click={bump}>bump</button>\n<p>{n}</p>\n");
+fs.writeFileSync(path.join(bundleRoot, 'src', 'pages', '_layout.rose'), "<script>\n  export const bundle = 'split';\n</script>\n<main>{children}</main>\n");
+const rootBuilt = await run(['build', bundleRoot], REPO);
+assert(rootBuilt.code === 0, `the root layout exporting bundle builds (stderr: ${rootBuilt.err.slice(0, 200)})`);
+const rootHome = path.join(REPO, 'dist', 'index.html');
+assert(/modulepreload[^>]+client\.js\?v=/.test(fs.readFileSync(rootHome, 'utf-8')), 'split mode from the root layout emits the external runtime reference');
+assert(fs.existsSync(path.join(REPO, 'dist', 'chunks')), 'split mode emits route chunks');
+
 const usage = await run([], REPO);
 assert(usage.out.includes('[dir]') && usage.out.includes('current directory'), 'the usage line documents the dir argument and its default');
 
