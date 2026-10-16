@@ -1,1 +1,1 @@
-chrome.devtools.panels.create('Rosefn', null, 'panel.html');
+chrome.devtools.panels.create('RoseSpan', null, 'panel.html');
