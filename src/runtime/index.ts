@@ -16,8 +16,9 @@ let signalMap: Map<string, SignalEntry> =
 
 // One get-or-create helper shared by state / setState / resumeState.
 function entry(key: string, initial: unknown): { value: unknown; subs: Set<Subscriber> } {
-  const e = signalMap.get(key) ?? { value: initial, subs: new Set<Subscriber>() };
-  signalMap.set(key, e);
+  const map = renderMaps().signals;
+  const e = map.get(key) ?? { value: initial, subs: new Set<Subscriber>() };
+  map.set(key, e);
   return e;
       // F43: $effect dep capture
 }
@@ -57,7 +58,7 @@ export function state<T>(key: string, initial: T): [() => T, (v: T) => void] {
 }
 
 export function hasState(key: string): boolean {
-  return signalMap.has(key);
+  return renderMaps().signals.has(key);
       /* a stale cleanup must not kill the route */
 }
 
@@ -65,12 +66,12 @@ export function hasState(key: string): boolean {
 let seededKeys = new Set<string>();
 
 export function isSeeded(key: string): boolean {
-  return seededKeys.has(key);
-      
+  return renderMaps().seeded.has(key);
+
 }
 
 export function markSeeded(key: string): void {
-  seededKeys.add(key);
+  renderMaps().seeded.add(key);
 }
 
 export function setState<T>(key: string, value: T): void {
@@ -160,7 +161,7 @@ export function resetContainerFx(container: object): void {
   }
   const keys = keysByOwner.get(container);
   if (keys) {
-    keys.forEach((k: string) => signalMap.delete(k));
+    keys.forEach((k: string) => renderMaps().signals.delete(k));
     keysByOwner.delete(container);
   }
   renderMaps().data.clear();
@@ -179,7 +180,7 @@ export function effect(fn: () => void): Cleanup {
   fn();
   currentEffect = prev;
   const cleanup: Cleanup = () => {
-    signalMap.forEach((e: { subs: Set<Subscriber> }) => e.subs.delete(wrapped));
+    renderMaps().signals.forEach((e: { subs: Set<Subscriber> }) => e.subs.delete(wrapped));
     fxSet().delete(cleanup);
   };
   fxSet().add(cleanup);
@@ -1375,10 +1376,10 @@ export async function aggregate<R extends Record<string, () => Promise<unknown>>
 }
 
 export function clearRequestState(): void {
-  signalMap.clear();
+  renderMaps().signals.clear();
   renderMaps().data.clear();
   pendingDeltas.clear();
-  seededKeys = new Set();
+  renderMaps().seeded.clear();
   bffCache.clear();
 }
 
@@ -1397,22 +1398,24 @@ export function clearRequestState(): void {
  * (reading 'bodyFix')", a 500 that hits a cold route and clears on refresh.
  *
  * Isolating here makes concurrent renders correct rather than merely unlikely.
- * Two different mechanisms, because they fail differently: signalMap is
- * swapped and restored (it is synchronous to read, and its entries are keyed
- * per state key), while dataCache rides the async chain instead - see
- * renderMaps() for why a swap there was not isolation at all.
+ * The signal map and the seeded-key set are swapped on the resolved render maps
+ * (renderMaps()), so under a context store each render chain gets its own pair;
+ * without a store the swap is the old process-wide one, correct for the
+ * single-render fallback. dataCache needs no swap at all under a store - it
+ * already rides the async chain; see renderMaps().
  */
 export async function isolateRender<T>(fn: () => Promise<T>): Promise<T> {
-  const savedSignals = signalMap;
-  const savedSeeded = seededKeys;
-  signalMap = new Map();
-  seededKeys = new Set();
-  renderMaps().data.clear();
+  const maps = renderMaps();
+  const savedSignals = maps.signals;
+  const savedSeeded = maps.seeded;
+  maps.signals = new Map();
+  maps.seeded = new Set();
+  maps.data.clear();
   try {
     return await fn();
   } finally {
-    signalMap = savedSignals;
-    seededKeys = savedSeeded;
+    maps.signals = savedSignals;
+    maps.seeded = savedSeeded;
   }
 }
 
@@ -1472,8 +1475,8 @@ let contextStore: ContextStore | null = null;
  * correct anyway.
  */
 const RENDER_MAPS = Symbol('renderMaps');
-type RenderMaps = { data: Map<string, Promise<unknown>>; signals: Map<string, unknown>; seeded: Set<string> };
-let fallbackRenderMaps: RenderMaps = { data: new Map(), signals: new Map(), seeded: new Set() };
+type RenderMaps = { data: Map<string, Promise<unknown>>; signals: Map<string, SignalEntry>; seeded: Set<string> };
+let fallbackRenderMaps: RenderMaps = { data: new Map(), signals: signalMap, seeded: seededKeys };
 
 function renderMaps(): RenderMaps {
   const scoped = contextStore?.getStore();
@@ -1552,24 +1555,28 @@ export function runWithContext<T>(fn: () => T): T {
 export async function isolateStateAsync<T>(
   fn: () => Promise<T>
 ): Promise<{ result: T; state: Map<string, SignalEntry>; mounts: Array<() => void>; cleanups: Set<Cleanup> }> {
-  const savedSignals = signalMap;
+  const maps = renderMaps();
+  const savedSignals = maps.signals;
+  const savedSeeded = maps.seeded;
   const savedDeltas = new Map(pendingDeltas);
   pendingDeltas.clear();
   const savedMounts = mountQueue.splice(0, mountQueue.length);
   const savedCleanups = new Set(cleanups);
   cleanups.clear();
-  signalMap = new Map();
-  renderMaps().data.clear();
+  maps.signals = new Map();
+  maps.seeded = new Set();
+  maps.data.clear();
   try {
     const result = await fn();
     return {
       result,
-      state: signalMap,
+      state: maps.signals,
       mounts: mountQueue.splice(0, mountQueue.length),
       cleanups: new Set(cleanups),
     };
   } finally {
-    signalMap = savedSignals;
+    maps.signals = savedSignals;
+    maps.seeded = savedSeeded;
     pendingDeltas.clear();
     savedDeltas.forEach((d, k) => pendingDeltas.set(k, d));
     mountQueue.splice(0, 0, ...savedMounts);
@@ -1580,13 +1587,14 @@ export async function isolateStateAsync<T>(
 
 /** Adopt a prefetched route's signal entries (objects keep their subs). */
 export function restoreState(entries: Map<string, SignalEntry>): void {
-  signalMap.clear();
-  entries.forEach((e: SignalEntry, k: string) => signalMap.set(k, e));
+  const map = renderMaps().signals;
+  map.clear();
+  entries.forEach((e: SignalEntry, k: string) => map.set(k, e));
 }
 
 export function serializeState(): string {
   const obj: Record<string, unknown> = {};
-  signalMap.forEach((v: { value: unknown }, k: string) => {
+  renderMaps().signals.forEach((v: { value: unknown }, k: string) => {
     obj[k] = v.value;
   });
   return JSON.stringify(obj);
@@ -1599,12 +1607,12 @@ export function resumeState(json: string): void {
       const [keys, values] = parsed as [string[], unknown[]];
       for (let i = 0; i < keys.length; i++) {
         entry(keys[i], values[i]).value = values[i];
-        seededKeys.add(keys[i]);
+        renderMaps().seeded.add(keys[i]);
       }
     } else if (parsed && typeof parsed === 'object') {
       Object.entries(parsed as Record<string, unknown>).forEach(([k, v]) => {
         entry(k, v).value = v;
-        seededKeys.add(k);
+        renderMaps().seeded.add(k);
       });
     }
   } catch {
@@ -1922,12 +1930,12 @@ export type ActionErrorInfo = { action: string; message: string; code: number; f
  * or let a {#boundary} contain it ($actionErrorOrThrow below).
  */
 export function $actionPending(): boolean {
-  const entry = signalMap.get('actionPending');
+  const entry = renderMaps().signals.get('actionPending');
   return entry ? entry.value === true : false;
 }
 
 export function $actionError(): ActionErrorInfo | null {
-  const e = signalMap.get('actionError');
+  const e = renderMaps().signals.get('actionError');
   if (!e) return null;
   if (currentEffect) {
     e.subs.add(currentEffect);
@@ -1983,7 +1991,7 @@ export function applyStateDeltas(): void {
 
 /** Apply one delta to the live state. */
 export function applyStateDelta(key: string, delta: StateDelta): void {
-  const cur = signalMap.get(key)?.value;
+  const cur = renderMaps().signals.get(key)?.value;
   if (delta.op === 'm') {
     setState(key, { ...(cur as Record<string, unknown> | undefined), ...(delta.value as Record<string, unknown>) });
     return;
