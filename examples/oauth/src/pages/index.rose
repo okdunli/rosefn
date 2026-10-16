@@ -5,16 +5,22 @@
   let user = $data(async () => getContext().user ?? null);
 </script>
 
-<h1>🌹 OAuth, the rosefn shape</h1>
-<p>
-  This app signs people in with any OAuth 2.0 provider - GitHub, Google, an
+<h1>🌹 OAuth, the rosespan shape</h1>
+<p class="lede">
+  This app signs people in with any OAuth 2.0 provider — GitHub, Google, an
   OIDC server, or the fake one the test suite runs locally. One link, two
   redirects, one cookie.
 </p>
 
 {#if user()}
-  <p>Signed in as <strong>{user()!.name}</strong>. <a href="/dashboard">Go to the dashboard</a>.</p>
+  <div class="card">
+    <p>Signed in as <strong>{user()!.name}</strong>.</p>
+    <p><a class="btn" href="/dashboard">Go to the dashboard</a></p>
+  </div>
 {/if}
 {#if !user()}
-  <p><a href="/api/auth/login">Sign in</a> — or look at the <a href="/dashboard">dashboard</a> to see the wall.</p>
+  <div class="card">
+    <p><a class="btn" href="/api/auth/login">Sign in</a></p>
+    <p class="meta">Or open the <a href="/dashboard">dashboard</a> to see the wall.</p>
+  </div>
 {/if}

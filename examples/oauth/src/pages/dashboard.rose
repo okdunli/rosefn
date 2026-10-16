@@ -8,10 +8,14 @@
 <h1>Dashboard</h1>
 
 {#if user()}
-  <p>Welcome back, <strong>{user()!.name}</strong>. This page only exists in the response for a signed-in visitor.</p>
-  <p><a href="/api/auth/logout">Sign out</a></p>
+  <div class="card">
+    <p>Welcome back, <strong>{user()!.name}</strong>. This page only exists in the response for a signed-in visitor.</p>
+    <p><a class="btn btn-ghost" href="/api/auth/logout">Sign out</a></p>
+  </div>
 {/if}
 
 {#if !user()}
-  <p>This is the gated half of the app. <a href="/api/auth/login">Sign in</a> to see it.</p>
+  <div class="card">
+    <p>This is the gated half of the app. <a class="btn" href="/api/auth/login">Sign in</a> to see it.</p>
+  </div>
 {/if}
