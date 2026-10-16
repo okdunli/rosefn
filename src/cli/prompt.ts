@@ -193,10 +193,14 @@ $t('key', { name }) translates reactively; unknown locales answer 404.
 
 Every compiler failure is structured: { code, file, line, message, hint }.
 Run \`rosefn build --json\` to read it as JSON, fix the named file at the named
-line, and build again. Codes: E-IMPORT (unresolvable .rose import), E-PLUGIN
-(transform threw), E-NODE-ONLY (server-only import in a page/component),
-E-EXPORT (invalid export const value), E-TEMPLATE (unclosed tag / slot
-placement), E-ROUTE (no pages found), E-INTERNAL (installation problem).
+line, and build again. The plain (non-JSON) output prints the same message,
+the hint, a numbered excerpt of the offending source line, and the file:line
+locator. Codes: E-IMPORT (unresolvable .rose import), E-PLUGIN (transform
+threw), E-NODE-ONLY (server-only import in a page/component), E-EXPORT
+(invalid export const value), E-TEMPLATE (unclosed tag / slot placement),
+E-ROUTE (no pages found), E-INTERNAL (installation problem). A failure that
+did not come from the compiler reports E-UNKNOWN - re-run without --json for
+its stack.
 
 ## The one invariant worth protecting
 

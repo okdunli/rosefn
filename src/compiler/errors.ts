@@ -1,19 +1,4 @@
-/**
- * A compiler error shaped for its reader - who is as often an AI agent as a
- * human. Every failure the compiler throws on purpose carries:
- *
- *   code    a stable identifier (E-EXPORT, E-TEMPLATE, ...) an agent can
- *           branch on and a human can grep across a build log
- *   file    the .rose file (or directory) at fault
- *   line    the line inside it, when the compiler knows the position
- *   hint    the fix, in one sentence
- *
- * `rosefn build --json` prints these as a JSON envelope on stdout, so an
- * agent can parse the failure and patch the file without scraping prose.
- * The human output prints the message and the hint. Errors that are NOT
- * RoseErrors (a crash inside a plugin's own code, a framework bug) keep
- * their stack: those are not the developer's to fix from a code alone.
- */
+// A compiler error shaped for its reader - who is as often an AI agent as a human.
 
 export interface RoseErrorInfo {
   code: string;
@@ -60,9 +45,7 @@ export function lineOf(src: string, index: number): number {
   return line;
 }
 
-/** The line of a regex match inside `src` - undefined when there is no match
- *  (the position is optional on a match array, and the call sites that have
- *  one always matched). */
+// The line of a regex match inside `src` - undefined when there is no match (the position is optional on a match array).
 export function lineAt(src: string, match?: RegExpMatchArray | null): number | undefined {
   return match && match.index !== undefined ? lineOf(src, match.index) : undefined;
 }
@@ -71,4 +54,22 @@ export function lineAt(src: string, match?: RegExpMatchArray | null): number | u
 export function errorInfo(err: unknown): RoseErrorInfo {
   if (err instanceof RoseError) return err.info();
   return { code: 'E-UNKNOWN', message: err instanceof Error ? err.message : String(err) };
+}
+
+/** Numbered excerpt of `src` around 1-based `line`, caret at 1-based `column` when given. */
+export function codeFrame(src: string, line: number, opts: { column?: number; radius?: number } = {}): string {
+  const radius = Math.max(0, opts.radius ?? 1);
+  const lines = src.split('\n');
+  const from = Math.max(1, line - radius);
+  const to = Math.min(lines.length, line + radius);
+  const gutter = String(to).length;
+  const out: string[] = [];
+  for (let n = from; n <= to; n++) {
+    const text = lines[n - 1] ?? '';
+    out.push(`  ${String(n).padStart(gutter)} | ${text}`);
+    if (n === line && opts.column !== undefined) {
+      out.push(`  ${' '.repeat(gutter)} | ${' '.repeat(Math.max(0, opts.column - 1))}^`);
+    }
+  }
+  return out.join('\n');
 }
