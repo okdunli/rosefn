@@ -1,14 +1,14 @@
 {
-  "name": "rosefn-jwt",
+  "name": "rosespan-jwt",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "rosefn dev",
-    "build": "rosefn build",
-    "preview": "rosefn preview",
-    "serve": "rosefn serve"
+    "dev": "rosespan dev",
+    "build": "rosespan build",
+    "preview": "rosespan preview",
+    "serve": "rosespan serve"
   },
   "dependencies": {
-    "rosefn": "latest"
+    "rosespan": "latest"
   }
 }
