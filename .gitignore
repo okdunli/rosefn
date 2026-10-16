@@ -1,21 +1,33 @@
+# build output
 dist/
+
+# the published package's bundles (npm run pack; the tarball ships them)
 dist-cli/
+
+# npm pack output
 *.tgz
-rosefn-server
-rosefn-server-go
-rosefn-server-go.exe
+
+# go single-binary server artifacts
+rosespan-server
+rosespan-server-go
+rosespan-server-go.exe
+
+# deps
 node_modules/
+
+# the demo api's SQLite database (created next to the command you ran)
 blog.db
+
+# local env files (may contain secrets) - never commit
 .env
 .env.*
 !.env.example
+
+# local dev database (created by running the app)
 .data/
+# local scratch: dev-server logs, one-off probe scripts
 *.log
 tmp/
 .vfy/
-nul
-_nul
+# captured sessions / local credentials
 cookies.txt
-*.tar.gz
-*.psd
-*.exe
