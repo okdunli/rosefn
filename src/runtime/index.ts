@@ -2008,7 +2008,12 @@ function __netBind(spec: { kind: string; port: number; host?: string; opts: NetO
       opts: o,
       clients: () => Array.from(clients),
       broadcast: (data: unknown) => { for (const c of clients) c.send(data); },
-      close: () => { for (const c of Array.from(clients)) c.close(); try { srv.close(); } catch { /* already gone */ } },
+      close: () => {
+        for (const c of Array.from(clients)) c.close();
+        if (handle.__pingTimer) { clearInterval(handle.__pingTimer); handle.__pingTimer = null; }
+        try { srv.close(); } catch { /* already gone */ }
+      },
+      __pingTimer: null as ReturnType<typeof setInterval> | null,
     };
     const srv = http.createServer((_req: unknown, res: any) => { res.writeHead(426, { 'content-type': 'text/plain' }); res.end('Upgrade Required'); });
     srv.on('upgrade', (req: any, socket: any) => {
@@ -2028,6 +2033,22 @@ function __netBind(spec: { kind: string; port: number; host?: string; opts: NetO
     });
     srv.on('error', (err: Error) => { if (handle.opts.onError) (handle.opts.onError as (e: Error) => void)(err); else console.error('[rosespan] WebSocket server error:', err); });
     srv.listen(spec.port, spec.host || '0.0.0.0');
+    // Keepalive: a half-open peer (network partition, crashed device) never
+    // sends FIN, so its socket would sit in `clients` forever and every
+    // broadcast would write into the void. Each tick pings the live-looking
+    // clients and destroys the ones that failed to answer the previous ping.
+    const pingInterval = ((o.pingInterval as number) ?? 30);
+    if (pingInterval > 0) {
+      handle.__pingTimer = setInterval(() => {
+        for (const c of Array.from(clients)) {
+          const sock = c.__sock;
+          if (!sock || sock.destroyed) { clients.delete(c); continue; }
+          if (c.__alive === false) { try { sock.destroy(); } catch { /* already gone */ } clients.delete(c); continue; }
+          c.__alive = false;
+          try { sock.write(__wsEncodeFrame(9, Buffer.alloc(0))); } catch { /* already gone */ }
+        }
+      }, Math.max(1000, pingInterval * 1000));
+    }
     __netHandles.push(handle);
     __netBound.set(key, handle);
   } else if (spec.kind === 'mqtt') {
@@ -2142,6 +2163,8 @@ function __wsWrap(socket: any, clients: Set<any>, handle: { opts: NetOpts }): an
   let msgOpcode = 0;
   let parts: Buffer[] = [];
   const wrapped = {
+    __sock: socket,
+    __alive: true, // flipped false by each keepalive ping; any inbound frame (pong or data) proves the peer is there
     remoteAddress: socket.remoteAddress,
     send: (data: unknown) => {
       if (socket.destroyed) return;
@@ -2169,10 +2192,12 @@ function __wsWrap(socket: any, clients: Set<any>, handle: { opts: NetOpts }): an
       if (f.opcode === 8) {
         wrapped.close();
       } else if (f.opcode === 9) {
+        wrapped.__alive = true;
         try { socket.write(__wsEncodeFrame(10, f.payload)); } catch { /* already gone */ }
       } else if (f.opcode === 10) {
-        // pong: nothing to do
+        wrapped.__alive = true; // pong: the peer answered the keepalive ping
       } else if (f.opcode === 1 || f.opcode === 2) {
+        wrapped.__alive = true; // inbound traffic is proof of life too
         if (msgOpcode !== 0) { socket.destroy(); return; } // protocol error: new data frame mid-message
         msgOpcode = f.opcode;
         parts = [f.payload];
