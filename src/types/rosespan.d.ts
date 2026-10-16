@@ -210,6 +210,7 @@ declare function $websocket(
   opts?: {
     host?: string;
     path?: string;
+    pingInterval?: number;
     onConnection?: (ws: WebSocket) => void;
     onMessage?: (ws: WebSocket, data: string | Buffer) => void;
     onClose?: (ws: WebSocket) => void;
