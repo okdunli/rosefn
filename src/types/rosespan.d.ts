@@ -160,8 +160,10 @@ declare function $tcp(
   opts?: {
     port?: number;
     host?: string;
+    idleTimeout?: number;
     onConnection?: (socket: TCPsocket) => void;
     onData?: (socket: TCPsocket, data: Buffer) => void;
+    onIdle?: (socket: TCPsocket) => void;
     onConnect?: () => void;
     onClose?: () => void;
     onError?: (err: Error) => void;
