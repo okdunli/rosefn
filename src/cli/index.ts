@@ -244,7 +244,7 @@ async function loadServer(): Promise<any> {
 }
 
 async function build(): Promise<void> {
-  const { routes, bundle } = await buildProject(SRC_DIR, OUT_DIR);
+  const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR);
   await clearPrerendered(OUT_DIR);
   setBundleMode(bundle);
   const skipped = await prerender(routes);
@@ -257,11 +257,10 @@ async function build(): Promise<void> {
   await writeBrotli(OUT_DIR);
   await analyze(OUT_DIR, (ssrModule.dynamicRoutes as string[] | undefined) ?? []);
 
-  const cfg = await loadConfig(SRC_DIR);
-  if (cfg.pwa) {
+  if (config.pwa) {
     try {
-      await generatePWA(OUT_DIR, cfg.pwa);
-      await injectPwaIntoHtml(OUT_DIR, cfg.pwa);
+      await generatePWA(OUT_DIR, config.pwa);
+      await injectPwaIntoHtml(OUT_DIR, config.pwa);
       await writeBrotli(OUT_DIR);
     } catch (e) {
       console.error('Rosefn: PWA generation failed:', e instanceof Error ? e.message : String(e));
