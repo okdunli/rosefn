@@ -1,15 +1,15 @@
 {
-  "name": "rosefn-blog-pg",
+  "name": "rosespan-blog-pg",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "rosefn dev",
-    "build": "rosefn build",
-    "preview": "rosefn preview",
-    "serve": "rosefn serve"
+    "dev": "rosespan dev",
+    "build": "rosespan build",
+    "preview": "rosespan preview",
+    "serve": "rosespan serve"
   },
   "dependencies": {
     "pg": "^8.13.0",
-    "rosefn": "file:../.."
+    "rosespan": "latest"
   }
 }
