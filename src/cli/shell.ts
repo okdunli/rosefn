@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as esbuild from 'esbuild';
 import { createHash } from 'crypto';
+import { fnv1a32 } from '../hash.js';
 
 const OUT_DIR = path.join(process.cwd(), 'dist');
 
@@ -29,6 +30,30 @@ export function getClientSource(): string | null {
   } catch {
     return null;
   }
+}
+
+// Content hash of dist/client.js for cache-busting the split-mode script URL.
+// The hash, not the mtime: deployment platforms normalize file mtimes, so an
+// mtime key would be identical across deploys and returning visitors would
+// keep executing the previous build's runtime.
+let clientVersionCache: { mtimeMs: number; v: string } | null = null;
+export function getClientVersion(): string {
+  try {
+    const file = path.join(OUT_DIR, 'client.js');
+    const st = fs.statSync(file);
+    if (!clientVersionCache || clientVersionCache.mtimeMs !== st.mtimeMs) {
+      clientVersionCache = { mtimeMs: st.mtimeMs, v: fnv1a32(fs.readFileSync(file)) };
+    }
+    return clientVersionCache.v;
+  } catch {
+    return '';
+  }
+}
+
+// The URL the document loads the split-mode runtime from: versioned when the bundle exists so a deploy is a new URL (fresh fetch, stale cache impossible), unversioned as the fallback.
+function clientSrcUrl(): string {
+  const v = getClientVersion();
+  return v ? `/client.js?v=${v}` : '/client.js';
 }
 
 let styleCache: { mtimeMs: number; source: string } | null = null;
@@ -188,7 +213,15 @@ if (__state.__notFound) {
 } else if (__resumed) {
   start(__app, window.location.pathname);
 } else if (__state.__route === window.location.pathname) {
-  start(__app, window.location.pathname, true);
+  // Lazy hydration (opt-in via export const lazyHydration = true in the root
+  // layout): defer the initial wire() until the browser is idle so the SSR
+  // paint is interactive-to-paint without blocking on the event wiring. Falls
+  // back to eager wiring where requestIdleCallback is unavailable.
+  if (window.__rosefnLazy && typeof requestIdleCallback === 'function') {
+    requestIdleCallback(() => start(__app, window.location.pathname, true));
+  } else {
+    start(__app, window.location.pathname, true);
+  }
 } else {
   start(__app, window.location.pathname);
 }
@@ -222,12 +255,15 @@ const BASELINE_SECURITY_HEADERS: Record<string, string> = {
   'permissions-policy': 'accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=()',
 };
 
-let cspCache: { for: string | null; value: string } | null = null;
+let cspCache: { for: string | null; v: string; value: string } | null = null;
 // The exact bytes between the external bootstrap's script tags - the single source of truth shared by the tag and the CSP hash.
-let EXTERNAL_BOOTSTRAP_CACHE: string | null = null;
+let EXTERNAL_BOOTSTRAP_CACHE: { v: string; s: string } | null = null;
 function externalBootstrap(): string {
-  if (EXTERNAL_BOOTSTRAP_CACHE === null) EXTERNAL_BOOTSTRAP_CACHE = `\nimport { start, startNotFound, prefetch, postForm, prefetchStats, serializeState } from '/client.js';\n${bootstrap()}`;
-  return EXTERNAL_BOOTSTRAP_CACHE;
+  const v = getClientVersion();
+  if (EXTERNAL_BOOTSTRAP_CACHE === null || EXTERNAL_BOOTSTRAP_CACHE.v !== v) {
+    EXTERNAL_BOOTSTRAP_CACHE = { v, s: `\nimport { start, startNotFound, prefetch, postForm, prefetchStats, serializeState } from '${clientSrcUrl()}';\n${bootstrap()}` };
+  }
+  return EXTERNAL_BOOTSTRAP_CACHE.s;
 }
 function inlineScript(client: string): string {
   const m = /\bexport\s*\{([^}]*)\}\s*;?\s*$/.exec(client);
@@ -284,12 +320,13 @@ export function securityHeaders(client: string | null, nonce = ''): Record<strin
     headers['Content-Security-Policy'] = `script-src 'nonce-${nonce}' 'strict-dynamic'; ${CSP_TAIL}`;
     return headers;
   }
-  if (!cspCache || cspCache.for !== client) {
+  if (!cspCache || cspCache.for !== client || cspCache.v !== (client ? '' : getClientVersion())) {
     const scriptSrc = client
       ? `'sha256-${createHash('sha256').update(inlineScript(client), 'utf-8').digest('base64')}'`
       : `'self' 'sha256-${createHash('sha256').update(externalBootstrap(), 'utf-8').digest('base64')}'`;
     cspCache = {
       for: client,
+      v: client ? '' : getClientVersion(),
       value: `script-src ${scriptSrc}; ${CSP_TAIL}`,
     };
   }
@@ -377,9 +414,19 @@ function mergeHeadBlocks(blocks: string[]): string {
  */
 export function clientScriptTag(client: string | null, nonce = ''): string {
   const n = nonce ? ` nonce="${nonce}"` : '';
-  return client
-    ? `<script type="module"${n}>${inlineScript(client)}</script>`
-    : `<script type="module"${n} src="/client.js"></script>\n<script type="module"${n}>${externalBootstrap()}</script>`;
+  if (client) {
+    return `<script type="module"${n}>${inlineScript(client)}</script>`;
+  }
+  // Split / external path: the framework runtime is a separate module fetch.
+  // modulepreload (+ crossorigin, matching the module's CORS mode) starts it
+  // early, and fetchpriority=high lets it jump the image/style queue so the
+  // interactive layer lands before the browser would otherwise schedule it.
+  // The URL carries the bundle's content hash: a deploy changes the hash, the
+  // browser sees a new URL, and yesterday's cached runtime can never execute
+  // against today's documents.
+  const src = clientSrcUrl();
+  const preload = `<link rel="modulepreload" href="${src}" crossorigin>`;
+  return `${preload}\n<script type="module"${n} src="${src}" fetchpriority="high"></script>\n<script type="module"${n}>${externalBootstrap()}</script>`;
 }
 
 /**
