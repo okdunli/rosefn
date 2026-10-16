@@ -1,4 +1,4 @@
-# The hybrid deploy on Kubernetes (consultant P0 §3 方案B) - the same split
+# The hybrid deploy on Kubernetes - the same split
 # `docker-compose.yml` runs, as manifests:
 #
 #   static  -> the immutable half: the Go single binary serves prerendered
@@ -14,25 +14,25 @@
 # UPSTREAM env and the static Deployment becomes the pure-static deploy:
 # POSTs answer 405, unbaked APIs answer the JSON 404.
 #
-#   kubectl apply -f deploy/k8s/rosefn.yaml
+#   kubectl apply -f deploy/k8s/rosespan.yaml
 #
 # Build the two images first (from the repo root):
-#   docker build -f deploy/Dockerfile.static -t rosefn-static .
-#   docker build -f deploy/Dockerfile.node    -t rosefn .
+#   docker build -f deploy/Dockerfile.static -t rosespan-static .
+#   docker build -f deploy/Dockerfile.node    -t rosespan .
 # ...then push them to your registry and replace the image names below.
 # The Ingress is optional: delete it and port-forward the static Service.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: rosefn-static
-  labels: { app: rosefn, tier: static }
+  name: rosespan-static
+  labels: { app: rosespan, tier: static }
 spec:
   replicas: 2
   selector:
-    matchLabels: { app: rosefn, tier: static }
+    matchLabels: { app: rosespan, tier: static }
   template:
     metadata:
-      labels: { app: rosefn, tier: static }
+      labels: { app: rosespan, tier: static }
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/path: /metrics
@@ -40,12 +40,12 @@ spec:
     spec:
       containers:
         - name: static
-          image: rosefn-static:latest
+          image: rosespan-static:latest
           env:
             - name: PORT
               value: "8080"
             - name: UPSTREAM
-              value: http://rosefn-dynamic:3000
+              value: http://rosespan-dynamic:3000
           ports:
             - name: http
               containerPort: 8080
@@ -58,9 +58,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: rosefn-static
+  name: rosespan-static
 spec:
-  selector: { app: rosefn, tier: static }
+  selector: { app: rosespan, tier: static }
   ports:
     - name: http
       port: 80
@@ -69,22 +69,22 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: rosefn-dynamic
-  labels: { app: rosefn, tier: dynamic }
+  name: rosespan-dynamic
+  labels: { app: rosespan, tier: dynamic }
 spec:
   replicas: 2
   selector:
-    matchLabels: { app: rosefn, tier: dynamic }
+    matchLabels: { app: rosespan, tier: dynamic }
   template:
     metadata:
-      labels: { app: rosefn, tier: dynamic }
+      labels: { app: rosespan, tier: dynamic }
     spec:
       containers:
         - name: dynamic
-          image: rosefn:latest
-          # `rosefn serve` is the production runner: the stdlib cluster (one
+          image: rosespan:latest
+          # `rosespan serve` is the production runner: the stdlib cluster (one
           # worker per core), bounded bodies, timeouts, graceful drain.
-          command: ["rosefn", "serve"]
+          command: ["rosespan", "serve"]
           env:
             - name: PORT
               value: "3000"
@@ -100,12 +100,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: rosefn-dynamic
+  name: rosespan-dynamic
 spec:
   # ClusterIP on purpose: the dynamic half is reached through the static
   # half's UPSTREAM proxy, never directly.
   type: ClusterIP
-  selector: { app: rosefn, tier: dynamic }
+  selector: { app: rosespan, tier: dynamic }
   ports:
     - name: http
       port: 3000
@@ -114,7 +114,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: rosefn
+  name: rosespan
 spec:
   rules:
     - http:
@@ -123,6 +123,6 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: rosefn-static
+                name: rosespan-static
                 port:
                   number: 80

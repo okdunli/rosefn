@@ -1,4 +1,4 @@
-# The hybrid deploy (innovation #34, consultant P0 §3 方案B):
+# The hybrid deploy:
 # one command - `docker compose -f deploy/docker-compose.yml up --build`.
 #
 #   static  -> the immutable half: the Go single binary serves prerendered

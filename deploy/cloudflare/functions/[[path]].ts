@@ -1,5 +1,5 @@
 /**
- * The rosefn Cloudflare Pages function - the dynamic half of a Pages
+ * The rosespan Cloudflare Pages function - the dynamic half of a Pages
  * deploy.
  *
  * Pages answers static assets (everything in dist/: prerendered
@@ -33,14 +33,11 @@
  * `npx wrangler pages deploy` (or push, with the Pages git integration).
  * In a project that depends on the published package the import below
  * becomes:
- *   import { createEdgeHandler } from 'rosefn/edge';
+ *   import { createEdgeHandler } from 'rosespan/edge';
  */
 import { createEdgeHandler } from '../src/cli/edge.ts';
 import * as server from '../dist/server.js';
 
-// Built on the first request this isolate serves, then cached: one cold
-// start, three internal asset fetches, and every later request is the
-// same single-request page.
 let handle: ((request: Request) => Promise<Response>) | null = null;
 
 export const onRequest = async (context: { request: Request }): Promise<Response> => {
