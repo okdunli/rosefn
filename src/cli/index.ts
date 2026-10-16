@@ -1772,7 +1772,12 @@ async function check(): Promise<void> {
     const wired = runtimeSource
       ? script.replace(/['"]\.\/runtime\.js['"]/g, JSON.stringify(runtimeSource.replace(/\\/g, '/')))
       : script;
-    virtual.set(norm(file), '\n'.repeat(tagLine - 1) + wired);
+    // Every .rose compiles to its own module, so a script with no import or
+    // export must still check as one: without the marker it lands in the
+    // program's shared global scope and its top-level `let`s collide with
+    // every other import-free script (TS2451 on names nothing redeclares).
+    // The marker goes last so the line-offset prefix above stays exact.
+    virtual.set(norm(file), '\n'.repeat(tagLine - 1) + wired + '\nexport {};');
     checked++;
   }
   if (checked === 0) {
