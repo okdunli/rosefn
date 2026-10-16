@@ -4,9 +4,9 @@
   const prefetchEl = document.getElementById('prefetch');
 
   const READ = `(function () {
-    var r = window.__rosefn;
-    if (!r || typeof r.state !== 'function') return JSON.stringify({ rosefn: false });
-    var out = { rosefn: true, url: location.pathname };
+    var r = window.__rosespan;
+    if (!r || typeof r.state !== 'function') return JSON.stringify({ rosespan: false });
+    var out = { rosespan: true, url: location.pathname };
     try { out.state = JSON.parse(r.state()); } catch (e) { out.state = '(unreadable: ' + e + ')'; }
     try { out.prefetch = typeof r.prefetch === 'function' ? r.prefetch() : null; }
     catch (e) { out.prefetch = '(unreadable: ' + e + ')'; }
@@ -33,9 +33,9 @@
       let data;
       try { data = JSON.parse(result); } catch { return; }
       url.classList.remove('dim');
-      if (!data.rosefn) {
+      if (!data.rosespan) {
         url.textContent = data.url || '(unknown)';
-        stateEl.textContent = 'no rosefn runtime in this document - a zero-JS route (the compiler ships no bundle) or a page this framework did not render';
+        stateEl.textContent = 'no rosespan runtime in this document - a zero-JS route (the compiler ships no bundle) or a page this framework did not render';
         stateEl.classList.add('dim');
         prefetchEl.textContent = '-';
         prefetchEl.classList.add('dim');
