@@ -12,6 +12,7 @@ const shutdownHooks: ShutdownHook[] = [];
 
 let draining: Promise<HookResult[]> | null = null;
 
+// Exposed on globalThis because esbuild bundles app code with no external allowlist: a static import from the app would be inlined as a SECOND copy.
 (globalThis as unknown as { __rosefnOnShutdown?: typeof onShutdown }).__rosefnOnShutdown =
   onShutdown;
 (globalThis as unknown as { __rosefnRunShutdownHooks?: typeof runShutdownHooks }).__rosefnRunShutdownHooks =
@@ -32,6 +33,7 @@ export function runShutdownHooks(reason: string): Promise<HookResult[]> {
   if (draining) return draining;
   draining = (async () => {
     const results: HookResult[] = [];
+    
     for (const hook of shutdownHooks.slice()) {
       try {
         await hook.fn();

@@ -25,6 +25,7 @@ export interface TestResult {
   /** the route exported `shell = false`: the document keeps the bundle but drops the #app wrapper + STYLES_MIN */
   shell?: boolean;
   lang: string;
+  /** the built project's dir (dist is inside it) */
   dir: string;
   /** the complete document, byte-identical to what the servers send */
   document: string;
@@ -75,7 +76,6 @@ export interface TestOptions {
 export interface TestApp {
   /** the route under test (the synthesized page's URL, or the page's own) */
   route: string;
-  /** the built project's dir (dist is inside it) */
   dir: string;
   /** render a route of the built app (GET) */
   get(pathname?: string, req?: TestRequest): Promise<TestResult>;
@@ -87,6 +87,7 @@ export interface TestApp {
   mount(req?: TestRequest): Promise<TestHandle>;
 }
 
+// The globals a browser has and a Node test process does not.
 const GRAFTED = ['document', 'Node', 'NodeFilter', 'FormData', 'DOMParser', 'location', 'fetch', 'Event', 'CustomEvent', 'MutationObserver', 'requestAnimationFrame'] as const;
 
 /** Absolute path of the project root that owns `file` (the dir holding src/pages). */
@@ -136,7 +137,8 @@ let tmpCount = 0;
 /**
  * Compile `file` into a throwaway project and return a driver over the
  * bundles that build produced. `file` is a `.rose` component
- * (`src/components/**`) or page (`src/pages/**`).
+ * (`src/components
+ /**`) or page (`src/pages/**`).
  */
 export async function test(file: string, opts: TestOptions = {}): Promise<TestApp> {
   const target = path.resolve(file);
@@ -206,10 +208,12 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
     const headers = new Headers(req.headers ?? {});
     for (const [k, v] of Object.entries(req.cookies ?? {})) headers.append('cookie', `${k}=${v}`);
     return new Request(`http://localhost${pathname}`, { method: req.method ?? 'GET', headers, body: body ?? undefined });
+    
   };
 
   // One request through the real server pipeline: middleware first (it can short-circuit - a redirect, an auth wall), then the render.
   const request = async (pathname: string, req: TestRequest, body?: FormData): Promise<TestResult> => {
+      // the middleware runs first here too - the servers do, and an api
     if (mod.middleware) {
       const mw = await mod.runMiddleware(toRequest(pathname, req, body), body);
       if (mw) return { status: mw.status, html: await mw.text(), state: {}, head: [], lang: 'en', dir: '', document: await mw.text(), redirect: mw.headers.get('location') ?? undefined };
@@ -218,10 +222,12 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
     return result(page);
   };
 
+  
   let requests = 0;
   let currentRoute = route;
 
   const mount = async (req: TestRequest = {}): Promise<TestHandle> => {
+    
     const win = ((opts.dom as any)?.window ?? opts.dom ?? globalThis) as any;
     if (!win?.document || !win?.DOMParser) {
       throw new Error('rosefn/test: mount() needs a DOM. Pass one - test("src/components/Counter.rose", { dom: new JSDOM() }) - or run under a jsdom environment.');
@@ -230,6 +236,7 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
 
     const doc = win.document;
     const app = doc.getElementById('app') ?? doc.body;
+    // Reuse the state element across mounts of the same document: a second one would lose getElementById's first-match race and the client would //.
     let stateEl = doc.getElementById('__rosefn_state');
     if (!stateEl) {
       stateEl = doc.createElement('script');
@@ -295,6 +302,7 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
       navigate: async (pathname: string) => {
         currentRoute = pathname;
         (globalThis as any).location = { pathname, href: `http://localhost${pathname}` };
+        
         await client.start(app, pathname, false);
       },
       state: () => {
@@ -303,6 +311,7 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
       },
       requestCount: () => requests,
     };
+    
     (handle as any).restore = () => { for (const [k, v] of saved) (globalThis as any)[k] = v; };
     return handle;
   };
@@ -318,6 +327,7 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
       return request(pathname, req, body);
     },
     api: async (method: string, pathname: string, req: TestRequest = {}) => {
+      
       if (mod.middleware) {
         const mw = await mod.runMiddleware(toRequest(pathname, req));
         if (mw) return { status: mw.status, body: await mw.text(), headers: { location: mw.headers.get('location') ?? '' } };
@@ -328,6 +338,7 @@ export async function test(file: string, opts: TestOptions = {}): Promise<TestAp
       try {
         body = JSON.parse(text);
       } catch {  }
+      
       const headers: Record<string, string> = {};
       res.headers.forEach((v: string, k: string) => { headers[k] = v; });
       return { status: res.status, body, headers };

@@ -1,3 +1,4 @@
+
 import fs from "node:fs";
 import path from "node:path";
 
@@ -49,6 +50,7 @@ function interpolate(md: string, vars: Record<string, unknown>): string {
 export function renderMarkdown(md: string, vars?: Record<string, unknown>): string {
   if (vars) md = interpolate(md, vars);
   const blocks: string[] = [];
+  // fenced code blocks first: stash them, placeholder back in later
   let src = md.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, lang, code) => {
     blocks.push(
       `<pre data-lang="${lang}"><code>${code
