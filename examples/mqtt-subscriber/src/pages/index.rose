@@ -1,0 +1,70 @@
+<script>
+  // An MQTT subscriber: a zero-dependency MQTT 3.1.1 client dials the broker,
+  // subscribes with wildcards, and appends every message to a shared store.
+  // $store is reactive on the client and the server pushes each write over
+  // /__rosespan_store, so the table below updates live - no polling.
+  //
+  // $mqtt only REGISTERS the spec at boot; the framework dials the broker when
+  // the serve worker starts, so a `rosespan build` / prerender never opens a
+  // connection. On the client the same $mqtt is an inert no-op.
+  const messages = $store('mqttMessages', []);
+
+  const client = $mqtt('mqtt://localhost:1883', {
+    clientId: 'rosespan-dashboard',
+    keepalive: 30,
+    onConnect: () => {
+      client.subscribe('sensors/+/temperature');
+      client.subscribe('sensors/+/humidity');
+    },
+    onMessage: (topic, msg) => {
+      messages.update((prev) => [
+        ...prev,
+        { topic, value: msg.toString('utf8'), at: Date.now() },
+      ].slice(-50));
+    },
+  });
+</script>
+
+<style>
+  :global(body) { margin: 0; padding: 2rem 1.25rem 3rem; background: #0f1115; color: #e8ecf1; font: 15px/1.6 system-ui, sans-serif; }
+  :global(main) { max-width: 52rem; margin: 0 auto; }
+  :global(h1) { font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -0.01em; }
+  :global(.lede) { color: #9aa4b2; margin: 0 0 1.5rem; }
+  :global(code) { background: #1a1e26; border: 1px solid #262c38; border-radius: 5px; padding: .1em .4em; font-size: .85em; }
+  :global(table) { width: 100%; border-collapse: collapse; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; }
+  :global(th), :global(td) { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #232833; white-space: nowrap; }
+  :global(th) { color: #9aa4b2; font-weight: 600; }
+  :global(.wait) { color: #6b7482; font-style: italic; }
+</style>
+
+<head>
+  <title>MQTT subscriber · rosespan</title>
+</head>
+
+<main>
+  <h1>📨 MQTT subscriber</h1>
+  <p class="lede">
+    A zero-dependency MQTT 3.1.1 client subscribed to <code>sensors/+/temperature</code> and
+    <code>sensors/+/humidity</code> on <code>mqtt://localhost:1883</code>. Publish from any
+    client and watch it appear here live.
+  </p>
+
+  {#if messages.get().length === 0}
+    <p class="wait">Waiting for messages…</p>
+  {:else}
+    <table>
+      <thead>
+        <tr><th>Topic</th><th>Value</th><th>At</th></tr>
+      </thead>
+      <tbody>
+        {#each messages.get() as m}
+          <tr>
+            <td>{m.topic}</td>
+            <td>{m.value}</td>
+            <td>{new Date(m.at).toLocaleTimeString()}</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  {/if}
+</main>
