@@ -1989,9 +1989,22 @@ function __netBind(spec: { kind: string; port: number; host?: string; opts: NetO
     const nt = (globalThis as any).__rosespan_net;
     if (!nt) return;
     const handle = { opts: o, srv: null as any };
+    const idleMs = ((o.idleTimeout as number) ?? 0) * 1000;
     const srv = nt.createServer((socket: any) => {
       (handle.opts.onConnection as (s: unknown) => void)?.(socket);
-      socket.on('data', (data: Buffer) => (handle.opts.onData as (s: unknown, d: Buffer) => void)?.(socket, data));
+      if (idleMs > 0) {
+        // A device that connects and goes silent would hold the fd forever;
+        // an idle window re-armed on every inbound byte bounds that.
+        socket.setTimeout(idleMs);
+        socket.on('timeout', () => {
+          (handle.opts.onIdle as ((s: unknown) => void) | undefined)?.(socket);
+          socket.destroy();
+        });
+      }
+      socket.on('data', (data: Buffer) => {
+        if (idleMs > 0) socket.setTimeout(idleMs);
+        (handle.opts.onData as (s: unknown, d: Buffer) => void)?.(socket, data);
+      });
       socket.on('error', () => {});
     });
     handle.srv = srv;
