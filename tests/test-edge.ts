@@ -6,8 +6,12 @@
  * Run: npx tsx tests/test-edge.ts   (after npm run build)
  */
 
-import { readFileSync } from 'fs';
+import { readFileSync, mkdtempSync, rmSync } from 'fs';
 import { createHash } from 'crypto';
+import { execFileSync } from 'child_process';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { createEdgeHandler } from '../src/cli/edge.js';
 
 let checks = 0;
@@ -20,7 +24,22 @@ const assert = (cond: boolean, msg: string) => {
   console.log(`ok - ${msg}`);
 };
 
-const handle = await createEdgeHandler('./dist');
+// This suite asserts on the DEMO app's documents, but tests/test-cli.mjs also
+// builds several other examples into REPO/dist and leaves the last one there -
+// so ./dist is only the example immediately after `npm run build`. Build our
+// own copy: OUT_DIR is cwd/dist, so the build runs with a scratch dir as cwd
+// and an absolute path to the example. The tsx loader is addressed by file URL
+// because the scratch cwd has no node_modules to resolve a bare specifier.
+const scratch = mkdtempSync(join(tmpdir(), 'rosespan-edge-'));
+const repo = fileURLToPath(new URL('../', import.meta.url));
+const tsxLoader = new URL('../node_modules/tsx/dist/esm/index.mjs', import.meta.url).href;
+const cli = fileURLToPath(new URL('../src/cli/index.ts', import.meta.url));
+execFileSync(process.execPath, ['--import', tsxLoader, cli, 'build', join(repo, 'example')], {
+  cwd: scratch,
+  stdio: 'pipe',
+});
+
+const handle = await createEdgeHandler(join(scratch, 'dist'));
 
 const res = await handle(new Request('http://localhost/'));
 assert(res.status === 200, 'GET / -> 200');
@@ -33,7 +52,9 @@ const externalRefs = [...html.matchAll(/<(?:script|link)[^>]*(?:src|href)="([^"]
   .filter((u) => !u.startsWith('#') && !u.startsWith('data:'));
 assert(externalRefs.length === 0, `zero external asset refs (one request) - got ${externalRefs.length}`);
 
-const styleBlocks = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join('');
+// <style> may carry attributes since route-scoped styles became managed head
+// blocks (id="rosespan-style-<scope>", data-rosespan-head), so match any style tag.
+const styleBlocks = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join('');
 assert(styleBlocks.includes('[data-rosespan-c="index"] .rcard'), 'the edge document inlines the scoped index rules');
 assert(styleBlocks.includes('[data-rosespan-c="about"] .rcard'), 'the edge document inlines the scoped about rules');
 assert(!/<link[^>]+stylesheet/i.test(html), 'the edge document requests zero stylesheets');
@@ -122,7 +143,7 @@ assert(likePost2.status === 200, 'multipart POST __action=like -> 200');
 const likeState2 = JSON.parse((await likePost2.text()).match(/id="__rosespan_state">([\s\S]*?)<\/script>/)![1]);
 assert(likeState2.likes === 43, 'the multipart POST ran the same action (42 -> 43)');
 
-const serverSrc = readFileSync('dist/server.js', 'utf-8');
+const serverSrc = readFileSync(join(scratch, 'dist', 'server.js'), 'utf-8');
 assert(!/require\(|from ['"]node:|from ['"]fs['"]/.test(serverSrc), 'server bundle has zero Node built-in imports');
 
 const apiGet = await handle(new Request('http://localhost/api/hello'));
@@ -158,7 +179,7 @@ const vaultWalled = await handle(new Request('http://localhost/vault'));
 assert(vaultWalled.status === 302, `the middleware walls /vault with a 302 at the edge (got ${vaultWalled.status})`);
 const vaultOk = await handle(new Request('http://localhost/vault', { headers: { cookie: 'session=rose' } }));
 assert(vaultOk.status === 200 && (await vaultOk.text()).includes('The Vault'), 'a session passes the plain wall at the edge');
-const edgeMod = await import('./dist/server.js');
+const edgeMod = await import(pathToFileURL(join(scratch, 'dist', 'server.js')).href);
 assert(Array.isArray((edgeMod as any).revalidate), 'the revalidate windows ship in the server bundle (the edge adapter renders live and ignores them)');
 
 const garden = await handle(new Request('http://localhost/garden'));
