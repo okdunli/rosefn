@@ -1,5 +1,5 @@
 
-// Rosefn CLI - simplest possible SSR + static server
+// RoseSpan CLI - simplest possible SSR + static server
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -240,7 +240,7 @@ async function loadServer(): Promise<any> {
     // intermediates; only the newest version is kept.
     let target = pathToFileURL(file).href;
     if (devMode) {
-      const dir = path.join(os.tmpdir(), `rosefn-dev-${process.pid}`);
+      const dir = path.join(os.tmpdir(), `rosespan-dev-${process.pid}`);
       const copy = path.join(dir, `server-${serverVersion}.mjs`);
       await fs.promises.rm(dir, { recursive: true, force: true });
       await fs.promises.mkdir(dir, { recursive: true });
@@ -254,18 +254,21 @@ async function loadServer(): Promise<any> {
 
 async function build(): Promise<void> {
   const minify = !devMode && !argv.includes('--no-minify');
-  const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR, { minify });
-  await prunePrerendered(OUT_DIR);
+  const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR, { minify, incremental: devMode });
   setBundleMode(bundle);
-  const skipped = await prerender(routes);
+  // Dev serves documents on demand (renderPage per request) so a save only has
+  // to recompile, never re-render every route - the prerender/writeBrotli/analyze
+  // passes are pure waste in the edit loop and, here, also dodge a sandbox that
+  // blocks .br writes. Production (and --static verification) keeps them.
+  const skipped = devMode ? [] : await prerender(routes);
   await fs.promises.writeFile(path.join(OUT_DIR, 'broken.json'), JSON.stringify(skipped));
   const ssrModule = await loadServer();
   await fs.promises.writeFile(path.join(OUT_DIR, 'headers.json'), JSON.stringify({
     default: securityHeaders(getClientSource()),
     routes: ssrModule.routeHeaders ?? [],
   }));
-  await writeBrotli(OUT_DIR);
-  await analyze(OUT_DIR, (ssrModule.dynamicRoutes as string[] | undefined) ?? []);
+  if (!devMode) await writeBrotli(OUT_DIR);
+  if (!devMode) await analyze(OUT_DIR, (ssrModule.dynamicRoutes as string[] | undefined) ?? []);
 
   if (config.pwa) {
     try {
@@ -273,7 +276,7 @@ async function build(): Promise<void> {
       await injectPwaIntoHtml(OUT_DIR, config.pwa);
       await writeBrotli(OUT_DIR);
     } catch (e) {
-      console.error('Rosefn: PWA generation failed:', e instanceof Error ? e.message : String(e));
+      console.error('RoseSpan: PWA generation failed:', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -287,13 +290,13 @@ async function build(): Promise<void> {
       .map((r) => r.routePath);
     const problems = [...new Set([...dyn, ...unbakedApi, ...paramless, ...skipped])];
     if (problems.length > 0) {
-      console.error('Rosefn: --static export refused - these routes need a server:');
+      console.error('RoseSpan: --static export refused - these routes need a server:');
       for (const p of problems) console.error(`  ${p}`);
       console.error('(getContext()/$store()/$query(), csp.nonce, buffer = true, an unbaked /api route, a param route with no export const params, or a route the middleware walled)');
       console.error('drop --static to build the normal dist (the dynamic half renders on demand on Node/edge)');
       process.exit(1);
     }
-    console.log('Rosefn: static export verified - every route is a baked file, no server needed');
+    console.log('RoseSpan: static export verified - every route is a baked file, no server needed');
   }
 }
 
@@ -319,8 +322,17 @@ async function writeBrotli(dir: string): Promise<void> {
   const worker = async (): Promise<void> => {
     while (next < targets.length) {
       const p = targets[next++];
+      const br = p + '.br';
+      try {
+        // Freshness by mtime (the same rule the server's prebuiltBro uses): a
+        // .br at least as new as its raw was compressed from these exact
+        // bytes. Skipping it keeps a rebuild from re-paying brotli q11 on
+        // files nothing touched.
+        const [rst, bst] = await Promise.all([fs.promises.stat(p), fs.promises.stat(br)]);
+        if (bst.mtimeMs >= rst.mtimeMs) continue;
+      } catch { /* no .br yet (or the raw vanished mid-walk): compress below */ }
       const raw = await fs.promises.readFile(p);
-      await fs.promises.writeFile(p + '.br', await brotliAsync(raw));
+      await fs.promises.writeFile(br, await brotliAsync(raw));
     }
   };
   await Promise.all(Array.from({ length: Math.min(BROTLI_PARALLEL, targets.length) }, worker));
@@ -374,7 +386,7 @@ async function analyze(outDir: string, dynamic: string[]): Promise<void> {
   };
   await walk(outDir, '');
   const kb = (n: number) => `${(n / 1024).toFixed(1)} KB`;
-  const lines = ['Rosefn build analysis (measured from dist/; br = the precompressed bytes the Go binary serves):'];
+  const lines = ['RoseSpan build analysis (measured from dist/; br = the precompressed bytes the Go binary serves):'];
   for (const r of rows.sort((a, b) => (a.route < b.route ? -1 : 1))) {
     lines.push(`  ${r.route.padEnd(16)}${kb(r.raw).padStart(9)} raw ${kb(r.gzip).padStart(8)} gzip ${kb(r.br).padStart(8)} br   ${r.js ? 'bundle inlined' : 'zero-JS'}`);
   }
@@ -419,12 +431,48 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
   const ssrModule = await loadServer();
   installContextStore(ssrModule);
   const skipped: string[] = [];
-  const write = async (routePath: string) => {
+
+  // First pass: the exact files this prerender will write. The prune below
+  // then deletes only prerendered files OUTSIDE that set (routes that
+  // vanished), so a steady-state rebuild deletes nothing - the old
+  // prune-everything pass paid a full unlink tax on files the write pass was
+  // about to recreate with identical bytes.
+  const targetFile = (routePath: string): string =>
+    routePath === '/' ? path.join(OUT_DIR, 'index.html') : path.join(OUT_DIR, routePath.slice(1), 'index.html');
+  const planned: Array<{ routePath: string; file: string }> = [];
+  for (const info of routes) {
+    if (((ssrModule.prerenderSkipRoutes as string[]) ?? []).includes(info.routePath)) {
+      console.log(`dynamic route ${info.routePath}: per-request state (getContext/$store), rendered on demand`);
+      continue;
+    }
+    if (info.paramNames.length === 0) {
+      planned.push({ routePath: info.routePath, file: targetFile(info.routePath) });
+      continue;
+    }
+    try {
+      const paramsExport = (ssrModule.routeParams as Record<string, unknown>)?.[info.routePath];
+      const raw = typeof paramsExport === 'function' ? await (paramsExport as () => unknown)() : paramsExport;
+      const paths = enumerateParams(info.pattern, info.paramNames, (raw ?? {}) as Record<string, unknown>);
+      for (const p of paths) planned.push({ routePath: p, file: targetFile(p) });
+      if (paths.length === 0) console.log(`dynamic route ${info.routePath}: no params export, rendered on demand`);
+    } catch (err) {
+      console.error(`prerender skipped for ${info.routePath}: ${err instanceof Error ? err.message : err}`);
+      skipped.push(info.routePath);
+    }
+  }
+  const keep = new Set(planned.map(({ file }) => file));
+  const apiPrerender = (ssrModule.apiPrerender as Record<string, boolean>) ?? {};
+  const apiPlanned = Object.entries(apiPrerender).filter(([, on]) => on).map(([routePath]) => routePath);
+  for (const routePath of apiPlanned) keep.add(path.join(OUT_DIR, routePath.slice(1) + '.json'));
+  await prunePrerendered(OUT_DIR, keep);
+
+  const write = async (routePath: string, file: string) => {
     await requestAls.run({}, async () => {
       const mw = await ssrModule.runMiddleware({ method: 'GET', url: routePath, headers: {} });
       if (mw) {
         console.error(`prerender skipped for ${routePath}: the middleware short-circuits at build time`);
         skipped.push(routePath);
+        await fs.promises.rm(file, { force: true });
         return;
       }
       ssrModule.setQuery?.({});
@@ -432,71 +480,47 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
       if (page.status === 500) {
         console.error(`prerender skipped for ${routePath}: render failed, the error page rendered`);
         skipped.push(routePath);
+        await fs.promises.rm(file, { force: true });
         return;
       }
-      const routeDir = routePath === '/' ? OUT_DIR : path.join(OUT_DIR, routePath.slice(1));
-      await fs.promises.mkdir(routeDir, { recursive: true });
-      await fs.promises.writeFile(path.join(routeDir, 'index.html'), getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false));
-      console.log(`prerendered ${routePath} -> ${path.relative(process.cwd(), path.join(routeDir, 'index.html'))}`);
+      const html = getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false);
+      let prev: string | null = null;
+      try { prev = await fs.promises.readFile(file, 'utf-8'); } catch { /* new file: always write */ }
+      if (prev !== html) {
+        await fs.promises.mkdir(path.dirname(file), { recursive: true });
+        await fs.promises.writeFile(file, html);
+      }
+      console.log(`prerendered ${routePath} -> ${path.relative(process.cwd(), file)}`);
     });
   };
 
-  const tasks: Array<() => Promise<void>> = [];
-  for (const info of routes) {
-    if (((ssrModule.prerenderSkipRoutes as string[]) ?? []).includes(info.routePath)) {
-      console.log(`dynamic route ${info.routePath}: per-request state (getContext/$store), rendered on demand`);
-      continue;
-    }
-    if (info.paramNames.length === 0) {
-      const routePath = info.routePath;
-      tasks.push(() => write(routePath).catch((err) => {
-        console.error(`prerender skipped for ${routePath}: ${err instanceof Error ? err.message : err}`);
-        skipped.push(routePath);
-      }));
-      continue;
-    }
-    try {
-      const paramsExport = (ssrModule.routeParams as Record<string, unknown>)?.[info.routePath];
-      const raw = typeof paramsExport === 'function' ? await (paramsExport as () => unknown)() : paramsExport;
-      const paths = enumerateParams(info.pattern, info.paramNames, (raw ?? {}) as Record<string, unknown>);
-      for (const p of paths) {
-        tasks.push(() => write(p).catch((err) => {
-          console.error(`prerender skipped for ${p}: ${err instanceof Error ? err.message : err}`);
-          skipped.push(p);
-        }));
-      }
-      if (paths.length === 0) console.log(`dynamic route ${info.routePath}: no params export, rendered on demand`);
-    } catch (err) {
-      console.error(`prerender skipped for ${info.routePath}: ${err instanceof Error ? err.message : err}`);
-      skipped.push(info.routePath);
-    }
-  }
-  await runPool(tasks, PRERENDER_CONCURRENCY);
+  await runPool(planned.map(({ routePath, file }) => () => write(routePath, file).catch((err) => {
+    console.error(`prerender skipped for ${routePath}: ${err instanceof Error ? err.message : err}`);
+    skipped.push(routePath);
+  })), PRERENDER_CONCURRENCY);
 
-  const apiPrerender = (ssrModule.apiPrerender as Record<string, boolean>) ?? {};
-  const apiTasks: Array<() => Promise<void>> = [];
-  for (const [routePath, on] of Object.entries(apiPrerender)) {
-    if (!on) continue;
-    apiTasks.push(async () => {
-      try {
-        await requestAls.run({}, async () => {
-          const res = await ssrModule.handleApi('GET', routePath, new Request('http://localhost' + routePath));
-          if (res.status !== 200) {
-            console.error(`api prerender skipped for ${routePath}: GET answered ${res.status}`);
-            return;
-          }
-          const body = await res.text();
-          const outFile = path.join(OUT_DIR, routePath.slice(1) + '.json');
+  await runPool(apiPlanned.map((routePath) => async () => {
+    try {
+      await requestAls.run({}, async () => {
+        const res = await ssrModule.handleApi('GET', routePath, new Request('http://localhost' + routePath));
+        if (res.status !== 200) {
+          console.error(`api prerender skipped for ${routePath}: GET answered ${res.status}`);
+          return;
+        }
+        const body = await res.text();
+        const outFile = path.join(OUT_DIR, routePath.slice(1) + '.json');
+        let prev: string | null = null;
+        try { prev = await fs.promises.readFile(outFile, 'utf-8'); } catch { /* new file: always write */ }
+        if (prev !== body) {
           await fs.promises.mkdir(path.dirname(outFile), { recursive: true });
           await fs.promises.writeFile(outFile, body);
-          console.log(`prerendered api ${routePath} -> ${path.relative(process.cwd(), outFile)}`);
-        });
-      } catch (err) {
-        console.error(`api prerender skipped for ${routePath}: ${err instanceof Error ? err.message : err}`);
-      }
-    });
-  }
-  await runPool(apiTasks, PRERENDER_CONCURRENCY);
+        }
+        console.log(`prerendered api ${routePath} -> ${path.relative(process.cwd(), outFile)}`);
+      });
+    } catch (err) {
+      console.error(`api prerender skipped for ${routePath}: ${err instanceof Error ? err.message : err}`);
+    }
+  }), PRERENDER_CONCURRENCY);
   return skipped;
 }
 
@@ -552,11 +576,11 @@ function revalidateInBackground(routePath: string, filePath: string): void {
         if (page.status === 200) {
           await fs.promises.writeFile(filePath, getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false));
           fileCache.delete(filePath);
-          console.log(`Rosefn: revalidated ${routePath} in the background`);
+          console.log(`RoseSpan: revalidated ${routePath} in the background`);
         }
       });
     } catch (err) {
-      console.error('Rosefn: background revalidation failed for', routePath, err instanceof Error ? err.message : err);
+      console.error('RoseSpan: background revalidation failed for', routePath, err instanceof Error ? err.message : err);
     } finally {
       isrBusy.delete(filePath);
     }
@@ -565,7 +589,7 @@ function revalidateInBackground(routePath: string, filePath: string): void {
 
 /** A request body is bounded. 1 MB holds any form and any JSON API call a
  * site this size makes; a deployment that needs more sets it explicitly. */
-const MAX_BODY = Number(process.env.ROSEFN_MAX_BODY) || 1024 * 1024;
+const MAX_BODY = Number(process.env.ROSESPAN_MAX_BODY) || 1024 * 1024;
 
 /**
  * Collect a request body, refusing anything past MAX_BODY with a 413. The
@@ -693,7 +717,7 @@ function webHeadersToNode(web: any): Record<string, any> {
 }
 
 // --- dev-only live reload + state bridge --- The dev server rebuilds on change; without a signal the browser keeps showing the previous document.
-const DEV_BRIDGE = `<script>(function(){var es=new EventSource('/__rosefn_reload');es.onmessage=function(m){if(m.data!=='rebuild')return;es.close();var s=window.__rosefn?window.__rosefn.state():null;if(s)fetch('/__rosefn_state',{method:'POST',body:s,headers:{'content-type':'application/json'}}).catch(function(){});setTimeout(function(){location.reload()},40)}})()</script>`;
+const DEV_BRIDGE = `<script>(function(){var es=new EventSource('/__rosespan_reload');es.onmessage=function(m){if(m.data!=='rebuild')return;es.close();var s=window.__rosespan?window.__rosespan.state():null;if(s)fetch('/__rosespan_state',{method:'POST',body:s,headers:{'content-type':'application/json'}}).catch(function(){});setTimeout(function(){location.reload()},40)}})()</script>`;
 
 let devResume: string | null = null;
 const devClients = new Set<any>();
@@ -748,7 +772,7 @@ function startDevBuild(): Promise<void> {
       try {
         console.log('Rebuilding...');
         await build();
- 
+        devNotify();
         devNotify();
       } catch (err) {
         
@@ -775,8 +799,8 @@ function devWrap(inner: (req: any, res: any) => void): (req: any, res: any) => v
   devMode = true;
   return (req, res) => {
     const url = req.url || '/';
-    if (url.startsWith('/__rosefn_reload')) return devReload(req, res);
-    if (url.startsWith('/__rosefn_state') && req.method === 'POST') return devSaveState(req, res);
+    if (url.startsWith('/__rosespan_reload')) return devReload(req, res);
+    if (url.startsWith('/__rosespan_state') && req.method === 'POST') return devSaveState(req, res);
     let injected = false;
     // The resumed snapshot belongs to the NEXT request, whatever it turns out to be: a document that answers 304 (nothing changed) consumes it too.
     const seed = devResume;
@@ -789,7 +813,7 @@ function devWrap(inner: (req: any, res: any) => void): (req: any, res: any) => v
       if (at < 0) return chunk;
       
       injected = true;
-      const resume = seed ? `<script>window.__rosefn_resume=${seed.replace(/<\/script>/g, '')}</script>` : '';
+      const resume = seed ? `<script>window.__rosespan_resume=${seed.replace(/<\/script>/g, '')}</script>` : '';
       const out = s.slice(0, at + 6) + resume + DEV_BRIDGE + s.slice(at + 6);
       return Buffer.isBuffer(chunk) ? Buffer.from(out, 'utf8') : out;
     };
@@ -815,10 +839,10 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
       return;
     }
     // Q0 (bug report): one canonical URL per route.
-    if (req.method === 'POST' && (req.url || '').startsWith('/__rosefn/revalidate')) {
-      const token = process.env.ROSEFN_REVALIDATE_TOKEN || '';
+    if (req.method === 'POST' && (req.url || '').startsWith('/__rosespan/revalidate')) {
+      const token = process.env.ROSESPAN_REVALIDATE_TOKEN || '';
       if (!token) { res.statusCode = 404; res.end(); return; }
-      if (req.headers['x-rosefn-token'] !== token) {
+      if (req.headers['x-rosespan-token'] !== token) {
         res.statusCode = 403; res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify({ error: 'invalid token' })); return;
       }
@@ -899,7 +923,7 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
             res.statusCode = apiRes.status;
             res.end(Buffer.from(await apiRes.arrayBuffer()));
           } catch (err) {
-            console.error(`Rosefn: ${req.method} ${req.url} api handler failed:`, err instanceof Error ? err.stack ?? err.message : String(err));
+            console.error(`RoseSpan: ${req.method} ${req.url} api handler failed:`, err instanceof Error ? err.stack ?? err.message : String(err));
             res.statusCode = 500;
             res.setHeader('Content-Type', 'application/json');
             res.end('{"error":"api handler failed"}');
@@ -926,7 +950,7 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
             const page = await ssrModule.renderPage(pathnameOf(req.url || '/'), form);
             await sendPage(req, res, ssrModule, hookCtx, page, pathnameOf(req.url || '/'));
           } catch (err) {
-            console.error(`Rosefn: POST ${pathnameOf(req.url || '/')} failed:`, err instanceof Error ? err.stack : err);
+            console.error(`RoseSpan: POST ${pathnameOf(req.url || '/')} failed:`, err instanceof Error ? err.stack : err);
             if (!res.headersSent) {
               res.statusCode = 400;
               res.end('Bad request');
@@ -951,7 +975,10 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
 
       const isAsset = ASSET_EXT.has(path.extname(safe).toLowerCase());
       const isDynamic = !isAsset && (ssrModule.dynamicRoutes as string[] | undefined)?.includes(pathnameOf(req.url));
-      if (!isDynamic && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      // Dev renders documents on demand, so a stale prerendered file never wins
+      // over the freshly-recompiled server. Production still serves from disk.
+      const isDocInDev = devMode && path.extname(filePath).toLowerCase() === '.html';
+      if (!isDynamic && !isDocInDev && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
         const st = fs.statSync(filePath);
         const rev = isAsset ? undefined : ((ssrModule.revalidate as { pattern: string; seconds: number }[]) || [])
           .find((r) => ssrModule.matchRoute(r.pattern, pathnameOf(req.url)));
@@ -1064,7 +1091,7 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
       await sendPage(req, res, ssrModule, hookCtx, page, safe2);
       });
     }).catch((err: unknown) => {
-      console.error(`Rosefn: ${req.method} ${req.url} failed:`, err instanceof Error ? err.stack ?? err.message : err);
+      console.error(`RoseSpan: ${req.method} ${req.url} failed:`, err instanceof Error ? err.stack ?? err.message : err);
       if (res.headersSent) {
         res.destroy();
         return;
@@ -1073,7 +1100,7 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       const devErr = err as { file?: string; line?: number | string; hint?: string };
       let devDetail = '';
-      if (process.env.ROSEFN_DEV === '1' && err) {
+      if (process.env.ROSESPAN_DEV === '1' && err) {
         const stack = err instanceof Error ? (err.stack || '').split('\n').slice(1, 7).join('\n') : '';
         devDetail =
           '<div style="margin:24px auto;max-width:860px;font:13px/1.6 ui-monospace,monospace;background:#1b1b1f;color:#e6e6ea;border:1px solid #3a3a42;border-radius:10px;padding:20px 24px;text-align:left;white-space:pre-wrap;word-break:break-word">' +
@@ -1127,7 +1154,7 @@ function listenFree(server: any, port: number, onReady: (port: number) => void):
         attempt(p + 1);
         return;
       }
-      console.error(`Rosefn: cannot listen on port ${p}:`, err instanceof Error ? err.message : err);
+      console.error(`RoseSpan: cannot listen on port ${p}:`, err instanceof Error ? err.message : err);
       process.exit(1);
     };
     const onListening = (): void => {
@@ -1183,13 +1210,13 @@ function version(): string {
  * package.json, and a banner that named only that one left the operator
  * unable to tell which FRAMEWORK build was actually running - the two
  * versions advanced independently for weeks. The banner now names both:
- * "Rosefn v0.4.0 - project: my-app v0.1.1". Absent (running inside the
+ * "RoseSpan v0.4.0 - project: my-app v0.1.1". Absent (running inside the
  * framework repo itself, or a directory with no package.json) -> nothing.
  */
 function projectTag(): string {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf-8'));
-    if (!pkg.version || pkg.name === 'rosefn') return '';
+    if (!pkg.version || pkg.name === 'rosespan') return '';
     return ` - project: ${pkg.name} v${pkg.version}`;
   } catch {
     return '';
@@ -1198,8 +1225,8 @@ function projectTag(): string {
 
 async function dev(): Promise<void> {
   devMode = true;
-  process.env.ROSEFN_DEV = '1';
-  console.log(`🌹 Rosefn v${version()}${projectTag()} dev server starting...`);
+  process.env.ROSESPAN_DEV = '1';
+  console.log(`🌹 RoseSpan v${version()}${projectTag()} dev server starting...`);
   try {
     await build();
   } catch (err) {
@@ -1209,14 +1236,14 @@ async function dev(): Promise<void> {
   let timeout: any;
   fs.watch(SRC_DIR, { recursive: true }, (_ev, filename) => {
     // Build output must not retrigger the build: dist/ (prerendered HTML,
-    // bundles), .rosefn-build/ (esbuild intermediates) and src/.rosefn/
+    // bundles), .rosespan-build/ (esbuild intermediates) and src/.rosespan/
     // (generated route types) are all rewritten by every rebuild, and
     // watching them turns one edit into an endless rebuild loop whose
     // prune/prerender window serves stale documents. node_modules and .git
     // are noise for the same reason.
     if (filename) {
       const segs = String(filename).replace(/\\/g, '/').split('/');
-      if (segs.some((s) => s === 'dist' || s === 'node_modules' || s === '.git' || s === '.rosefn' || s === '.rosefn-build')) return;
+      if (segs.some((s) => s === 'dist' || s === 'node_modules' || s === '.git' || s === '.rosespan' || s === '.rosespan-build')) return;
     }
     devBuildPending = true;
     clearTimeout(timeout);
@@ -1237,24 +1264,24 @@ async function preview(): Promise<void> {
   const server = http.createServer(serveStatic(OUT_DIR, true));
 
   listenFree(server, PORT, (port) => {
-    console.log(`🌹 Rosefn v${version()}${projectTag()} preview at http://localhost:${port}`);
+    console.log(`🌹 RoseSpan v${version()}${projectTag()} preview at http://localhost:${port}`);
   });
 }
 
 async function serve(): Promise<void> {
   if (!fs.existsSync(path.join(OUT_DIR, 'server.js'))) {
-    console.error(`Rosefn: ${OUT_DIR} has no server.js - run rosefn build first`);
+    console.error(`RoseSpan: ${OUT_DIR} has no server.js - run rosespan build first`);
     process.exit(1);
   }
   const cluster = (await import('node:cluster')).default as any;
   cluster.schedulingPolicy = cluster.SCHED_RR;
   const os = await import('node:os');
-  const workers = Math.max(1, Number(process.env.ROSEFN_WORKERS) || os.cpus().length);
+  const workers = Math.max(1, Number(process.env.ROSESPAN_WORKERS) || os.cpus().length);
   if (cluster.isPrimary) {
     const port = await freePort(Number(process.env.PORT) || 3000);
     for (let i = 0; i < workers; i++) cluster.fork({ PORT: String(port) });
     cluster.on('message', (worker: any, msg: any) => {
-      if (!msg || msg.type !== 'rosefn:store') return;
+      if (!msg || msg.type !== 'rosespan:store') return;
       for (const w of Object.values<any>(cluster.workers ?? {})) {
         if (w && w.id !== worker.id) w.send(msg);
       }
@@ -1267,7 +1294,7 @@ async function serve(): Promise<void> {
     process.on('SIGTERM', stop);
     process.on('SIGINT', stop);
     cluster.on('exit', () => { if (--live <= 0) process.exit(0); });
-    console.log(`🌹 Rosefn v${version()}${projectTag()} serve: ${workers} worker${workers > 1 ? 's' : ''} on http://localhost:${port} (cluster, bounded bodies, graceful shutdown, access log on stdout)`);
+    console.log(`🌹 RoseSpan v${version()}${projectTag()} serve: ${workers} worker${workers > 1 ? 's' : ''} on http://localhost:${port} (cluster, bounded bodies, graceful shutdown, access log on stdout)`);
     return;
   }
   
@@ -1277,7 +1304,7 @@ async function serve(): Promise<void> {
   try {
     servicePlugins = (await loadPlugins(SRC_DIR)).filter((p) => p && p.onServe);
   } catch (err) {
-    console.error('Rosefn: rosefn.config.js failed to load for the serve hooks:', err instanceof Error ? err.message : String(err));
+    console.error('RoseSpan: rosespan.config.js failed to load for the serve hooks:', err instanceof Error ? err.message : String(err));
   }
  
   const storeBridge = {
@@ -1294,7 +1321,7 @@ async function serve(): Promise<void> {
     const hooksMod = await loadServer();
     invalidateHook = () => { try { hooksMod.invalidateRenderCache(); } catch {  } };
   } catch (err) {
-    console.error('Rosefn: dist/server.js failed to load for the serve hooks:', err instanceof Error ? err.message : String(err));
+    console.error('RoseSpan: dist/server.js failed to load for the serve hooks:', err instanceof Error ? err.message : String(err));
   }
   const http = await import('node:http');
   // T9: dynamic GET/HEAD rides the edge handler - the same compiled code the adapters run.
@@ -1394,12 +1421,12 @@ async function serve(): Promise<void> {
   server.headersTimeout = 65_000;
   server.keepAliveTimeout = 5_000;
   listenFree(server, PORT, async (port) => {
-    console.log(`🌹 Rosefn worker ${process.pid} listening on http://localhost:${port}`);
+    console.log(`🌹 RoseSpan worker ${process.pid} listening on http://localhost:${port}`);
     for (const p of servicePlugins) {
       try {
         await p.onServe({ port, workers, store: storeBridge });
       } catch (err) {
-        console.error('Rosefn: plugin', p.name, 'onServe failed:', err instanceof Error ? err.message : String(err));
+        console.error('RoseSpan: plugin', p.name, 'onServe failed:', err instanceof Error ? err.message : String(err));
       }
     }
   });
@@ -1409,10 +1436,10 @@ async function serve(): Promise<void> {
       if (!p.onShutdown) continue;
       try {
         void Promise.resolve(p.onShutdown()).catch((err: unknown) => {
-          console.error('Rosefn: plugin', p.name, 'onShutdown failed:', err instanceof Error ? err.message : err);
+          console.error('RoseSpan: plugin', p.name, 'onShutdown failed:', err instanceof Error ? err.message : err);
         });
       } catch (err) {
-        console.error('Rosefn: plugin', p.name, 'onShutdown failed:', err instanceof Error ? err.message : err);
+        console.error('RoseSpan: plugin', p.name, 'onShutdown failed:', err instanceof Error ? err.message : err);
       }
     }
     // App-registered hooks (an embedded database that must checkpoint and flush its WAL).
@@ -1438,7 +1465,7 @@ function templatesDir(): string | null {
 /** The TypeScript-ready files every scaffolded project gets: the ambient
  *  globals (editors and tsc both see them) and a strict tsconfig. */
 function writeTypeScriptReady(dir: string): void {
-  fs.writeFileSync(path.join(dir, 'rosefn-env.d.ts'), `/// <reference types="rosefn" />\n`);
+  fs.writeFileSync(path.join(dir, 'rosespan-env.d.ts'), `/// <reference types="rosespan" />\n`);
   fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({
     compilerOptions: {
       target: 'ES2022',
@@ -1450,7 +1477,7 @@ function writeTypeScriptReady(dir: string): void {
       skipLibCheck: true,
     },
     // the env file first (it is what makes the globals visible), then any
-    include: ['rosefn-env.d.ts', 'src/**/*.ts'],
+    include: ['rosespan-env.d.ts', 'src/**/*.ts'],
   }, null, 2) + '\n');
 }
 
@@ -1462,7 +1489,7 @@ function copyTemplate(dir: string, name: string, display: string): void {
   const src = fs.existsSync(shipped) ? shipped : path.resolve(name);
   if (!fs.existsSync(src) || !fs.statSync(src).isDirectory()) {
     const available = base ? fs.readdirSync(base).join(', ') : '(none found)';
-    console.error(`Rosefn: no template '${name}' - available: ${available} (or pass a path to any project directory)`);
+    console.error(`RoseSpan: no template '${name}' - available: ${available} (or pass a path to any project directory)`);
     process.exit(1);
   }
   fs.cpSync(src, dir, {
@@ -1473,12 +1500,12 @@ function copyTemplate(dir: string, name: string, display: string): void {
   if (fs.existsSync(pkgFile)) {
     const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
     pkg.name = path.basename(dir);
-    if (pkg.dependencies?.rosefn) pkg.dependencies.rosefn = `^${version()}`;
+    if (pkg.dependencies?.rosespan) pkg.dependencies.rosespan = `^${version()}`;
     pkg.devDependencies = { ...pkg.devDependencies, typescript: '^5.6.0' };
     fs.writeFileSync(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
   }
   writeTypeScriptReady(dir);
-  console.log(`🌹 rosefn new: ${display}/ from the '${path.basename(src)}' template`);
+  console.log(`🌹 rosespan new: ${display}/ from the '${path.basename(src)}' template`);
   console.log(`\n   cd ${display}`);
   console.log(`   npm install && npm run dev`);
   console.log(`   npm run build    # then deploy dist/`);
@@ -1502,12 +1529,12 @@ async function scaffold(): Promise<void> {
   const name = args.find((a, i) => !a.startsWith('-') && i !== (tplIdx >= 0 ? tplIdx + 1 : -1));
   if (!name || (tplIdx >= 0 && !template)) {
     const available = templatesDir() ? fs.readdirSync(templatesDir()!).join(', ') : 'blog, api, admin, site';
-    console.log(`Usage: rosefn new <name> [--template <name>]   (creates <name>/ with a page that builds; --template copies an official template - ${available} - or any project directory)`);
+    console.log(`Usage: rosespan new <name> [--template <name>]   (creates <name>/ with a page that builds; --template copies an official template - ${available} - or any project directory)`);
     return;
   }
   const dir = path.resolve(name);
   if (fs.existsSync(dir)) {
-    console.error(`Rosefn: ${dir} already exists - pick another name`);
+    console.error(`RoseSpan: ${dir} already exists - pick another name`);
     process.exit(1);
   }
 
@@ -1524,13 +1551,13 @@ async function scaffold(): Promise<void> {
     private: true,
     type: 'module',
     scripts: {
-      dev: 'rosefn dev',
-      build: 'rosefn build',
-      preview: 'rosefn preview',
-      serve: 'rosefn serve',
-      check: 'rosefn check',
+      dev: 'rosespan dev',
+      build: 'rosespan build',
+      preview: 'rosespan preview',
+      serve: 'rosespan serve',
+      check: 'rosespan check',
     },
-    dependencies: { rosefn: `^${version()}` },
+    dependencies: { rosespan: `^${version()}` },
     devDependencies: { typescript: '^5.6.0' },
   }, null, 2) + '\n');
 
@@ -1550,7 +1577,7 @@ async function scaffold(): Promise<void> {
   let first: Item = $data((): Item => ({ label: items()[0] ?? 'nothing yet' }));
 </script>
 
-<h1>🌹 Rosefn</h1>
+<h1>🌹 RoseSpan</h1>
 <p>Count: <strong>{count()}</strong> - first item: {first().label}</p>
 <button on:click={increment}>Increment</button>
 <button on:click={toggleList}>{showList() ? 'Hide' : 'Show'} the list</button>
@@ -1571,10 +1598,10 @@ async function scaffold(): Promise<void> {
 
   fs.writeFileSync(path.join(dir, 'README.md'), `# ${path.basename(dir)}
 
-A Rosefn project. One file per route in \`src/pages/\`.
+A RoseSpan project. One file per route in \`src/pages/\`.
 
 \`\`\`bash
-npm install     # pulls the rosefn package (and typescript, for checking)
+npm install     # pulls the rosespan package (and typescript, for checking)
 npm run dev     # dev server with hot rebuild: http://localhost:3000
 npm run build   # compiles to dist/
 npm run serve   # production runner (cluster, access log, graceful shutdown)
@@ -1590,7 +1617,7 @@ runs before every request, \`src/pages/api/*.rose\` answers JSON.
 
   console.log(`🌹 Created ${dir}`);
   console.log(`   src/pages/index.rose  - a typed page that builds and runs`);
-  console.log(`   rosefn-env.d.ts + tsconfig.json - the script globals, typed`);
+  console.log(`   rosespan-env.d.ts + tsconfig.json - the script globals, typed`);
   console.log(`\n   cd ${name}`);
   console.log(`   npm install && npm run dev`);
   console.log(`   npm run check    # type-checks every .rose script`);
@@ -1604,7 +1631,7 @@ runs before every request, \`src/pages/api/*.rose\` answers JSON.
  * bug ships. This closes that hole - it extracts the exact block the compiler
  * embeds (scriptOf, one regex, one truth), pads it so line and column numbers
  * still point at the .rose file, and runs the project's TypeScript over all
- * of them in one program, with rosefn's own globals in scope.
+ * of them in one program, with rosespan's own globals in scope.
  *
  * No TypeScript in the project is a hard error: a check that cannot run must
  * never pass silently. trade-off: no temp files, no tsconfig parsing - an
@@ -1613,7 +1640,7 @@ runs before every request, \`src/pages/api/*.rose\` answers JSON.
 async function check(): Promise<void> {
   const files = [...(await scanRoseFiles(SRC_DIR)), ...(await scanComponentFiles(SRC_DIR))];
   if (files.length === 0) {
-    console.error(`Rosefn: no .rose pages found under ${path.join(SRC_DIR, 'src', 'pages')} - run rosefn check from a project root, or pass one: rosefn check <dir>`);
+    console.error(`RoseSpan: no .rose pages found under ${path.join(SRC_DIR, 'src', 'pages')} - run rosespan check from a project root, or pass one: rosespan check <dir>`);
     process.exit(1);
   }
 
@@ -1622,14 +1649,14 @@ async function check(): Promise<void> {
     const req = createRequire(pathToFileURL(path.join(SRC_DIR, 'package.json')));
     tsMod = await import(pathToFileURL(req.resolve('typescript')).href) as typeof ts;
   } catch {
-    console.error(`Rosefn: type checking needs typescript in this project - npm i -D typescript`);
+    console.error(`RoseSpan: type checking needs typescript in this project - npm i -D typescript`);
     process.exit(1);
   }
 
   const nextTo = (rel: string[]) => rel.map((r) => fileURLToPath(new URL(r, import.meta.url))).find((p) => fs.existsSync(p));
-  const typesFile = nextTo(['../types/rosefn.d.ts', '../src/types/rosefn.d.ts']);
+  const typesFile = nextTo(['../types/rosespan.d.ts', '../src/types/rosespan.d.ts']);
   if (!typesFile) {
-    console.error('Rosefn: the type definitions (src/types/rosefn.d.ts) were not found next to the compiler');
+    console.error('RoseSpan: the type definitions (src/types/rosespan.d.ts) were not found next to the compiler');
     process.exit(1);
   }
   const runtimeSource = nextTo(['../runtime/index.ts', '../src/runtime/index.ts']);
@@ -1650,7 +1677,7 @@ async function check(): Promise<void> {
     checked++;
   }
   if (checked === 0) {
-    console.log('Rosefn: no .rose scripts to check');
+    console.log('RoseSpan: no .rose scripts to check');
     return;
   }
 
@@ -1707,26 +1734,26 @@ async function check(): Promise<void> {
     return src ? tsMod.createSourceFile(f, src, version, true) : realGet(f, version, onError, shouldCreate);
   };
 
-  // Rosefn's ambient globals as a program root: a global .d.ts contributes its declarations to every file in the program.
+  // RoseSpan's ambient globals as a program root: a global .d.ts contributes its declarations to every file in the program.
   const program = tsMod.createProgram([...virtual.keys(), typesFile], options, host);
-  // Only the project's own scripts: an error inside @types/node or inside rosefn's runtime source is not the user's bug (skipLibCheck already //).
+  // Only the project's own scripts: an error inside @types/node or inside rosespan's runtime source is not the user's bug (skipLibCheck already //).
   const diagnostics = tsMod.getPreEmitDiagnostics(program)
     .filter((d) => d.file && virtual.has(norm(d.file.fileName)));
   if (diagnostics.length === 0) {
-    console.log(`Rosefn: ${checked} script${checked === 1 ? '' : 's'} type-checked, no errors`);
+    console.log(`RoseSpan: ${checked} script${checked === 1 ? '' : 's'} type-checked, no errors`);
     return;
   }
   for (const d of diagnostics) {
     const at = d.file ? tsMod.getLineAndCharacterOfPosition(d.file, d.start ?? 0) : null;
     const where = d.file && at
       ? `${path.relative(SRC_DIR, d.file.fileName)}(${at.line + 1},${at.character + 1})`
-      : 'rosefn';
+      : 'rosespan';
     const text = tsMod.flattenDiagnosticMessageText(d.messageText, '\n');
     const kind = d.category === 1 ? 'error' : 'warning';
     console.error(`${where}: ${kind} TS${d.code}: ${text}`);
   }
   const errors = diagnostics.filter((d) => d.category === 1).length;
-  console.error(`Rosefn: ${errors} type error${errors === 1 ? '' : 's'} in ${checked} script${checked === 1 ? '' : 's'}`);
+  console.error(`RoseSpan: ${errors} type error${errors === 1 ? '' : 's'} in ${checked} script${checked === 1 ? '' : 's'}`);
   process.exit(1);
 }
 
@@ -1742,7 +1769,7 @@ function reportFailure(err: unknown): never {
   if (asJson) {
     process.stdout.write(`${JSON.stringify({ ok: false, errors: [errorInfo(err)] })}\n`);
   } else if (err instanceof RoseError) {
-    console.error(`Rosefn: ${err.message}`);
+    console.error(`RoseSpan: ${err.message}`);
     if (err.hint) console.error(`  hint: ${err.hint}`);
     if (err.file && err.line) {
       try { console.error(codeFrame(fs.readFileSync(err.file, 'utf-8'), err.line)); } catch {  }
@@ -1762,4 +1789,4 @@ else if (cmd === 'serve') void serve().catch(reportFailure);
 else if (cmd === 'new') void scaffold().catch(reportFailure);
 else if (cmd === 'check') void check().catch(reportFailure);
 else if (cmd === 'prompt') console.log(AI_PROMPT);
-else console.log('Usage: rosefn dev|build|preview|serve|new|check|prompt [dir] [--json] [--static] [--no-minify]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; `new <name> [--template blog|api|admin|site]` scaffolds a project)');
+else console.log('Usage: rosespan dev|build|preview|serve|new|check|prompt [dir] [--json] [--static] [--no-minify]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; `new <name> [--template blog|api|admin|site]` scaffolds a project)');
