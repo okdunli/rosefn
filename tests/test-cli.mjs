@@ -329,6 +329,29 @@ assert(fs.readFileSync(path.join(plugCache, 'dist', 'index.html'), 'utf8').inclu
   assert(db.serverUnchanged, 'the hot rebuild still produced the identical server bundle (the skip never serves stale bytes)');
 }
 
+{
+  const prDir = path.join(tmp, 'prerender-skip');
+  fs.mkdirSync(path.join(prDir, 'src', 'pages'), { recursive: true });
+  fs.writeFileSync(path.join(prDir, 'src', 'pages', 'index.rose'), `<p>pr-marker</p>\n`);
+  fs.writeFileSync(path.join(prDir, 'src', 'pages', 'gone.rose'), `<p>will be deleted</p>\n`);
+  const pr1 = await run(['build'], prDir);
+  assert(pr1.code === 0, 'the prune-skip fixture builds');
+  const prHome = path.join(prDir, 'dist', 'index.html');
+  assert(fs.existsSync(prHome) && fs.readFileSync(prHome, 'utf8').includes('pr-marker'), 'the home route prerendered');
+  const prGone = path.join(prDir, 'dist', 'gone', 'index.html');
+  assert(fs.existsSync(prGone), 'the second route prerendered');
+  const prMtime = fs.statSync(prHome).mtimeMs;
+  await new Promise((r) => setTimeout(r, 25));
+  const pr2 = await run(['build'], prDir);
+  assert(pr2.code === 0, 'the fixture rebuilds');
+  assert(fs.statSync(prHome).mtimeMs === prMtime, 'an unchanged route was not rewritten (the prune no longer deletes what the write pass recreates)');
+  assert(fs.readFileSync(prHome, 'utf8').includes('pr-marker'), 'the skipped route still carries its content');
+  fs.rmSync(path.join(prDir, 'src', 'pages', 'gone.rose'));
+  const pr3 = await run(['build'], prDir);
+  assert(pr3.code === 0, 'the fixture rebuilds after a route was removed');
+  assert(!fs.existsSync(prGone), "a removed route's prerendered file is pruned (no stale page served)");
+}
+
 const compsDir = path.join(tmp, 'comps');
 fs.mkdirSync(path.join(compsDir, 'src', 'components', 'ui'), { recursive: true });
 fs.mkdirSync(path.join(compsDir, 'src', 'pages'), { recursive: true });
