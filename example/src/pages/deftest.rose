@@ -1,5 +1,4 @@
 <script>
-  export const bundle = 'split';
   let n = $state(2);
   let sq = $derived(n() * n());
   function bump() { $setState('n', n() + 1); }
