@@ -3824,9 +3824,17 @@ export async function buildProject(root: string, outDir: string, opts: { minify?
   const registry: RoseRegistry = new Map(
     files.map((f, i) => [f, { index: i, scopeKey: scopeKeys[i], slots: scanSlotDecls(f) }])
   );
+  // The first esbuild call of a process pays a service spawn (~20ms warm,
+  // ~90ms cold on Windows/AV) and every later call is sub-millisecond. The
+  // bundling phase below is the first user of the service, so kick a throwaway
+  // transform off now: the spawn overlaps the .rose compile instead of
+  // serializing in front of it. A failure here is irrelevant - the real builds
+  // report their own errors.
+  const esbuildWarm = esbuild.transform('export default 0', { loader: 'js' }).catch(() => {});
   const compiled = await Promise.all(
     files.map((f, i) => compileComponentMemo(f, path.join(root, 'public'), scopeKeys[i], infos[i].isApi, plugins, registry))
   );
+  await esbuildWarm;
   const importsOf = new Map<number, number[]>();
   files.forEach((_, i) => {
     const list: number[] = [];
