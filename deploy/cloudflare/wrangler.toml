@@ -1,6 +1,6 @@
-# Cloudflare Pages - rosefn. `pages_build_output_dir` makes this file the
+# Cloudflare Pages - rosespan. `pages_build_output_dir` makes this file the
 # source of truth for the project, so it lives in the repo next to the app.
-name = "rosefn"
+name = "rosespan"
 pages_build_output_dir = "./dist"
 
 # The build writes dist/ exactly like every other target; Pages then serves

@@ -13,5 +13,5 @@
 # redirect; the browser keeps its URL).
 [[redirects]]
   from = "/*"
-  to = "/.netlify/functions/rosefn"
+  to = "/.netlify/functions/rosespan"
   status = 200

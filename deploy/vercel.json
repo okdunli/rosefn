@@ -3,11 +3,11 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
-    "api/rosefn.ts": {
+    "api/rosespan.ts": {
       "includeFiles": "dist/**"
     }
   },
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api/rosefn" }
+    { "source": "/(.*)", "destination": "/api/rosespan" }
   ]
 }
