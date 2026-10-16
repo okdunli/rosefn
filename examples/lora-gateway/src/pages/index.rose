@@ -1,0 +1,69 @@
+<script>
+  // A LoRa-gateway-style listener: every UDP datagram on :1700 lands here, gets
+  // parsed, and is prepended to a shared store. $store is reactive on the client
+  // and the server pushes each write over /__rosespan_store, so the table below
+  // updates live - no polling, no manual wiring.
+  //
+  // $udp only REGISTERS the spec at boot; the framework binds it when the serve
+  // worker starts, so a `rosespan build` / prerender never opens a socket. On the
+  // client the same $udp is an inert no-op, so this page hydrates cleanly.
+  const frames = $store('loraFrames', []);
+
+  $udp(1700, {
+    onMessage: (msg, rinfo) => {
+      frames.update((prev) => [
+        {
+          devEUI: msg.slice(0, 8).toString('hex'),
+          payload: msg.slice(8).toString('hex'),
+          from: rinfo.address,
+          at: Date.now(),
+        },
+        ...prev,
+      ].slice(0, 50));
+    },
+  });
+</script>
+
+<style>
+  :global(body) { margin: 0; padding: 2rem 1.25rem 3rem; background: #0f1115; color: #e8ecf1; font: 15px/1.6 system-ui, sans-serif; }
+  :global(main) { max-width: 52rem; margin: 0 auto; }
+  :global(h1) { font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -0.01em; }
+  :global(.lede) { color: #9aa4b2; margin: 0 0 1.5rem; }
+  :global(code) { background: #1a1e26; border: 1px solid #262c38; border-radius: 5px; padding: .1em .4em; font-size: .85em; }
+  :global(table) { width: 100%; border-collapse: collapse; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; }
+  :global(th), :global(td) { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #232833; white-space: nowrap; }
+  :global(th) { color: #9aa4b2; font-weight: 600; }
+  :global(.wait) { color: #6b7482; font-style: italic; }
+</style>
+
+<head>
+  <title>LoRa gateway · rosespan</title>
+</head>
+
+<main>
+  <h1>📡 LoRa gateway</h1>
+  <p class="lede">
+    Listening for UDP datagrams on <code>:1700</code>. Send one and watch it appear live —
+    the server pushes each frame straight to this table over a Server-Sent Events channel.
+  </p>
+
+  {#if frames.get().length === 0}
+    <p class="wait">Waiting for datagrams…</p>
+  {:else}
+    <table>
+      <thead>
+        <tr><th>DevEUI</th><th>Payload</th><th>From</th><th>At</th></tr>
+      </thead>
+      <tbody>
+        {#each frames.get() as f}
+          <tr>
+            <td>{f.devEUI}</td>
+            <td>{f.payload}</td>
+            <td>{f.from}</td>
+            <td>{new Date(f.at).toLocaleTimeString()}</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  {/if}
+</main>

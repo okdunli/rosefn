@@ -1,0 +1,14 @@
+{
+  "name": "rosespan-lora-gateway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "rosespan dev",
+    "build": "rosespan build",
+    "preview": "rosespan preview",
+    "serve": "rosespan serve"
+  },
+  "dependencies": {
+    "rosespan": "latest"
+  }
+}
