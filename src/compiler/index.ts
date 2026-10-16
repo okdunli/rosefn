@@ -4779,7 +4779,8 @@ async function renderPageStreamIsolated(pathname, write, shellOpen, clientTag) {
       write(shellOpen);
       let html;
       try {
-        html = extractHead(await route.render([], '')).html;
+        // nonce routes: an un-nonced inline <style> would be CSP-blocked, so strip to markers (applyHead re-injects under the nonce). Otherwise keep the head content in the streamed body so page/layout <style> applies on first paint (no FOUC) and no-JS routes stay styled.
+        html = routeClass(pathname).nonce ? extractHead(await route.render([], '')).html : await route.render([], '');
       } catch (err) {
         console.error('Rosefn: render failed for', pathname, err instanceof Error ? err.message : err);
         // F10: dev carries the real error in the body here too — the shell
@@ -4798,7 +4799,7 @@ async function renderPageStreamIsolated(pathname, write, shellOpen, clientTag) {
             + (stack ? '<pre style="margin:12px 0 0;color:#8f8f9a">' + stack + '</pre>' : '')
             + '</div>';
         }
-        html = errorPage ? extractHead(await errorPage([], '')).html + devDetail : '<h1>500</h1><p>Something went wrong rendering this page.</p>' + devDetail;
+        html = errorPage ? (routeClass(pathname).nonce ? extractHead(await errorPage([], '')).html : await errorPage([], '')) + devDetail : '<h1>500</h1><p>Something went wrong rendering this page.</p>' + devDetail;
       }
       write(html);
  // Csr: false ( auto since #29): a no-JS route's document ends here - no state script, no inlined bundle.
